@@ -1,0 +1,14 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+python-multipart>=0.0.9
+cryptography>=43
+pydicom>=3.0,<4
+numpy>=1.26
+pillow>=10.4
+pylibjpeg>=2.0
+pylibjpeg-libjpeg>=2.1
+pylibjpeg-openjpeg>=2.3
+requests>=2.32
+google-auth>=2.30
+paramiko>=3.4
+scp>=0.15

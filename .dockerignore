@@ -1,0 +1,9 @@
+.git
+**/__pycache__
+deploy
+.github
+tests
+data
+*.svb
+*recovery-key*.txt
+preview

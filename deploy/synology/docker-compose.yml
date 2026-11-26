@@ -1,0 +1,39 @@
+# ScanVault for Synology DSM 7.2+ (Container Manager > Project).
+# See deploy/synology/README.md for the step-by-step setup.
+services:
+  scanvault:
+    image: ghcr.io/ryanbyte1701/scanvault:latest
+    # Or build on the NAS from a copy of the repo instead of pulling:
+    # build: /volume1/docker/scanvault/src
+    container_name: scanvault
+    restart: unless-stopped
+    ports:
+      # NAS port 8765 -> container 8080. Avoid 5000/5001 (DSM) and 80/443.
+      - "8765:8080"
+    volumes:
+      # Encrypted vault: database, keystore, encrypted files. Nothing in here is
+      # readable without your encryption key or recovery key file.
+      - /volume1/docker/scanvault/data:/data
+    environment:
+      # Owner of /volume1/docker/scanvault/data. Find it over SSH with
+      # `id <your DSM user>`; the first DSM admin is usually 1026, group users = 100.
+      PUID: "1026"
+      PGID: "100"
+      TZ: America/New_York
+      # The HTTPS address you open ScanVault at through DSM's reverse proxy.
+      # Needed for the Google Drive / Box "Connect account" buttons.
+      SCANVAULT_PUBLIC_URL: https://scans.example.synology.me
+      SCANVAULT_COOKIE_SECURE: "auto"
+      SCANVAULT_MAX_UPLOAD_MB: "4096"
+      # Optional unattended unlock after NAS reboots (see README trade-offs):
+      # SCANVAULT_PASSPHRASE_FILE: /run/secrets/scanvault_passphrase
+    # volumes for the optional secret above:
+    #   - /volume1/docker/scanvault/secrets/passphrase.txt:/run/secrets/scanvault_passphrase:ro
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,28 @@
+services:
+  scanvault:
+    build: .
+    image: scanvault:latest
+    container_name: scanvault
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - scanvault-data:/data
+    environment:
+      # Public URL the browser uses, needed for Google/Box OAuth redirects
+      # when you are not on http://localhost:8080 (e.g. https://scans.example.com)
+      SCANVAULT_PUBLIC_URL: ${SCANVAULT_PUBLIC_URL:-}
+      SCANVAULT_MAX_UPLOAD_MB: ${SCANVAULT_MAX_UPLOAD_MB:-2048}
+      PUID: ${PUID:-10001}
+      PGID: ${PGID:-10001}
+      # Optional unattended unlock after restarts (see README trade-offs):
+      # SCANVAULT_PASSPHRASE_FILE: /run/secrets/scanvault_passphrase
+    # secrets:
+    #   - scanvault_passphrase
+
+volumes:
+  scanvault-data:
+
+# secrets:
+#   scanvault_passphrase:
+#     file: ./scanvault_passphrase.txt
