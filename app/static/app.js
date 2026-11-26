@@ -29,6 +29,16 @@ const API = window.SV_API || {
       x.send(form);
     });
   },
+  async render(id, { wc, ww, frame } = {}) {
+    const q = new URLSearchParams();
+    if (wc != null && ww != null) { q.set("wc", wc); q.set("ww", ww); }
+    if (frame != null) q.set("frame", frame);
+    const r = await fetch(`/api/files/${id}/render?${q}`, { credentials: "same-origin" });
+    if (!r.ok) { let d = {}; try { d = await r.json(); } catch {} const e = new Error(d.error || r.statusText); e.code = d.code; throw e; }
+    const h = k => r.headers.get(k), n = k => h(k) == null || h(k) === "" ? null : parseFloat(h(k));
+    return { url: URL.createObjectURL(await r.blob()), wc: n("x-window-center"), ww: n("x-window-width"), dc: n("x-default-center"), dw: n("x-default-width"),
+      min: n("x-min"), max: n("x-max"), frames: n("x-frames") || 1, frame: n("x-frame") || 0, rgb: h("x-rgb") === "1", modality: h("x-modality") || "" };
+  },
   fileUrl: (id, dl) => `/api/files/${id}/content${dl ? "?download=1" : ""}`,
   thumbUrl: id => `/api/files/${id}/thumbnail`,
   backupDownloadUrl: () => "/api/backups/download",
@@ -80,6 +90,9 @@ const I = {
   server: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/></svg>',
   restore: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>',
   shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>',
+  sun: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+  moon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
+  auto: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg>',
   x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
   dl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5M12 15V3"/></svg>',
 };
@@ -94,6 +107,37 @@ ${[0, 1, 2].map(i => `<g transform="translate(${44 + i * 152} 52)"><rect width="
 <path d="M30 140h68" stroke="#4fb5ad" stroke-width="2" opacity=".6"/><text x="10" y="18" fill="#6f8a8e" font-size="10" font-family="ui-monospace,monospace">${["CT", "MR", "XR"][i]}</text></g>`).join("")}
 <g transform="translate(404 196)"><circle r="34" fill="#0b5d63"/><rect x="-13" y="-4" width="26" height="20" rx="3" fill="#e9fbf8"/><path d="M-8 -4v-6a8 8 0 0 1 16 0v6" fill="none" stroke="#e9fbf8" stroke-width="3.4"/><circle cy="6" r="2.6" fill="#0b5d63"/></g>
 </svg>`;
+
+// ------------------------------------------------------------------ theme
+const DARK_SWATCHES = [["Teal night", "#0d1416"], ["Graphite", "#161718"], ["Pure black", "#000000"], ["Navy", "#0b1426"], ["Aubergine", "#1a1022"], ["Espresso", "#1a1411"]];
+const THEME = { theme: "system", dark_color: "#0d1416" };
+function hexToHsl(hex) {
+  const n = parseInt(hex.slice(1), 16), r = (n >> 16 & 255) / 255, g = (n >> 8 & 255) / 255, b = (n & 255) / 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2; let h = 0, s = 0;
+  if (mx !== mn) { const d = mx - mn; s = l > .5 ? d / (2 - mx - mn) : d / (mx + mn); h = mx === r ? (g - b) / d + (g < b ? 6 : 0) : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; h *= 60; }
+  return [h, s * 100, l * 100];
+}
+const hsl = (h, s, l) => `hsl(${h.toFixed(0)} ${s.toFixed(1)}% ${l.toFixed(1)}%)`;
+function applyTheme(p = THEME) {
+  Object.assign(THEME, p);
+  const root = document.documentElement;
+  if (THEME.theme === "system") delete root.dataset.theme; else root.dataset.theme = THEME.theme;
+  // Derive the dark palette from the chosen colour, kept dark enough for contrast.
+  let [h, s, l] = hexToHsl(THEME.dark_color || "#0d1416"); l = Math.min(l, 13); s = Math.min(s, 45);
+  const v = { "--d-bg": hsl(h, s, l), "--d-panel": hsl(h, s, l + 4.5), "--d-line": hsl(h, Math.min(s, 30), l + 12), "--d-soft": hsl(h, Math.min(s + 10, 50), l + 9), "--d-film": hsl(h, s, Math.max(0, l - 4)) };
+  for (const [k, val] of Object.entries(v)) root.style.setProperty(k, val);
+  const dark = THEME.theme === "dark" || (THEME.theme === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+  const meta = document.querySelector('meta[name="theme-color"]'); if (meta) meta.content = dark ? v["--d-panel"] : "#0b5d63";
+  try { localStorage.setItem("sv-theme", JSON.stringify({ theme: THEME.theme, dark_color: THEME.dark_color })); } catch {}
+}
+try { applyTheme(JSON.parse(localStorage.getItem("sv-theme") || "null") || THEME); } catch { applyTheme(); }
+matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => applyTheme());
+async function saveTheme(p) { applyTheme(p); try { await API.req("PUT", "/api/prefs", p); } catch {} }
+async function syncTheme() { try { applyTheme(await API.req("GET", "/api/prefs")); } catch {} }
+const themeIcon = () => THEME.theme === "dark" ? I.moon : THEME.theme === "light" ? I.sun : I.auto;
+const themeLabel = () => ({ system: "Theme: match device", light: "Theme: light", dark: "Theme: dark" })[THEME.theme];
+function cycleTheme() { const next = { system: "light", light: "dark", dark: "system" }[THEME.theme]; saveTheme({ theme: next }); $$("[data-theme-btn]").forEach(b => { b.innerHTML = themeIcon(); b.title = b.ariaLabel = themeLabel(); }); toast(themeLabel()); }
+document.body.insertAdjacentHTML("beforeend", `<svg width="0" height="0" style="position:absolute" aria-hidden="true"><filter id="svwl" color-interpolation-filters="sRGB"><feComponentTransfer><feFuncR type="linear" slope="1" intercept="0"/><feFuncG type="linear" slope="1" intercept="0"/><feFuncB type="linear" slope="1" intercept="0"/></feComponentTransfer></filter></svg>`);
 
 // ------------------------------------------------------------------ state + router
 const S = { status: null, patients: null, route: { name: "patients" } };
@@ -138,6 +182,7 @@ function render() {
   if (!st.setup_complete) return viewSetup();
   if (!st.authenticated) return viewLogin();
   if (!st.unlocked) return viewUnlock();
+  if (!S.themeSynced) { S.themeSynced = true; syncTheme(); }
   const r = S.route;
   const view = { patients: viewPatients, patient: viewPatient, study: viewStudy, backups: viewBackups, settings: viewSettings, upload: viewUploadPage }[r.name] || viewPatients;
   shell(r.name);
@@ -152,14 +197,15 @@ function shell(active) {
     <nav class="side" aria-label="Main">
       <div class="brand">${I.logo}<span>ScanVault</span></div>
       <div class="nav">${nav.map(([n, l, ic]) => `<a href="#/${n}" data-go="${n}" class="${on(n)}">${ic}${l}</a>`).join("")}</div>
-      <div class="foot"><span class="lockchip">${I.shield} Vault unlocked</span><span>Signed in as ${esc(S.status.username)}</span></div>
+      <div class="foot"><span class="lockchip">${I.shield} Vault unlocked</span><span>Signed in as ${esc(S.status.username)}</span><button class="btn ghost sm themebtn" data-theme-btn title="${themeLabel()}" aria-label="${themeLabel()}">${themeIcon()}</button></div>
     </nav>
     <main id="main"><div class="empty"><span class="spin"></span></div></main>
     <nav class="tabbar" aria-label="Main">${nav.map(([n, l, ic]) => `<a href="#/${n}" data-go="${n}" class="${on(n)}">${ic}<span>${l}</span></a>`).join("")}</nav>
   </div>`;
 }
 const main = () => $("#main");
-const mobileHead = () => `<div class="mobilehead"><div class="brand">${I.logo}<span>ScanVault</span></div><span class="lockchip">${I.shield} Unlocked</span></div>`;
+const mobileHead = () => `<div class="mobilehead"><div class="brand">${I.logo}<span>ScanVault</span></div><div class="row" style="gap:4px"><span class="lockchip">${I.shield} Unlocked</span><button class="btn ghost sm themebtn" data-theme-btn title="${themeLabel()}" aria-label="${themeLabel()}">${themeIcon()}</button></div></div>`;
+document.addEventListener("click", e => { if (e.target.closest("[data-theme-btn]")) cycleTheme(); });
 
 // ------------------------------------------------------------------ modal
 function modal(title, body, { wide = false, footer = "" } = {}) {
@@ -509,48 +555,213 @@ async function viewStudy(id) {
   $$(".tile", m).forEach(t => t.onclick = () => viewer(files, files.findIndex(f => f.id === t.dataset.f), () => viewStudy(id)));
 }
 
+const CT_PRESETS = [["Brain", 40, 80], ["Subdural", 75, 215], ["Stroke", 40, 40], ["Soft tissue", 50, 400], ["Mediastinum", 50, 350], ["Liver", 60, 160], ["Lung", -600, 1500], ["Bone", 400, 1800]];
+const seriesKey = f => f.kind === "dicom" ? (f.dicom?.series_uid || f.dicom?.series_description || "series") : null;
+
 function viewer(files, idx, refresh) {
-  let f = files[idx], zoom = 1, br = 100, ct = 100, inv = false, px = 0, py = 0;
-  const m = modal(f.filename, `<div class="viewer"><div class="stage" id="stage"></div><aside id="side"></aside></div>`, { wide: true });
+  const m = modal(files[idx].filename, `<div class="viewer">
+    <div class="stage" id="stage" tabindex="0" aria-label="Image. Drag to pan or adjust window, pinch or Ctrl+scroll to zoom.">
+      <div class="hud" id="hud"></div>
+      <div class="vtools" id="vtools"></div>
+    </div><aside id="side"></aside></div>`, { wide: true });
   $(".modal .body", m.el).style.padding = "0";
-  const draw = () => {
-    f = files[idx]; zoom = 1; px = py = 0;
+  const stage = $("#stage", m.el), modalEl = $(".modal", m.el);
+  // view state survives moving between slices of one series
+  const V = { zoom: 1, px: 0, py: 0, tool: matchMedia("(pointer:coarse)").matches ? "pan" : "wl", inv: false, c: null, w: null, base: null, frame: null, seriesOf: null };
+  let f, im, info = null, renderSeq = 0, lastUrl = null, settleT = null;
+
+  const series = () => { const k = seriesKey(f); return k ? files.filter(x => seriesKey(x) === k) : [f]; };
+  const isGray = () => info && !info.rgb;
+  const units = () => info && info.server ? (info.modality === "CT" ? "HU" : "") : "";
+
+  function filterFor() {
+    // Live window/level applied in the browser relative to the image as rendered (base).
+    let s = 1, i = 0;
+    if (isGray() && V.base && V.c != null) {
+      const { c: c0, w: w0 } = V.base, c1 = V.c, w1 = Math.max(1, V.w);
+      s = w0 / w1; i = (c0 - c1) / w1 + 0.5 - w0 / (2 * w1);
+    }
+    if (V.inv) { s = -s; i = 1 - i; }
+    ["R", "G", "B"].forEach(ch => { const fn = $("#svwl feFunc" + ch); fn.setAttribute("slope", s.toFixed(5)); fn.setAttribute("intercept", i.toFixed(5)); });
+  }
+  function apply() {
+    if (im) { im.style.transform = `translate(${V.px}px,${V.py}px) scale(${V.zoom})`; im.style.filter = "url(#svwl)"; }
+    filterFor();
+    const ser = series(), si = ser.indexOf(f);
+    $("#hud", m.el).innerHTML = [
+      isGray() && V.c != null ? `<span>W ${fmtN(V.w)} · L ${fmtN(V.c)}${units() ? " " + units() : ""}</span>` : "",
+      ser.length > 1 ? `<span>Image ${si + 1} / ${ser.length}</span>` : "",
+      info && info.frames > 1 ? `<span>Frame ${V.frame + 1} / ${info.frames}</span>` : "",
+      `<span>${Math.round(V.zoom * 100)}%</span>`].filter(Boolean).join("");
+    const wi = $("#vw", m.el), li = $("#vl", m.el);
+    if (wi && document.activeElement !== wi) wi.value = V.w != null ? fmtN(V.w) : "";
+    if (li && document.activeElement !== li) li.value = V.c != null ? fmtN(V.c) : "";
+    $$("[data-tool]", m.el).forEach(b => b.classList.toggle("on", b.dataset.tool === V.tool));
+    const ib = $("[data-act=inv]", m.el); if (ib) ib.classList.toggle("on", V.inv);
+  }
+  const fmtN = n => Math.abs(n) >= 100 ? Math.round(n) : Math.round(n * 10) / 10;
+
+  async function rerender(force) {
+    // Ask the server for a true window/level render from the original pixel values.
+    if (!info || !info.server || !isGray()) return;
+    if (!force && V.base && V.base.c === V.c && V.base.w === V.w && V.base.frame === V.frame) return;
+    const seq = ++renderSeq, fid = f.id;
+    try {
+      const r = await API.render(fid, { wc: V.c, ww: V.w, frame: V.frame });
+      if (seq !== renderSeq || fid !== f.id) return;
+      await new Promise(res => { const t = new Image(); t.onload = res; t.onerror = res; t.src = r.url; });
+      if (seq !== renderSeq) return;
+      im.src = r.url; if (lastUrl && lastUrl !== r.url && lastUrl.startsWith("blob:")) URL.revokeObjectURL(lastUrl); lastUrl = r.url;
+      V.base = { c: r.wc, w: r.ww, frame: V.frame }; apply();
+    } catch (e) { /* keep the client-side approximation */ }
+  }
+  const settle = () => { clearTimeout(settleT); settleT = setTimeout(() => rerender(), 220); };
+  function setWL(c, w, now) { V.c = c; V.w = Math.max(1, w); apply(); now ? rerender() : settle(); }
+
+  async function load(keepView) {
+    f = files[idx];
     $("header h2", m.el).textContent = f.filename;
-    const stage = $("#stage", m.el);
-    const isImg = f.kind === "image" || f.kind === "dicom";
+    const sameSeries = keepView && V.seriesOf && V.seriesOf === seriesKey(f);
+    if (!sameSeries) Object.assign(V, { zoom: 1, px: 0, py: 0, c: null, w: null, inv: false });
+    V.base = null; V.frame = null; info = null; im = null;
+    stage.querySelectorAll("img,iframe,.empty").forEach(e => e.remove());
     const rep = API.reportImage && API.reportImage(f);
-    if (rep) stage.innerHTML = `<img id="im" alt="${esc(f.filename)}" src="${esc(rep)}" style="background:#fff">`;
-    else if (f.kind === "report" && (f.content_type || "").includes("pdf")) stage.innerHTML = `<iframe title="${esc(f.filename)}" src="${esc(API.fileUrl(f.id))}"></iframe>`;
-    else if (isImg && (f.has_thumbnail || f.kind === "image")) stage.innerHTML = `<img id="im" alt="${esc(f.filename)}" src="${esc(f.kind === "dicom" ? (API.previewUrl || API.thumbUrl)(f.id) : API.fileUrl(f.id))}"><div class="zoombar"><button data-z="-1" aria-label="Zoom out">−</button><button data-z="0" aria-label="Reset">1:1</button><button data-z="1" aria-label="Zoom in">+</button></div>`;
-    else stage.innerHTML = `<div class="empty" style="color:#9fb3b6">${I.file}<p>No preview for this file type.${f.kind === "dicom" ? " The DICOM is stored intact; open it in a DICOM viewer." : ""}</p></div>`;
+    let src = null;
+    if (rep) src = rep;
+    else if (f.kind === "report" && (f.content_type || "").includes("pdf")) {
+      stage.insertAdjacentHTML("afterbegin", `<iframe title="${esc(f.filename)}" src="${esc(API.fileUrl(f.id))}"></iframe>`);
+    } else if (f.kind === "dicom") {
+      try {
+        const r = await API.render(f.id, { wc: sameSeries ? V.c : null, ww: sameSeries ? V.w : null });
+        info = { server: true, rgb: r.rgb, frames: r.frames, modality: r.modality, min: r.min, max: r.max, dc: r.dc, dw: r.dw };
+        V.frame = r.frame; src = r.url; lastUrl = r.url;
+        if (!r.rgb) { V.base = { c: r.wc, w: r.ww, frame: r.frame }; if (V.c == null) { V.c = r.wc; V.w = r.ww; } }
+      } catch (e) {
+        if (f.has_thumbnail) { src = (API.previewUrl || API.thumbUrl)(f.id); info = { server: false, rgb: false, frames: 1, min: 0, max: 255, dc: 128, dw: 256 }; }
+      }
+    } else if (f.kind === "image") {
+      src = API.fileUrl(f.id); info = { server: false, rgb: false, frames: 1, min: 0, max: 255, dc: 128, dw: 256 };
+    }
+    if (info && !info.server) { V.base = { c: 128, w: 256 }; if (!sameSeries || V.c == null) { V.c = 128; V.w = 256; } }
+    if (src) { stage.insertAdjacentHTML("afterbegin", `<img id="im" alt="${esc(f.filename)}" src="${esc(src)}" draggable="false">`); im = $("#im", m.el); if (rep) im.style.background = "#fff"; }
+    else if (!stage.querySelector("iframe")) stage.insertAdjacentHTML("afterbegin", `<div class="empty" style="color:#9fb3b6">${I.file}<p>No preview for this file type.${f.kind === "dicom" ? " The DICOM is stored intact; download it for a full DICOM viewer." : ""}</p></div>`);
+    V.seriesOf = seriesKey(f);
+    drawTools(); drawSide(); apply();
+  }
+
+  function drawTools() {
+    const img = !!im && !(API.reportImage && API.reportImage(f));
+    const presets = info && info.server && isGray() ? [["Default", info.dc, info.dw], ["Full range", (info.min + info.max) / 2, Math.max(1, info.max - info.min)], ...(info.modality === "CT" ? CT_PRESETS : [])] : [];
+    $("#vtools", m.el).innerHTML = img ? `
+      <div class="vseg" role="group" aria-label="Drag tool"><button data-tool="pan" title="Drag to pan (P)">Pan</button><button data-tool="wl" title="Drag to adjust window/level (W)">W/L</button></div>
+      ${presets.length ? `<select id="pre" aria-label="Window preset"><option value="">Presets</option>${presets.map(([n, c, w], i) => `<option value="${i}">${esc(n)}${n === "Default" || n === "Full range" ? "" : ` ${c}/${w}`}</option>`).join("")}</select>` : ""}
+      <button data-act="inv" title="Invert (I)">Invert</button>
+      <button data-act="zout" aria-label="Zoom out">−</button><button data-act="zin" aria-label="Zoom in">+</button>
+      <button data-act="reset" title="Reset view (0)">Reset</button>
+      ${document.fullscreenEnabled ? `<button data-act="fs" title="Fullscreen (F)">Full screen</button>` : ""}` : "";
+    $$("[data-tool]", m.el).forEach(b => b.onclick = () => { V.tool = b.dataset.tool; apply(); });
+    const pre = $("#pre", m.el); if (pre) pre.onchange = () => { const p = presets[+pre.value]; if (p) setWL(p[1], p[2], true); pre.value = ""; };
+    $$("[data-act]", m.el).forEach(b => b.onclick = () => act(b.dataset.act));
+  }
+  function act(a) {
+    if (a === "inv") V.inv = !V.inv;
+    if (a === "zin") zoomAt(1.4);
+    if (a === "zout") zoomAt(1 / 1.4);
+    if (a === "reset") { V.zoom = 1; V.px = V.py = 0; V.inv = false; if (info) { setWL(info.server ? info.dc : 128, info.server ? info.dw : 256, true); return; } }
+    if (a === "fs") { (document.fullscreenElement ? document.exitFullscreen() : modalEl.requestFullscreen()).catch(() => toast("Full screen isn't allowed here")); return; }
+    apply();
+  }
+  function zoomAt(k, cx, cy) {
+    const r = stage.getBoundingClientRect();
+    const x = (cx ?? r.left + r.width / 2) - (r.left + r.width / 2), y = (cy ?? r.top + r.height / 2) - (r.top + r.height / 2);
+    const nz = Math.max(.25, Math.min(16, V.zoom * k)), q = nz / V.zoom;
+    V.px = x - (x - V.px) * q; V.py = y - (y - V.py) * q; V.zoom = nz; apply();
+  }
+  function step(d) {
+    if (info && info.frames > 1) { V.frame = Math.max(0, Math.min(info.frames - 1, V.frame + d)); rerender(true); apply(); return; }
+    const ser = series(), si = ser.indexOf(f), n = ser[si + d];
+    if (n) { idx = files.indexOf(n); load(true); }
+  }
+
+  function drawSide() {
     const d = f.dicom || {};
     const rows = [["Type", f.kind === "dicom" ? "DICOM" : f.kind === "report" ? "Report" : f.content_type], ["Size", fmtBytes(f.size_bytes)], ["Uploaded", fmtDT(f.uploaded_at)],
       ["Modality", d.modality], ["Study date", d.study_date && fmtDate(d.study_date)], ["Series", d.series_description], ["Body part", d.body_part], ["Institution", d.institution],
       ["Instance", d.instance_number], ["Matrix", d.rows && `${d.rows} × ${d.columns}`], ["Frames", d.frames !== "1" && d.frames], ["DICOM name", d.patient_name], ["SHA-256", f.sha256 && f.sha256.slice(0, 16) + "…"]].filter(r => r[1]);
+    const ser = series();
     $("#side", m.el).innerHTML = `<div class="row"><button class="btn sm" id="prev" ${idx ? "" : "disabled"}>‹ Prev</button><span class="muted small">${idx + 1} / ${files.length}</span><button class="btn sm" id="next" ${idx < files.length - 1 ? "" : "disabled"}>Next ›</button></div>
-      ${isImg ? `<div class="sliders"><label>Brightness<input type="range" min="40" max="220" value="100" id="br"></label><label>Contrast<input type="range" min="40" max="300" value="100" id="ct"></label><label class="check"><input type="checkbox" id="inv"> Invert</label></div>` : ""}
+      ${im && isGray() ? `<div class="grid2 wl"><label class="f">Window${units() ? ` (${units()})` : ""}<input id="vw" type="number" step="any" inputmode="decimal"></label><label class="f">Level${units() ? ` (${units()})` : ""}<input id="vl" type="number" step="any" inputmode="decimal"></label></div>` : ""}
+      ${ser.length > 1 ? `<label class="f small">Image in series<input type="range" id="slc" min="1" max="${ser.length}" value="${ser.indexOf(f) + 1}"></label>` : ""}
+      ${info && info.frames > 1 ? `<label class="f small">Frame<input type="range" id="frm" min="1" max="${info.frames}" value="${V.frame + 1}"></label>` : ""}
+      ${im && !(API.reportImage && API.reportImage(f)) ? `<p class="small muted">${matchMedia("(pointer:coarse)").matches ? "Pinch to zoom, double-tap to zoom in. Pick <b>W/L</b> and drag: sideways for window, up/down for level." : "Drag with <b>W/L</b>: sideways = window, up/down = level. Ctrl+scroll or pinch zooms, scroll steps through slices, double-click zooms. Keys: ← → files, ↑ ↓ slices, + − 0, I, W, P, F."}</p>` : ""}
       <dl>${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
       <div class="row"><a class="btn sm" href="${esc(API.fileUrl(f.id, 1))}" download="${esc(f.filename)}">${I.dl} Original</a><button class="btn sm danger" id="del">Delete</button></div>
       <p class="small muted">Stored encrypted (AES-256-GCM). Decrypted only while you view it.</p>`;
-    const im = $("#im", m.el);
-    const apply = () => { if (im) { im.style.filter = `brightness(${br}%) contrast(${ct}%)${inv ? " invert(1)" : ""}`; im.style.transform = `translate(${px}px,${py}px) scale(${zoom})`; } };
-    br = 100; ct = 100; inv = false; apply();
-    if (isImg) { $("#br", m.el).oninput = e => { br = +e.target.value; apply(); }; $("#ct", m.el).oninput = e => { ct = +e.target.value; apply(); }; $("#inv", m.el).onchange = e => { inv = e.target.checked; apply(); }; }
-    $$("[data-z]", m.el).forEach(b => b.onclick = () => { const z = +b.dataset.z; zoom = z ? Math.max(.5, Math.min(8, zoom * (z > 0 ? 1.4 : 1 / 1.4))) : 1; if (!z) px = py = 0; apply(); });
-    if (im) {
-      stage.onwheel = e => { e.preventDefault(); zoom = Math.max(.5, Math.min(8, zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15))); apply(); };
-      let drag = null;
-      stage.onpointerdown = e => { if (e.target.closest("button")) return; drag = [e.clientX - px, e.clientY - py]; stage.setPointerCapture(e.pointerId); };
-      stage.onpointermove = e => { if (drag) { px = e.clientX - drag[0]; py = e.clientY - drag[1]; apply(); } };
-      stage.onpointerup = () => drag = null;
-    }
-    $("#prev", m.el).onclick = () => { idx--; draw(); };
-    $("#next", m.el).onclick = () => { idx++; draw(); };
+    $("#prev", m.el).onclick = () => { idx--; load(true); };
+    $("#next", m.el).onclick = () => { idx++; load(true); };
+    const wi = $("#vw", m.el), li = $("#vl", m.el);
+    if (wi) { const upd = () => { const w = parseFloat(wi.value), c = parseFloat(li.value); if (!isNaN(w) && !isNaN(c)) setWL(c, w, true); }; wi.onchange = upd; li.onchange = upd; }
+    const slc = $("#slc", m.el); if (slc) slc.oninput = () => { const n = ser[slc.value - 1]; if (n && n !== f) { idx = files.indexOf(n); load(true); } };
+    const frm = $("#frm", m.el); if (frm) frm.oninput = () => { V.frame = frm.value - 1; apply(); clearTimeout(settleT); settleT = setTimeout(() => rerender(true), 120); };
     $("#del", m.el).onclick = async () => { if (await confirmBox("Delete file?", `Delete ${esc(f.filename)} from this server?`)) { await API.req("DELETE", `/api/files/${f.id}`); m.close(); toast("Deleted"); refresh(); } };
+  }
+
+  // ---- pointer input: pan, W/L drag, pinch zoom, double-tap
+  const pts = new Map(); let drag = null, pinch = null, lastTap = 0;
+  stage.addEventListener("pointerdown", e => {
+    if (!im || e.target.closest(".vtools")) return;
+    stage.setPointerCapture(e.pointerId); pts.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      pinch = { d: Math.hypot(a[0] - b[0], a[1] - b[1]), z: V.zoom, mx: (a[0] + b[0]) / 2, my: (a[1] + b[1]) / 2, px: V.px, py: V.py }; drag = null; return;
+    }
+    const now = Date.now();
+    if (now - lastTap < 300) { V.zoom > 1.05 ? (V.zoom = 1, V.px = V.py = 0, apply()) : zoomAt(2.5, e.clientX, e.clientY); lastTap = 0; return; }
+    lastTap = now;
+    const tool = e.button === 2 || e.shiftKey ? "wl" : e.button === 1 ? "pan" : V.tool;
+    drag = { x: e.clientX, y: e.clientY, px: V.px, py: V.py, c: V.c, w: V.w, tool };
+  });
+  stage.addEventListener("pointermove", e => {
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pinch && pts.size >= 2) {
+      const [a, b] = [...pts.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+      V.zoom = Math.max(.25, Math.min(16, pinch.z * d / pinch.d)); V.px = pinch.px + (a[0] + b[0]) / 2 - pinch.mx; V.py = pinch.py + (a[1] + b[1]) / 2 - pinch.my; apply(); return;
+    }
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (drag.tool === "wl" && isGray() && drag.w != null) {
+      const sens = Math.max(.5, ((info.max - info.min) || 256) / 700);
+      V.w = Math.max(1, drag.w + dx * sens); V.c = drag.c - dy * sens; apply(); settle();
+    } else { V.px = drag.px + dx; V.py = drag.py + dy; apply(); }
+  });
+  const up = e => { pts.delete(e.pointerId); if (pts.size < 2) pinch = null; if (!pts.size) drag = null; };
+  stage.addEventListener("pointerup", up); stage.addEventListener("pointercancel", up);
+  stage.addEventListener("contextmenu", e => { if (im) e.preventDefault(); });
+  stage.addEventListener("wheel", e => {
+    if (!im) return; e.preventDefault();
+    const stack = series().length > 1 || (info && info.frames > 1);
+    if (e.ctrlKey || e.metaKey || !stack) zoomAt(Math.exp(-Math.max(-60, Math.min(60, e.deltaY)) * (e.ctrlKey ? .01 : .004)), e.clientX, e.clientY);
+    else { stage._acc = (stage._acc || 0) + e.deltaY; if (Math.abs(stage._acc) >= 40) { step(Math.sign(stage._acc)); stage._acc = 0; } }
+  }, { passive: false });
+  const key = e => {
+    if (!document.body.contains(m.el)) return document.removeEventListener("keydown", key);
+    if (e.target.matches("input,select,textarea")) return;
+    const k = e.key;
+    if (k === "ArrowRight" && idx < files.length - 1) { idx++; load(true); }
+    else if (k === "ArrowLeft" && idx > 0) { idx--; load(true); }
+    else if (k === "ArrowDown") { e.preventDefault(); step(1); }
+    else if (k === "ArrowUp") { e.preventDefault(); step(-1); }
+    else if (k === "+" || k === "=") zoomAt(1.25);
+    else if (k === "-") zoomAt(1 / 1.25);
+    else if (k === "0") act("reset");
+    else if (k === "i" || k === "I") act("inv");
+    else if (k === "w" || k === "W") { V.tool = "wl"; apply(); }
+    else if (k === "p" || k === "P") { V.tool = "pan"; apply(); }
+    else if (k === "f" || k === "F") act("fs");
   };
-  const key = e => { if (!document.body.contains(m.el)) return document.removeEventListener("keydown", key); if (e.key === "ArrowRight" && idx < files.length - 1) { idx++; draw(); } if (e.key === "ArrowLeft" && idx > 0) { idx--; draw(); } };
   document.addEventListener("keydown", key);
-  draw();
+  load(false);
 }
 
 // ------------------------------------------------------------------ upload page (mobile-first)
@@ -689,6 +900,12 @@ async function viewSettings() {
   m.innerHTML = `${mobileHead()}<div class="top"><div><h1>Settings</h1></div></div>
   <div class="settings">
     ${st.recovery_key_saved === false ? `<div class="note">${I.warn}<div>You haven't confirmed that you saved your recovery key file. Without it, a forgotten encryption key means your backups can't be opened.</div></div>` : ""}
+    <div class="card pad stack"><h2>Appearance</h2>
+      <div class="seg" id="thm" role="radiogroup" aria-label="Theme">${[["system", "Match device"], ["light", "Light"], ["dark", "Dark"]].map(([k, l]) => `<button type="button" role="radio" data-t="${k}" class="${THEME.theme === k ? "on" : ""}" aria-checked="${THEME.theme === k}">${l}</button>`).join("")}</div>
+      <div><p class="small" style="font-weight:600;margin-bottom:8px">Dark theme color</p>
+        <div class="swatches" role="radiogroup" aria-label="Dark theme color">${DARK_SWATCHES.map(([n, c]) => `<button type="button" class="sw ${THEME.dark_color === c ? "on" : ""}" data-c="${c}" role="radio" aria-checked="${THEME.dark_color === c}" title="${n}"><i style="background:${c}"></i><span>${n}</span></button>`).join("")}
+          <label class="sw ${DARK_SWATCHES.some(([, c]) => c === THEME.dark_color) ? "" : "on"}" title="Custom"><input type="color" id="cc" value="${esc(THEME.dark_color)}"><span>Custom</span></label></div>
+        <p class="small muted" style="margin-top:8px">Very bright picks are darkened so text stays readable. Saved to your account, so it follows you to other devices.</p></div></div>
     <div class="card pad stack"><h2>Encryption</h2>
       <div class="facts"><span>Vault <b class="mono">${esc(st.vault_id)}</b></span><span>Key fingerprint <b class="mono">${esc(st.fingerprint)}</b></span></div>
       <p class="small muted">AES-256-GCM for every file, preview and patient record. Your encryption key is stretched with scrypt and only unlocks the master key, which lives in memory while the vault is unlocked.</p>
@@ -705,6 +922,11 @@ async function viewSettings() {
         <li>Losing both the encryption key and the recovery key file makes the data unrecoverable. That is by design.</li></ul></div>
     <p class="small muted">ScanVault ${esc(st.version)}</p>
   </div>`;
+  $$("#thm button").forEach(b => b.onclick = () => { saveTheme({ theme: b.dataset.t }); viewSettings(); });
+  const pickDark = c => { saveTheme({ dark_color: c, theme: THEME.theme === "light" ? "dark" : THEME.theme }); };
+  $$(".sw[data-c]").forEach(b => b.onclick = () => { pickDark(b.dataset.c); viewSettings(); });
+  $("#cc").oninput = e => pickDark(e.target.value);
+  $("#cc").onchange = () => viewSettings();
   $("#rk").onclick = () => {
     const mm = modal("Download recovery key", `<form class="form" id="f"><p class="small">Enter your encryption key to download the recovery key file again.</p><label class="f">Encryption key<input name="k" type="password" autocomplete="off" required></label><p class="err" id="err"></p></form>`, { footer: `<button class="btn" data-close>Cancel</button><button class="btn primary" form="f">Download</button>` });
     $("#f", mm.el).onsubmit = async e => { e.preventDefault(); try { const t = await API.req("POST", "/api/vault/recovery-key", { passphrase: e.target.k.value }); saveText("scanvault-recovery-key.txt", t); await API.req("POST", "/api/vault/recovery-key/confirm", { recovery_key: t }); mm.close(); toast("Recovery key downloaded"); } catch (er) { $("#err", mm.el).textContent = er.message; } };

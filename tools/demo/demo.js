@@ -114,7 +114,7 @@ const bname = d => "scanvault-backup-" + new Date(now - d * 86400000).toISOStrin
 [[0.1, 1], [0.3, 0], [0.35, 1], [1.3, 0], [1.35, 1], [2.3, 0]].forEach(([d, t]) => db.runs.push({ id: id(), target_id: db.targets[t].id, target_name: db.targets[t].name, target_type: db.targets[t].type, started_at: iso(d), finished_at: iso(d), status: "ok", message: `Uploaded ${bname(d)} (${size0().toLocaleString()} bytes)`, size: Math.round(size0() * 1.002), filename: bname(d) }));
 db.runs.splice(4, 0, { id: id(), target_id: db.targets[1].id, target_name: "Home NAS", target_type: "sftp", started_at: iso(1.6), finished_at: iso(1.6), status: "error", message: "SSH connection failed: timed out (NAS was asleep)", size: null, filename: bname(1.6) });
 
-const state = { setup: false, authed: false, unlocked: false, passphrase: null, recovery: null, saved: false, vault_id: "SV-7F3A91C2", fp: "8C1E-55D0-A7F2-0B94" };
+const state = { prefs: { theme: "system", dark_color: "#0d1416" }, setup: false, authed: false, unlocked: false, passphrase: null, recovery: null, saved: false, vault_id: "SV-7F3A91C2", fp: "8C1E-55D0-A7F2-0B94" };
 function recoveryText() {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; const a = new Uint8Array(58); crypto.getRandomValues(a);
   const k = [...a].map(x => chars[x % 32]).join("").replace(/(.{4})/g, "$1 ").trim();
@@ -159,6 +159,7 @@ async function req(method, path, body) {
     else if (state.passphrase && body.passphrase !== state.passphrase) err(400, "Wrong encryption key");
     state.unlocked = true; return { unlocked: true };
   }
+  if (url === "/api/prefs") { if (method === "PUT") Object.assign(state.prefs, body); return { ...state.prefs }; }
   if (url === "/api/vault/lock") { state.unlocked = false; return { unlocked: false }; }
   if (url === "/api/vault/recovery-key") { if (state.passphrase && body.passphrase !== state.passphrase) err(400, "Wrong encryption key"); return state.recovery || recoveryText(); }
   if (url === "/api/vault/recovery-key/confirm") { if (body.recovery_key && !/BEGIN SCANVAULT RECOVERY KEY/i.test(body.recovery_key)) err(400, "That file isn't a ScanVault recovery key"); state.saved = !!body.recovery_key || state.saved; return { ok: true }; }
@@ -258,9 +259,43 @@ async function upload(path, form, onProgress) {
   return url.includes("/import") ? { files: out, skipped, studies: [] } : path.includes("format=full") ? { files: out, skipped } : out;
 }
 
+// Window/level on the synthetic images: gray levels are mapped to plausible
+// modality values (HU for CT) so presets like Lung and Bone behave as in the app.
+const HU = [[0, -1000], [20, -820], [60, -120], [110, 40], [160, 80], [200, 400], [255, 1600]];
+const toHU = v => { for (let i = 1; i < HU.length; i++) if (v <= HU[i][0]) { const [a, x] = HU[i - 1], [b, y] = HU[i]; return x + (v - a) / (b - a) * (y - x); } return 1600; };
+const LUT = new Float32Array(256).map((_, v) => toHU(v));
+const pixCache = {};
+function demoPixels(f) {
+  if (pixCache[f.id]) return Promise.resolve(pixCache[f.id]);
+  return new Promise(res => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement("canvas"); c.width = img.width; c.height = img.height;
+      const g = c.getContext("2d"); g.drawImage(img, 0, 0);
+      const d = g.getImageData(0, 0, c.width, c.height).data, n = c.width * c.height, v = new Float32Array(n);
+      const ct = f._img[0] === "CT" || f._img[0] === "HEAD";
+      let mn = Infinity, mx = -Infinity;
+      for (let i = 0; i < n; i++) { const x = ct ? LUT[d[i * 4]] : d[i * 4] * 12; v[i] = x; if (x < mn) mn = x; if (x > mx) mx = x; }
+      const dc = ct ? (f._img[0] === "HEAD" ? 40 : 40) : 1400, dw = ct ? (f._img[0] === "HEAD" ? 80 : 400) : 2600;
+      res(pixCache[f.id] = { v, w: c.width, h: c.height, min: mn, max: mx, dc, dw, modality: ct ? "CT" : f.dicom?.modality || "MR" });
+    };
+    img.src = scan(f._img[0], f._img[1], 640);
+  });
+}
+async function render(fid, { wc, ww } = {}) {
+  const f = fileById(fid);
+  if (!f._img) throw new Error("not renderable");
+  const P = await demoPixels(f), c = wc ?? P.dc, w = Math.max(1, ww ?? P.dw);
+  const cv = document.createElement("canvas"); cv.width = P.w; cv.height = P.h;
+  const g = cv.getContext("2d"), out = g.createImageData(P.w, P.h), o = out.data, lo = c - .5 - (w - 1) / 2, k = 255 / (w - 1);
+  for (let i = 0; i < P.v.length; i++) { let y = (P.v[i] - lo) * k; y = y < 0 ? 0 : y > 255 ? 255 : y; o[i * 4] = o[i * 4 + 1] = o[i * 4 + 2] = y; o[i * 4 + 3] = 255; }
+  g.putImageData(out, 0, 0);
+  return { url: cv.toDataURL("image/jpeg", .9), wc: c, ww: w, dc: P.dc, dw: P.dw, min: P.min, max: P.max, frames: 1, frame: 0, rgb: false, modality: P.modality };
+}
+
 const fileById = fid => db.files.find(f => f.id === fid) || {};
 window.SV_API = {
-  demo: true, req, upload,
+  demo: true, req, upload, render,
   thumbUrl: fid => { const f = fileById(fid); return f._blob || (f._img ? scan(f._img[0], f._img[1], 192) : ""); },
   previewUrl: fid => { const f = fileById(fid); return f._blob || (f._img ? scan(f._img[0], f._img[1], 768) : ""); },
   fileUrl: fid => { const f = fileById(fid); return f._blob || (f._img ? scan(f._img[0], f._img[1], 768) : "#"); },

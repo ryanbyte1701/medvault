@@ -144,3 +144,76 @@ def _jpeg(im) -> bytes:
     buf = io.BytesIO()
     im.save(buf, "JPEG", quality=85)
     return buf.getvalue()
+
+
+# ------------------------------------------------------------------ window/level rendering
+
+def dicom_pixels(path: Path, frame: int | None = None):
+    """Decode a DICOM to (array in modality units, info). For RGB returns uint8 HxWx3."""
+    import numpy as np
+    import pydicom
+
+    ds = pydicom.dcmread(str(path), force=True)
+    arr = ds.pixel_array
+    nframes = int(ds.get("NumberOfFrames", 1) or 1)
+    photometric = str(ds.get("PhotometricInterpretation", "MONOCHROME2"))
+    info = {"frames": nframes, "photometric": photometric, "rgb": False}
+    if nframes > 1:
+        f = nframes // 2 if frame is None else max(0, min(nframes - 1, frame))
+        arr = arr[f]
+        info["frame"] = f
+    if photometric in ("RGB", "YBR_FULL", "YBR_FULL_422") or (arr.ndim == 3 and arr.shape[-1] == 3):
+        if photometric.startswith("YBR"):
+            from pydicom.pixels import convert_color_space
+
+            arr = convert_color_space(arr, photometric, "RGB")
+        info["rgb"] = True
+        return arr.astype("uint8"), info
+    try:
+        from pydicom.pixels import apply_modality_lut
+
+        arr = apply_modality_lut(arr, ds)
+    except Exception:
+        pass
+    arr = arr.astype("float32")
+    wc, ww = ds.get("WindowCenter"), ds.get("WindowWidth")
+    try:
+        wc = float(wc[0] if isinstance(wc, (list, pydicom.multival.MultiValue)) else wc)
+        ww = float(ww[0] if isinstance(ww, (list, pydicom.multival.MultiValue)) else ww)
+    except Exception:
+        wc = ww = None
+    if not ww or ww <= 1:
+        lo, hi = (float(x) for x in np.percentile(arr, (0.5, 99.5)))
+        if hi <= lo:
+            lo, hi = float(arr.min()), float(arr.max()) + 1
+        wc, ww = (lo + hi) / 2, hi - lo
+    info.update(
+        default_center=round(wc, 2),
+        default_width=round(ww, 2),
+        min=float(arr.min()),
+        max=float(arr.max()),
+        modality=str(ds.get("Modality", "")),
+    )
+    return arr, info
+
+
+def render_window(arr, info: dict, center: float | None, width: float | None, invert: bool = False, max_size: int = 2048) -> bytes:
+    import numpy as np
+    from PIL import Image
+
+    if info.get("rgb"):
+        im = Image.fromarray(arr, "RGB")
+        if invert:
+            from PIL import ImageOps
+
+            im = ImageOps.invert(im)
+    else:
+        c = info["default_center"] if center is None else center
+        w = max(1.0, info["default_width"] if width is None else width)
+        # DICOM PS3.3 C.11.2.1.2 linear VOI function
+        out = np.clip(((arr - (c - 0.5)) / (w - 1) + 0.5), 0, 1) * 255
+        if (info.get("photometric") == "MONOCHROME1") != bool(invert):
+            out = 255 - out
+        im = Image.fromarray(out.astype("uint8"), "L")
+    im.thumbnail((max_size, max_size))
+    return _jpeg(im)

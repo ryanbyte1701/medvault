@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import zipfile
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -833,6 +834,91 @@ def file_thumb(fid: str, request: Request):
     if not row["has_preview"]:
         raise ApiError(404, "No thumbnail for this file")
     return StreamingResponse(_stream(store.preview_path(fid), master, f"preview:{fid}".encode()), media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+
+
+_pix_cache: "OrderedDict[tuple, tuple]" = OrderedDict()
+_pix_lock = threading.Lock()
+PIX_CACHE_BYTES = int(os.environ.get("SCANVAULT_RENDER_CACHE_MB", "256")) * 1024 * 1024
+
+
+def _decoded(fid: str, master: bytes, frame: int | None):
+    """Decrypt + decode a DICOM, keeping a few recent ones in memory (never on disk)."""
+    key = (fid, frame)
+    with _pix_lock:
+        if key in _pix_cache:
+            _pix_cache.move_to_end(key)
+            return _pix_cache[key]
+    fd, tmp = tempfile.mkstemp(dir=store.tmp_dir)
+    try:
+        with os.fdopen(fd, "wb") as out, open(store.blob_path(fid), "rb") as src:
+            crypto.decrypt_stream(master, src, out, f"file:{fid}".encode())
+        val = media.dicom_pixels(Path(tmp), frame)
+    finally:
+        os.unlink(tmp)
+    with _pix_lock:
+        _pix_cache[key] = val
+        while sum(v[0].nbytes for v in _pix_cache.values()) > PIX_CACHE_BYTES and len(_pix_cache) > 1:
+            _pix_cache.popitem(last=False)
+    return val
+
+
+@app.get("/api/files/{fid}/render")
+async def file_render(fid: str, request: Request, wc: Optional[float] = None, ww: Optional[float] = None, frame: Optional[int] = None, invert: int = 0, size: int = 2048):
+    """Render a DICOM image with a window center/width in modality units (HU for CT).
+    Response headers report the window used, the file's default and its value range."""
+    master = data_access(request)
+    row = _file_row(fid)
+    if row["kind"] != "dicom":
+        raise ApiError(400, "Only DICOM files can be rendered with window/level")
+    try:
+        arr, info = await asyncio.to_thread(_decoded, fid, master, frame)
+        jpg = await asyncio.to_thread(media.render_window, arr, info, wc, ww, bool(invert), max(256, min(4096, size)))
+    except Exception as exc:
+        log.info("Render failed for %s: %s", fid, exc)
+        raise ApiError(422, "This DICOM's pixel data can't be rendered here (unsupported compression?). Download the original for a full DICOM viewer.")
+    h = {"Cache-Control": "private, max-age=600", "X-Frames": str(info.get("frames", 1)), "X-Frame": str(info.get("frame", 0)), "X-Rgb": "1" if info.get("rgb") else "0"}
+    if not info.get("rgb"):
+        h.update({
+            "X-Window-Center": str(info["default_center"] if wc is None else wc),
+            "X-Window-Width": str(info["default_width"] if ww is None else ww),
+            "X-Default-Center": str(info["default_center"]),
+            "X-Default-Width": str(info["default_width"]),
+            "X-Min": str(info["min"]),
+            "X-Max": str(info["max"]),
+            "X-Modality": info.get("modality", ""),
+        })
+    h["Access-Control-Expose-Headers"] = ", ".join(h)
+    return Response(jpg, media_type="image/jpeg", headers=h)
+
+
+# =================================================================== per-user preferences
+
+PREF_KEYS = {"theme": ("system", "light", "dark")}
+
+
+@app.get("/api/prefs")
+def get_prefs(request: Request):
+    u = require_user(request)
+    return {"theme": "system", "dark_color": "#0d1416", **store.get_config(f"prefs:{u['id']}", {})}
+
+
+@app.put("/api/prefs")
+async def put_prefs(request: Request):
+    u = require_user(request)
+    j = await body_json(request)
+    cur = store.get_config(f"prefs:{u['id']}", {})
+    if "theme" in j:
+        if j["theme"] not in PREF_KEYS["theme"]:
+            raise ApiError(400, "theme must be system, light or dark")
+        cur["theme"] = j["theme"]
+    if "dark_color" in j:
+        import re
+
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", str(j["dark_color"])):
+            raise ApiError(400, "dark_color must look like #0d1416")
+        cur["dark_color"] = str(j["dark_color"]).lower()
+    store.set_config(f"prefs:{u['id']}", cur)
+    return {"theme": "system", "dark_color": "#0d1416", **cur}
 
 
 @app.put("/api/files/{fid}")

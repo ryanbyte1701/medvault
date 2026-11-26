@@ -11,8 +11,16 @@ and SFTP/SCP servers.
   autorun junk are skipped), JPG/PNG/HEIC photos, PDF reports. DICOMs are grouped
   into studies by `StudyInstanceUID`. Date, modality, center and description are
   filled in from the tags. Reports uploaded together with one DICOM study join it.
-- **Viewer**: DICOM previews rendered server-side (VOI LUT, MONOCHROME1), with
-  zoom, pan, brightness, contrast and invert. PDFs open inline.
+- **Viewer**: true window/level on the original DICOM pixel values (drag
+  sideways for window and up/down for level, or type values; CT presets for
+  brain, subdural, stroke, soft tissue, mediastinum, liver, lung and bone). It
+  also has zoom toward the cursor, Ctrl+scroll, pinch, double-tap, pan, invert,
+  scroll or slider through a series, a frame slider for multi-frame files,
+  fullscreen and keyboard shortcuts. Photos get the same tools in the browser.
+  PDFs open inline.
+- **Themes**: light, dark or match device, with a choice of dark color (six
+  presets or any custom color). Saved per account, so it follows you across
+  devices.
 - **Mobile and web**: responsive UI, installable as a PWA (Add to Home Screen),
   with a "Take photo" button for paper reports and films. A REST API with
   Bearer tokens serves native clients.
@@ -141,6 +149,8 @@ A locked vault returns **423** `{code: "locked"}`; unlock with
 | GET/PUT/DELETE | `/api/studies/{id}` | |
 | GET/POST | `/api/studies/{id}/files` | list / multipart `file` (repeatable) |
 | GET | `/api/files/{id}`, `/content`, `/thumbnail` | metadata, decrypted bytes, JPEG preview |
+| GET | `/api/files/{id}/render?wc=&ww=&frame=` | DICOM rendered with a window center/width in modality units (HU for CT). `X-Window-*`, `X-Default-*`, `X-Min/Max`, `X-Frames`, `X-Modality` headers |
+| GET/PUT | `/api/prefs` | `{theme: system\|light\|dark, dark_color: "#rrggbb"}` per user |
 | GET/POST/PUT/DELETE | `/api/backups/targets[/{id}]` | destinations (secrets are write-only) |
 | POST | `/api/backups/run`, `/api/backups/targets/{id}/run`, `/test` | |
 | GET | `/api/backups/runs`, `/api/backups/download` | history; encrypted `.svb` download |

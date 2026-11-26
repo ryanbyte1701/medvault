@@ -7,15 +7,15 @@ TYPE    system UI stack (no third-party font requests from a PHI app)
 */
 :root{
   color-scheme:light dark;
-  --bg:light-dark(#f6f7f7,#0d1416);
-  --panel:light-dark(#ffffff,#132024);
+  --bg:light-dark(#f6f7f7,var(--d-bg,#0d1416));
+  --panel:light-dark(#ffffff,var(--d-panel,#132024));
   --ink:light-dark(#14161a,#e6eeee);
   --muted:light-dark(#5b6670,#93a5a8);
-  --line:light-dark(#e1e5e6,#22343a);
+  --line:light-dark(#e1e5e6,var(--d-line,#22343a));
   --teal:light-dark(#0b5d63,#4fb5ad);
   --teal-ink:light-dark(#ffffff,#071315);
-  --teal-soft:light-dark(#e3f0ef,#16353a);
-  --film:#0a0d0f;
+  --teal-soft:light-dark(#e3f0ef,var(--d-soft,#16353a));
+  --film:light-dark(#0a0d0f,var(--d-film,#0a0d0f));
   --amber:light-dark(#9a5b00,#f0b45a);
   --amber-soft:light-dark(#fff4e0,#33260f);
   --red:light-dark(#b42318,#ff8a7a);
@@ -182,19 +182,17 @@ textarea{min-height:96px;resize:vertical}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 
 /* viewer */
-.viewer{display:grid;grid-template-columns:minmax(0,1fr) 300px;min-height:70vh}
+.viewer{display:grid;grid-template-columns:minmax(0,1fr) 300px;height:min(calc(100vh - 110px),900px)}
 .viewer .stage{background:var(--film);display:grid;place-items:center;overflow:hidden;position:relative;touch-action:none}
-.viewer .stage img{width:100%;height:78vh;object-fit:contain;transform-origin:center;user-select:none;-webkit-user-drag:none}
-.viewer .stage iframe{width:100%;height:78vh;border:0;background:#fff}
-.viewer aside{padding:18px;border-left:1px solid var(--line);display:grid;gap:16px;align-content:start}
+.viewer .stage img{width:100%;height:100%;object-fit:contain;transform-origin:center;user-select:none;-webkit-user-drag:none}
+.viewer .stage iframe{width:100%;height:100%;border:0;background:#fff}
+.viewer aside{padding:18px;border-left:1px solid var(--line);display:grid;gap:16px;align-content:start;overflow:auto}
 .viewer dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 12px;margin:0;font-size:14px}
 .viewer dt{color:var(--muted)}
 .viewer dd{margin:0;overflow-wrap:anywhere}
 .sliders{display:grid;gap:8px;font-size:13px}
 .sliders input{width:100%;accent-color:var(--teal)}
-.zoombar{position:absolute;left:12px;bottom:12px;display:flex;gap:6px}
-.zoombar button{background:rgb(255 255 255/.12);color:#fff;border:0;border-radius:8px;min-width:40px;min-height:40px;font-weight:700;cursor:pointer}
-@media (max-width:820px){.viewer{grid-template-columns:minmax(0,1fr)}.viewer aside{border-left:0;border-top:1px solid var(--line)}.viewer .stage{min-height:55vh}.viewer .stage img{height:55vh}}
+@media (max-width:820px){.viewer{grid-template-columns:minmax(0,1fr);height:auto}.viewer aside{border-left:0;border-top:1px solid var(--line);overflow:visible}.viewer .stage{height:62vh}}
 
 /* setup / auth */
 .auth{min-height:100vh;display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr)}
@@ -250,3 +248,33 @@ td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 .spin{width:18px;height:18px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite;display:inline-block}
 @keyframes spin{to{transform:rotate(360deg)}}
 .demo-banner{background:var(--amber-soft);color:var(--ink);font-size:13px;padding:8px 16px;text-align:center}
+
+/* theme controls */
+.themebtn{min-height:36px;padding:0 8px;justify-self:start}
+.themebtn svg{width:18px;height:18px}
+.swatches{display:flex;flex-wrap:wrap;gap:10px}
+.sw{display:grid;justify-items:center;gap:6px;padding:8px;border:1px solid var(--line);border-radius:10px;background:var(--panel);cursor:pointer;min-width:84px;font-size:13px;color:var(--ink)}
+.sw i{width:40px;height:40px;border-radius:50%;border:1px solid rgb(128 128 128/.35);display:block}
+.sw.on{border-color:var(--teal);box-shadow:0 0 0 2px color-mix(in srgb,var(--teal) 40%,transparent)}
+.sw input[type=color]{width:40px;height:40px;border:0;padding:0;background:none;border-radius:50%;cursor:pointer}
+.sw input[type=color]::-webkit-color-swatch-wrapper{padding:0}.sw input[type=color]::-webkit-color-swatch{border-radius:50%;border:1px solid rgb(128 128 128/.35)}
+
+/* viewer tools */
+.viewer .stage{cursor:grab;user-select:none;-webkit-user-select:none}
+.viewer .stage:active{cursor:grabbing}
+.hud{position:absolute;left:12px;top:10px;display:flex;flex-wrap:wrap;gap:6px;z-index:2;pointer-events:none}
+.hud span{background:rgb(0 0 0/.55);color:#d8f3ef;font:12px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;padding:5px 8px;border-radius:6px;white-space:nowrap}
+.vtools{position:absolute;left:10px;right:10px;bottom:10px;display:flex;gap:6px;z-index:2;overflow-x:auto;scrollbar-width:none;justify-content:center}
+.vtools:empty{display:none}
+.vtools>button,.vtools select,.vseg{flex:none}
+.vtools button,.vtools select{background:rgb(20 28 31/.82);color:#e6eeee;border:1px solid rgb(255 255 255/.14);border-radius:8px;min-height:40px;min-width:40px;padding:0 12px;font-weight:600;font-size:14px;cursor:pointer;backdrop-filter:blur(6px)}
+.vtools select{width:auto;font-size:14px}
+.vtools button.on{background:#0b5d63;border-color:#4fb5ad}
+.vseg{display:flex;border-radius:8px;overflow:hidden}
+.vseg button{border-radius:0}
+.vseg button+button{border-left:0}
+.viewer .wl input{min-height:40px}
+.modal:fullscreen{width:100vw;max-height:none;height:100vh;border-radius:0}
+.modal:fullscreen .viewer{height:calc(100vh - 66px)}
+@media (max-width:820px){.vtools{justify-content:flex-start}}
+input[type=range]{width:100%;accent-color:var(--teal)}

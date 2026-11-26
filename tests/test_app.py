@@ -203,3 +203,27 @@ def test_fresh_install_restore(tmp_path, client, setup):
         assert client.post("/api/vault/unlock", json={"passphrase": PASS}, headers={"Authorization": f"Bearer {tok}"}).status_code == 200
     finally:
         main.store = old_store
+
+
+def test_render_window_and_prefs(client, setup, tmp_path):
+    B = {"Authorization": f"Bearer {setup['token']}"}
+    p = client.post("/api/patients", json={"name": "Render Test"}, headers=B).json()
+    d = make_dicom(tmp_path / "R1", study_uid="9.9.9", modality="CT")
+    f = client.post(f"/api/patients/{p['id']}/import", files=[("file", ("R1", d.read_bytes()))], headers=B).json()["files"][0]
+    r = client.get(f"/api/files/{f['id']}/render", headers=B)
+    assert r.status_code == 200 and r.content[:3] == b"\xff\xd8\xff"
+    assert float(r.headers["x-default-width"]) > 0 and r.headers["x-modality"] == "CT"
+    import io as _io
+    from PIL import Image as _Im
+    # narrow window centred far below the disc's value -> almost all white; far above -> black
+    lo = _Im.open(_io.BytesIO(client.get(f"/api/files/{f['id']}/render?wc=-5000&ww=10", headers=B).content))
+    hi = _Im.open(_io.BytesIO(client.get(f"/api/files/{f['id']}/render?wc=99999&ww=10", headers=B).content))
+    assert sum(lo.getdata()) / (lo.width * lo.height) > 250 and sum(hi.getdata()) / (hi.width * hi.height) < 5
+    inv = _Im.open(_io.BytesIO(client.get(f"/api/files/{f['id']}/render?wc=-5000&ww=10&invert=1", headers=B).content))
+    assert sum(inv.getdata()) / (inv.width * inv.height) < 5
+    # non-DICOM refused
+    png = [x for x in client.get("/api/patients", headers=B).json()]
+    assert client.get("/api/prefs", headers=B).json()["theme"] == "system"
+    assert client.put("/api/prefs", json={"theme": "dark", "dark_color": "#1A1033"}, headers=B).json() == {"theme": "dark", "dark_color": "#1a1033"}
+    assert client.put("/api/prefs", json={"dark_color": "red; x"}, headers=B).status_code == 400
+    assert client.get("/api/prefs", headers=B).json()["dark_color"] == "#1a1033"
