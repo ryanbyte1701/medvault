@@ -13,6 +13,8 @@ services:
       # when you are not on http://localhost:8080 (e.g. https://scans.example.com)
       SCANVAULT_PUBLIC_URL: ${SCANVAULT_PUBLIC_URL:-}
       SCANVAULT_MAX_UPLOAD_MB: ${SCANVAULT_MAX_UPLOAD_MB:-2048}
+      PUID: ${PUID:-10001}
+      PGID: ${PGID:-10001}
       # Optional unattended unlock after restarts (see README trade-offs):
       # SCANVAULT_PASSPHRASE_FILE: /run/secrets/scanvault_passphrase
     # secrets:

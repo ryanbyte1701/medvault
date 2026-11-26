@@ -1,5 +1,7 @@
 .git
 **/__pycache__
+deploy
+.github
 tests
 data
 *.svb

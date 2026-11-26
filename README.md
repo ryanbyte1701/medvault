@@ -50,6 +50,14 @@ First run walks you through:
 
 Data lives in the `scanvault-data` volume (`/data` in the container).
 
+**Synology NAS:** see [deploy/synology/README.md](deploy/synology/README.md)
+for a Container Manager project with `/volume1` paths, PUID/PGID, a DSM reverse
+proxy with HTTPS, and backup tips. Prebuilt multi-arch images (amd64 and arm64)
+are published to `ghcr.io/ryanbyte1701/scanvault` on every merge to `main`.
+
+The container starts as root only to set the owner of `/data` to
+`PUID:PGID` (default `10001`), then drops to that user.
+
 ### Locking and restarts
 
 The master key only lives in memory. After a container restart the vault is
