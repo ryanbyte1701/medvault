@@ -1,0 +1,726 @@
+/* ScanVault web UI: vanilla JS single-page app. */
+(() => {
+"use strict";
+
+// ------------------------------------------------------------------ API layer
+// A demo build replaces window.SV_API before this script runs.
+const API = window.SV_API || {
+  async req(method, path, body) {
+    const opt = { method, headers: { "X-ScanVault": "1" }, credentials: "same-origin" };
+    if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+    const r = await fetch(path, opt);
+    const ct = r.headers.get("content-type") || "";
+    const data = ct.includes("json") ? await r.json() : await r.text();
+    if (!r.ok) { const e = new Error((data && data.error) || r.statusText); e.status = r.status; e.code = data && data.code; throw e; }
+    return data;
+  },
+  upload(path, form, onProgress) {
+    return new Promise((resolve, reject) => {
+      const x = new XMLHttpRequest();
+      x.open("POST", path);
+      x.setRequestHeader("X-ScanVault", "1");
+      x.upload.onprogress = e => e.lengthComputable && onProgress && onProgress(e.loaded / e.total);
+      x.onload = () => {
+        let d; try { d = JSON.parse(x.responseText); } catch { d = {}; }
+        if (x.status >= 200 && x.status < 300) resolve(d);
+        else { const e = new Error(d.error || x.statusText); e.status = x.status; e.code = d.code; reject(e); }
+      };
+      x.onerror = () => reject(new Error("Network error"));
+      x.send(form);
+    });
+  },
+  fileUrl: (id, dl) => `/api/files/${id}/content${dl ? "?download=1" : ""}`,
+  thumbUrl: id => `/api/files/${id}/thumbnail`,
+  backupDownloadUrl: () => "/api/backups/download",
+  oauthStart: (type, id) => { location.href = `/api/oauth/${type}/start?target_id=${encodeURIComponent(id)}`; },
+  demo: false,
+};
+
+// ------------------------------------------------------------------ utils
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const app = $("#app");
+const fmtBytes = n => { if (!n) return "0 B"; const u = ["B", "KB", "MB", "GB", "TB"]; const i = Math.min(4, Math.floor(Math.log(n) / Math.log(1024))); return (n / 1024 ** i).toFixed(i ? 1 : 0) + " " + u[i]; };
+const fmtDate = d => { if (!d) return ""; const t = new Date(d.length === 10 ? d + "T12:00:00" : d); return isNaN(t) ? d : t.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }); };
+const fmtDT = d => { if (!d) return "Never"; const t = new Date(d); return t.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); };
+const ago = d => { if (!d) return "never"; const s = (Date.now() - new Date(d)) / 1000; if (s < 90) return "just now"; if (s < 3600) return Math.round(s / 60) + " min ago"; if (s < 86400 * 2) return Math.round(s / 3600) + " h ago"; return Math.round(s / 86400) + " days ago"; };
+const age = dob => { if (!dob) return ""; const b = new Date(dob + "T12:00:00"), n = new Date(); let a = n.getFullYear() - b.getFullYear(); if (n < new Date(n.getFullYear(), b.getMonth(), b.getDate())) a--; return isNaN(a) ? "" : a; };
+const initials = n => (n || "?").split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join("");
+let toastT;
+document.addEventListener("sv-demo-toast", e => toast(e.detail));
+const toast = msg => { const t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("on"), 2800); };
+function saveText(name, text) {
+  if (API.demo) return toast(`Downloads are off in this preview. The real app saves ${name}.`);
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+  a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+async function copyText(text) { try { await navigator.clipboard.writeText(text); toast("Copied"); } catch { toast("Copy is blocked here. Select the text and copy it."); } }
+
+const I = {
+  logo: '<svg viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="28" height="28" rx="8" fill="#0b5d63"/><rect x="8" y="7" width="16" height="18" rx="2.5" fill="#0a0d0f" stroke="#cfe9e6" stroke-width="1.4"/><path d="M12 18c1-4 2.5-6 4-6s3 2 4 6" fill="none" stroke="#cfe9e6" stroke-width="1.6" stroke-linecap="round"/><circle cx="16" cy="11" r="1.4" fill="#cfe9e6"/><path d="M11 21.5h10" stroke="#4fb5ad" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+  upload: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5M12 3v12"/></svg>',
+  cloud: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/><path d="m9.5 14.5 2 2 4-4"/></svg>',
+  gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
+  key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></svg>',
+  plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>',
+  pdf: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></svg>',
+  file: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>',
+  scan: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 15c1-4 2.5-6 4-6s3 2 4 6"/><circle cx="12" cy="7" r="1"/></svg>',
+  camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>',
+  warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
+  info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>',
+  drive: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M8 3h8l6 10.5-4 7H6l-4-7z"/><path d="M8 3l6 10.5H2M16 3l-6 10.5L14 20.5"/></svg>',
+  box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.3 7 12 12l8.7-5M12 22V12"/></svg>',
+  server: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/></svg>',
+  restore: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>',
+  shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>',
+  x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+  dl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5M12 15V3"/></svg>',
+};
+const HERO = `<svg class="hero" viewBox="0 0 520 300" aria-hidden="true">
+<defs><linearGradient id="lb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e9fbf8"/><stop offset="1" stop-color="#b9dcd8"/></linearGradient>
+<radialGradient id="bone" cx=".5" cy=".4" r=".6"><stop offset="0" stop-color="#f4fbfa"/><stop offset="1" stop-color="#6d8e92"/></radialGradient></defs>
+<rect x="10" y="20" width="500" height="250" rx="14" fill="#151b1e" stroke="#233036"/>
+<rect x="28" y="38" width="464" height="214" rx="6" fill="url(#lb)" opacity=".12"/>
+${[0, 1, 2].map(i => `<g transform="translate(${44 + i * 152} 52)"><rect width="128" height="168" rx="4" fill="#05080a" stroke="#2d3f45"/>
+<ellipse cx="64" cy="${70 + i * 6}" rx="${36 - i * 4}" ry="${48 - i * 6}" fill="url(#bone)" opacity="${.55 + i * .1}"/>
+<ellipse cx="64" cy="${74 + i * 6}" rx="${18 - i * 2}" ry="${26 - i * 3}" fill="#05080a" opacity=".55"/>
+<path d="M30 140h68" stroke="#4fb5ad" stroke-width="2" opacity=".6"/><text x="10" y="18" fill="#6f8a8e" font-size="10" font-family="ui-monospace,monospace">${["CT", "MR", "XR"][i]}</text></g>`).join("")}
+<g transform="translate(404 196)"><circle r="34" fill="#0b5d63"/><rect x="-13" y="-4" width="26" height="20" rx="3" fill="#e9fbf8"/><path d="M-8 -4v-6a8 8 0 0 1 16 0v6" fill="none" stroke="#e9fbf8" stroke-width="3.4"/><circle cy="6" r="2.6" fill="#0b5d63"/></g>
+</svg>`;
+
+// ------------------------------------------------------------------ state + router
+const S = { status: null, patients: null, route: { name: "patients" } };
+
+function parseHash() {
+  if (API.demo) return S.route;
+  const h = location.hash.replace(/^#\/?/, "").split("?")[0];
+  const [name, id] = h.split("/");
+  return { name: name || "patients", id };
+}
+function go(name, id) {
+  S.route = { name, id };
+  if (!API.demo) { const h = "#/" + name + (id ? "/" + id : ""); if (location.hash !== h) { location.hash = h; return; } }
+  render();
+}
+window.addEventListener("hashchange", () => { if (!API.demo) { S.route = parseHash(); render(); } });
+document.addEventListener("click", e => {
+  if (API.demo && e.target.closest("a[download], #dlb")) { e.preventDefault(); toast("Downloads are off in this preview. The real app downloads the decrypted original or an encrypted .svb backup."); return; }
+  const a = e.target.closest("[data-go]");
+  if (a) { e.preventDefault(); const [n, id] = a.dataset.go.split("/"); go(n, id); }
+});
+
+async function boot() {
+  try { S.status = await API.req("GET", "/api/status"); }
+  catch (e) { app.innerHTML = `<div class="empty"><h2>Can't reach ScanVault</h2><p>${esc(e.message)}</p><button class="btn" onclick="location.reload()">Retry</button></div>`; return; }
+  S.route = parseHash();
+  render();
+  const q = new URLSearchParams(location.hash.split("?")[1] || "");
+  if (q.get("oauth") === "ok") toast("Account connected");
+  if (q.get("oauth") === "error") toast("Connecting the account failed: " + (q.get("msg") || "unknown error"));
+}
+
+function handleErr(e) {
+  if (e.code === "unauthenticated") { S.status.authenticated = false; render(); return true; }
+  if (e.code === "locked") { S.status.unlocked = false; render(); return true; }
+  toast(e.message || String(e));
+  return false;
+}
+
+function render() {
+  const st = S.status;
+  if (!st.setup_complete) return viewSetup();
+  if (!st.authenticated) return viewLogin();
+  if (!st.unlocked) return viewUnlock();
+  const r = S.route;
+  const view = { patients: viewPatients, patient: viewPatient, study: viewStudy, backups: viewBackups, settings: viewSettings, upload: viewUploadPage }[r.name] || viewPatients;
+  shell(r.name);
+  view(r.id).catch(handleErr);
+}
+
+function shell(active) {
+  const nav = [["patients", "Patients", I.users], ["upload", "Upload", I.upload], ["backups", "Backups", I.cloud], ["settings", "Settings", I.gear]];
+  const on = n => (n === active || (n === "patients" && (active === "patient" || active === "study"))) ? "on" : "";
+  app.innerHTML = `${API.demo ? '<div class="demo-banner">Interactive preview with sample patients. Nothing leaves your browser and nothing is stored.</div>' : ""}
+  <div class="shell">
+    <nav class="side" aria-label="Main">
+      <div class="brand">${I.logo}<span>ScanVault</span></div>
+      <div class="nav">${nav.map(([n, l, ic]) => `<a href="#/${n}" data-go="${n}" class="${on(n)}">${ic}${l}</a>`).join("")}</div>
+      <div class="foot"><span class="lockchip">${I.shield} Vault unlocked</span><span>Signed in as ${esc(S.status.username)}</span></div>
+    </nav>
+    <main id="main"><div class="empty"><span class="spin"></span></div></main>
+    <nav class="tabbar" aria-label="Main">${nav.map(([n, l, ic]) => `<a href="#/${n}" data-go="${n}" class="${on(n)}">${ic}<span>${l}</span></a>`).join("")}</nav>
+  </div>`;
+}
+const main = () => $("#main");
+const mobileHead = () => `<div class="mobilehead"><div class="brand">${I.logo}<span>ScanVault</span></div><span class="lockchip">${I.shield} Unlocked</span></div>`;
+
+// ------------------------------------------------------------------ modal
+function modal(title, body, { wide = false, footer = "" } = {}) {
+  const el = document.createElement("div");
+  el.className = "scrim";
+  el.innerHTML = `<div class="modal ${wide ? "wide" : ""}" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+    <header><h2>${esc(title)}</h2><button class="btn ghost sm" data-close aria-label="Close">${I.x}</button></header>
+    <div class="body">${body}</div>${footer ? `<footer>${footer}</footer>` : ""}</div>`;
+  const close = () => { el.remove(); document.removeEventListener("keydown", onKey); };
+  const onKey = e => { if (e.key === "Escape") close(); };
+  el.addEventListener("click", e => { if (e.target === el || e.target.closest("[data-close]")) close(); });
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(el);
+  const f = $("input,select,textarea", el); if (f && matchMedia("(min-width:821px)").matches) f.focus();
+  return { el, close };
+}
+function confirmBox(title, text, okLabel = "Delete", danger = true) {
+  return new Promise(res => {
+    const m = modal(title, `<p>${text}</p>`, { footer: `<button class="btn" data-close>Cancel</button><button class="btn ${danger ? "danger" : "primary"}" id="cok">${esc(okLabel)}</button>` });
+    $("#cok", m.el).onclick = () => { m.close(); res(true); };
+    m.el.addEventListener("click", e => { if (e.target.closest("[data-close]") || e.target === m.el) res(false); });
+  });
+}
+
+// ------------------------------------------------------------------ setup wizard
+function strength(p) {
+  if (!p) return [0, ""];
+  let s = Math.min(60, p.length * 3);
+  if (/[a-z]/.test(p) && /[A-Z]/.test(p)) s += 10;
+  if (/\d/.test(p)) s += 10;
+  if (/[^A-Za-z0-9]/.test(p)) s += 10;
+  if (/\s/.test(p) && p.split(/\s+/).length >= 4) s += 15;
+  if (p.length < 12) s = Math.min(s, 30);
+  s = Math.min(100, s);
+  return [s, s < 40 ? "Too weak" : s < 70 ? "OK" : s < 90 ? "Strong" : "Very strong"];
+}
+const WORDS = "amber anchor apple arrow atlas autumn badge bamboo beacon birch bison blossom breeze bronze cactus candle canyon cedar cherry cinder clover cobalt comet copper coral cosmos cotton crystal daisy delta desert dolphin dune eagle ember falcon fern fjord forest fossil galaxy garnet geyser ginger glacier granite harbor hazel heron honey horizon iris island ivory jasper juniper kayak kettle lagoon lantern lava lemon lilac linen lotus lunar maple marble meadow mesa mint mosaic nectar nickel nova oasis ocean olive onyx orbit orchid otter pebble pepper pine planet plume prairie quartz quill raven reef ridge river robin saffron sage salmon sierra silver sparrow spruce summit tango thistle tidal timber topaz tulip tundra velvet violet walnut willow zephyr".split(" ");
+function genPassphrase() {
+  const a = new Uint32Array(6); crypto.getRandomValues(a);
+  return [...a].map(x => WORDS[x % WORDS.length]).join("-");
+}
+
+function authLayout(inner, title = "Your scans. Your key. Your copies.", sub = "ScanVault keeps encrypted local copies of imaging studies and reports from every center you visit, and backs them up encrypted to the places you choose.") {
+  app.innerHTML = `<div class="auth"><section class="art"><div class="brand" style="color:#e6eeee">${I.logo}<span>ScanVault</span></div>
+    <div><h1>${title}</h1><p>${sub}</p></div>${HERO}</section>
+    <section class="formside">${inner}</section></div>`;
+}
+
+const setup = { step: 0, mode: null, username: "", password: "", passphrase: "", recovery: "" };
+function viewSetup() {
+  const steps = n => `<div class="steps" aria-hidden="true">${[0, 1, 2, 3].map(i => `<i class="${i <= n ? "on" : ""}"></i>`).join("")}</div>`;
+  if (setup.step === 0) {
+    authLayout(`${steps(0)}<div><h1>Welcome</h1><p class="muted" style="margin-top:8px">Set up this ScanVault server. It takes about two minutes.</p></div>
+      <div class="choice">
+        <button id="new">${I.shield}<b>Create a new vault</b><span>Pick a sign-in and the encryption key that protects every file.</span></button>
+        <button id="rest">${I.restore}<b>Restore from a backup</b><span>Use a .svb backup plus your recovery key file or encryption key.</span></button>
+        ${window.SV_DEMO_SKIP ? `<button id="skip">${I.users}<b>Skip to the sample vault</b><span>Preview only: open three sample patients with scans, reports and backups.</span></button>` : ""}
+      </div>`);
+    const sk = $("#skip"); if (sk) sk.onclick = async () => { window.SV_DEMO_SKIP(); S.status = await API.req("GET", "/api/status"); go("patients"); };
+    $("#new").onclick = () => { setup.step = 1; viewSetup(); };
+    $("#rest").onclick = viewRestoreSetup;
+    return;
+  }
+  if (setup.step === 1) {
+    authLayout(`${steps(1)}<div><h1>Create your sign-in</h1><p class="muted" style="margin-top:8px">This is how you open ScanVault on the web and on your phone.</p></div>
+      <form class="form" id="f">
+        <label class="f">Username<input name="u" autocomplete="username" required value="${esc(setup.username)}" autocapitalize="none"></label>
+        <label class="f">Password <span class="hint">At least 10 characters</span><input name="p" type="password" autocomplete="new-password" required minlength="10"></label>
+        <label class="f">Confirm password<input name="p2" type="password" autocomplete="new-password" required></label>
+        <p class="err" id="err"></p>
+        <div class="row"><button type="button" class="btn" id="back">Back</button><span class="spacer"></span><button class="btn primary">Continue</button></div>
+      </form>`);
+    $("#back").onclick = () => { setup.step = 0; viewSetup(); };
+    $("#f").onsubmit = e => {
+      e.preventDefault(); const f = e.target;
+      if (f.p.value.length < 10) return $("#err").textContent = "Password must be at least 10 characters.";
+      if (f.p.value !== f.p2.value) return $("#err").textContent = "Passwords don't match.";
+      setup.username = f.u.value.trim(); setup.password = f.p.value; setup.step = 2; viewSetup();
+    };
+    return;
+  }
+  if (setup.step === 2) {
+    authLayout(`${steps(2)}<div><h1>Set your encryption key</h1><p class="muted" style="margin-top:8px">Every scan, report and patient record is encrypted with this key on this server, and every backup is encrypted with it before it leaves. Nobody, including ScanVault, can recover your data without it or the recovery key file you'll download next.</p></div>
+      <form class="form" id="f">
+        <label class="f">Encryption key (passphrase) <span class="hint">At least 12 characters. A few random words work well.</span>
+          <input name="k" type="password" autocomplete="new-password" required minlength="12" id="k"></label>
+        <div class="row small"><div class="meter" style="flex:1"><i id="m"></i></div><span id="ml" class="muted" style="min-width:80px;text-align:right"></span></div>
+        <div class="row"><button type="button" class="btn sm" id="gen">${I.key} Generate one for me</button><button type="button" class="btn sm ghost" id="show">Show</button></div>
+        <label class="f">Type it again<input name="k2" type="password" autocomplete="new-password" required></label>
+        <div class="note">${I.warn}<div>Use a different value from your sign-in password. If you change your sign-in password later, the encryption key stays the same.</div></div>
+        <p class="err" id="err"></p>
+        <div class="row"><button type="button" class="btn" id="back">Back</button><span class="spacer"></span><button class="btn primary" id="go">Create vault</button></div>
+      </form>`);
+    const k = $("#k");
+    const upd = () => { const [s, l] = strength(k.value); $("#m").style.width = s + "%"; $("#m").style.background = s < 40 ? "var(--red)" : s < 70 ? "var(--amber)" : "var(--green)"; $("#ml").textContent = l; };
+    k.oninput = upd;
+    $("#show").onclick = () => { const t = k.type === "password" ? "text" : "password"; k.type = t; $("[name=k2]").type = t; $("#show").textContent = t === "text" ? "Hide" : "Show"; };
+    $("#gen").onclick = () => { const p = genPassphrase(); k.value = p; $("[name=k2]").value = p; k.type = "text"; $("[name=k2]").type = "text"; $("#show").textContent = "Hide"; upd(); };
+    $("#back").onclick = () => { setup.step = 1; viewSetup(); };
+    $("#f").onsubmit = async e => {
+      e.preventDefault(); const f = e.target;
+      if (f.k.value.length < 12) return $("#err").textContent = "The encryption key must be at least 12 characters.";
+      if (f.k.value !== f.k2.value) return $("#err").textContent = "The two entries don't match.";
+      if (f.k.value === setup.password) return $("#err").textContent = "Use something different from your sign-in password.";
+      $("#go").disabled = true; $("#go").innerHTML = '<span class="spin"></span> Creating…';
+      try {
+        const r = await API.req("POST", "/api/setup", { username: setup.username, password: setup.password, passphrase: f.k.value });
+        setup.recovery = r.recovery_key; setup.fingerprint = r.fingerprint; setup.vault_id = r.vault_id; setup.password = ""; setup.step = 3; viewSetup();
+      } catch (er) { $("#err").textContent = er.message; $("#go").disabled = false; $("#go").textContent = "Create vault"; }
+    };
+    return;
+  }
+  // step 3: recovery key
+  authLayout(`${steps(3)}<div><h1>Save your recovery key</h1><p class="muted" style="margin-top:8px">This text file is your emergency restore key. With it and any backup you can get every file back, even if this server is gone or you forget the encryption key.</p></div>
+    <div class="keybox" id="kb">${esc(setup.recovery)}</div>
+    <div class="row"><button class="btn primary" id="dl">${I.dl} Download key file</button><button class="btn" id="cp">Copy</button><button class="btn ghost" id="pr">Print</button></div>
+    <div class="note">${I.warn}<div>Keep it offline: printed, in a password manager or on a USB stick. Don't store it in the same Google Drive or Box account as your backups.</div></div>
+    <form class="form" id="f">
+      <label class="f">Confirm you saved it <span class="hint">Choose the file you just downloaded. We check it matches, then forget it.</span><input type="file" name="kf" accept=".txt,text/plain"></label>
+      <label class="check"><input type="checkbox" name="skip"> <span>Skip the check. I understand I could lose access to my data.</span></label>
+      <p class="err" id="err"></p>
+      <div class="row end"><button class="btn primary" id="go">Finish setup</button></div>
+    </form>`, "Your key, on paper.", "Fingerprint " + esc(setup.fingerprint || "") + ". Match this fingerprint against the one in Settings whenever you want to be sure a key file belongs to this vault.");
+  $("#dl").onclick = () => saveText("scanvault-recovery-key.txt", setup.recovery);
+  $("#cp").onclick = () => copyText(setup.recovery);
+  $("#pr").onclick = () => { const w = window.open("", "_blank"); if (!w) return toast("Printing is blocked here; download the file instead"); w.document.write(`<pre style="font:14px monospace;white-space:pre-wrap">${esc(setup.recovery)}</pre>`); w.print(); };
+  $("#f").onsubmit = async e => {
+    e.preventDefault(); const f = e.target;
+    try {
+      if (f.kf.files[0]) await API.req("POST", "/api/vault/recovery-key/confirm", { recovery_key: await f.kf.files[0].text() });
+      else if (f.skip.checked) await API.req("POST", "/api/vault/recovery-key/confirm", { skip: true });
+      else return $("#err").textContent = "Choose the key file to confirm, or tick the box to skip.";
+      setup.recovery = ""; S.status = await API.req("GET", "/api/status"); go("patients");
+    } catch (er) { $("#err").textContent = er.message; }
+  };
+}
+
+function viewRestoreSetup() {
+  authLayout(`<div><h1>Restore a vault</h1><p class="muted" style="margin-top:8px">Upload a ScanVault backup (.svb) from Google Drive, Box, your SFTP server or your computer.</p></div>
+    <form class="form" id="f">
+      <label class="f">Backup file (.svb)<input type="file" name="b" accept=".svb" required></label>
+      <div class="seg" role="tablist"><button type="button" class="on" data-m="file">Recovery key file</button><button type="button" data-m="pass">Encryption key</button></div>
+      <label class="f" id="mf">Recovery key file<input type="file" name="kf" accept=".txt,text/plain"></label>
+      <label class="f" id="mp" hidden>Encryption key<input type="password" name="k" autocomplete="off"></label>
+      <div class="grid2"><label class="f">New username<input name="u" required autocapitalize="none"></label><label class="f">New password<input name="p" type="password" minlength="10" required autocomplete="new-password"></label></div>
+      <p class="err" id="err"></p>
+      <div class="row"><button type="button" class="btn" id="back">Back</button><span class="spacer"></span><button class="btn primary" id="go">Restore</button></div>
+    </form>`, "Pick up where you left off.");
+  let mode = "file";
+  $$(".seg button").forEach(b => b.onclick = () => { mode = b.dataset.m; $$(".seg button").forEach(x => x.classList.toggle("on", x === b)); $("#mf").hidden = mode !== "file"; $("#mp").hidden = mode !== "pass"; });
+  $("#back").onclick = () => { setup.step = 0; viewSetup(); };
+  $("#f").onsubmit = async e => {
+    e.preventDefault(); const f = e.target; const fd = new FormData();
+    fd.append("backup_file", f.b.files[0]); fd.append("username", f.u.value); fd.append("password", f.p.value);
+    if (mode === "file") { if (!f.kf.files[0]) return $("#err").textContent = "Choose your recovery key file."; fd.append("recovery_key", await f.kf.files[0].text()); }
+    else fd.append("passphrase", f.k.value);
+    $("#go").disabled = true; $("#go").innerHTML = '<span class="spin"></span> Restoring…';
+    try { const r = await API.upload("/api/setup/restore", fd); toast(`Restored ${r.patients} patients, ${r.files} files`); S.status = await API.req("GET", "/api/status"); go("patients"); }
+    catch (er) { $("#err").textContent = er.message; $("#go").disabled = false; $("#go").textContent = "Restore"; }
+  };
+}
+
+function viewLogin() {
+  authLayout(`<div><h1>Sign in</h1></div>
+    <form class="form" id="f">
+      <label class="f">Username<input name="u" autocomplete="username" required autocapitalize="none"></label>
+      <label class="f">Password<input name="p" type="password" autocomplete="current-password" required></label>
+      <p class="err" id="err"></p><button class="btn primary" id="go">Sign in</button></form>`, "Welcome back.");
+  $("#f").onsubmit = async e => {
+    e.preventDefault(); const f = e.target; $("#go").disabled = true;
+    try { await API.req("POST", "/api/auth/login", { username: f.u.value, password: f.p.value }); S.status = await API.req("GET", "/api/status"); render(); }
+    catch (er) { $("#err").textContent = er.message; $("#go").disabled = false; }
+  };
+}
+
+function viewUnlock() {
+  authLayout(`<div><h1>Unlock the vault</h1><p class="muted" style="margin-top:8px">ScanVault restarted, so the encryption key is no longer in memory. Enter it to open your files and resume scheduled backups.</p></div>
+    <form class="form" id="f">
+      <label class="f">Encryption key<input name="k" type="password" autocomplete="off" required></label>
+      <p class="err" id="err"></p>
+      <div class="row"><button class="btn primary" id="go">${I.lock} Unlock</button><span class="spacer"></span><label class="btn ghost sm" style="cursor:pointer">Use recovery key file<input type="file" id="kf" accept=".txt,text/plain" hidden></label></div>
+    </form>
+    <button class="btn ghost sm" id="out" style="justify-self:start">Sign out</button>`, "Locked at rest.");
+  const done = async () => { S.status = await API.req("GET", "/api/status"); render(); };
+  $("#f").onsubmit = async e => {
+    e.preventDefault(); $("#go").disabled = true;
+    try { await API.req("POST", "/api/vault/unlock", { passphrase: e.target.k.value }); await done(); }
+    catch (er) { $("#err").textContent = er.message; $("#go").disabled = false; }
+  };
+  $("#kf").onchange = async e => { try { await API.req("POST", "/api/vault/unlock", { recovery_key: await e.target.files[0].text() }); await done(); } catch (er) { $("#err").textContent = er.message; } };
+  $("#out").onclick = async () => { await API.req("POST", "/api/auth/logout"); S.status.authenticated = false; render(); };
+}
+
+// ------------------------------------------------------------------ patients
+async function viewPatients() {
+  const [list, stats] = await Promise.all([API.req("GET", "/api/patients"), API.req("GET", "/api/stats")]);
+  S.patients = list;
+  const m = main();
+  m.innerHTML = `${mobileHead()}
+  <div class="top"><div><h1>Patients</h1><p class="sub">${list.length} ${list.length === 1 ? "person" : "people"} · last backup ${ago(stats.last_backup_at)}</p></div>
+    <div class="row"><div class="searchbar">${I.search}<input type="search" id="q" placeholder="Search name, MRN or date of birth" aria-label="Search patients"></div>
+    <button class="btn primary" id="add">${I.plus} Add patient</button></div></div>
+  <div class="kpis">
+    <div class="card kpi"><div class="v">${stats.patients}</div><div class="l">Patients</div></div>
+    <div class="card kpi"><div class="v">${stats.studies}</div><div class="l">Studies</div></div>
+    <div class="card kpi"><div class="v">${stats.files}</div><div class="l">Files</div></div>
+    <div class="card kpi"><div class="v">${fmtBytes(stats.bytes)}</div><div class="l">Stored, encrypted</div></div>
+  </div>
+  ${stats.last_backup_at ? "" : `<div class="note" style="margin-bottom:18px">${I.warn}<div>No backups yet. <a href="#/backups" data-go="backups">Add a backup destination</a> so a lost disk doesn't mean lost scans.</div></div>`}
+  <div class="plist" id="pl"></div>
+  <button class="fab" id="fab" aria-label="Upload">${I.upload}</button>`;
+  const draw = q => {
+    q = (q || "").toLowerCase();
+    const rows = list.filter(p => !q || [p.name, p.mrn, p.date_of_birth, p.notes].some(v => (v || "").toLowerCase().includes(q)));
+    $("#pl").innerHTML = rows.length ? rows.map(p => `<a class="card pcard" href="#/patient/${esc(p.id)}" data-go="patient/${esc(p.id)}">
+      <div class="avatar">${esc(initials(p.name))}</div>
+      <div><h3>${esc(p.name)}</h3><div class="meta">${p.date_of_birth ? `<span>${esc(fmtDate(p.date_of_birth))} (${age(p.date_of_birth)})</span>` : ""}${p.mrn ? `<span>MRN ${esc(p.mrn)}</span>` : ""}</div>
+      <div class="stats"><span><b>${p.study_count}</b> ${p.study_count === 1 ? "study" : "studies"}</span><span><b>${p.file_count}</b> ${p.file_count === 1 ? "file" : "files"}</span>${p.last_study_date ? `<span class="muted">Last ${esc(fmtDate(p.last_study_date))}</span>` : ""}</div></div></a>`).join("")
+      : list.length ? `<p class="muted">No patients match "${esc(q)}".</p>`
+      : `<div class="card empty" style="grid-column:1/-1">${I.users}<h2>Add your first patient</h2><p>Create one record per person: you, a parent, a child. Each keeps their own studies and reports.</p><button class="btn primary" id="add2">${I.plus} Add patient</button></div>`;
+    const a2 = $("#add2"); if (a2) a2.onclick = () => patientForm();
+  };
+  draw();
+  $("#q").oninput = e => draw(e.target.value);
+  $("#add").onclick = () => patientForm();
+  $("#fab").onclick = () => go("upload");
+}
+
+function patientForm(p) {
+  const m = modal(p ? "Edit patient" : "Add patient", `<form class="form" id="pf">
+    <label class="f">Full name<input name="name" required value="${esc(p?.name)}" autocomplete="off"></label>
+    <div class="grid2"><label class="f">Date of birth<input name="date_of_birth" type="date" value="${esc(p?.date_of_birth)}"></label>
+    <label class="f">Sex<select name="sex"><option value=""></option>${["F", "M", "X"].map(s => `<option ${p?.sex === s ? "selected" : ""}>${s}</option>`).join("")}</select></label></div>
+    <label class="f">MRN or patient ID <span class="hint">Optional, as printed on reports</span><input name="mrn" value="${esc(p?.mrn)}" autocomplete="off"></label>
+    <label class="f">Notes<textarea name="notes" placeholder="Allergies to contrast, implants, physician contacts">${esc(p?.notes)}</textarea></label>
+    <p class="err" id="err"></p></form>`, { footer: `${p ? '<button class="btn danger" id="del">Delete</button><span class="spacer"></span>' : ""}<button class="btn" data-close>Cancel</button><button class="btn primary" form="pf">${p ? "Save" : "Add patient"}</button>` });
+  $("#pf", m.el).onsubmit = async e => {
+    e.preventDefault();
+    const body = Object.fromEntries(new FormData(e.target));
+    try { const r = p ? await API.req("PUT", `/api/patients/${p.id}`, body) : await API.req("POST", "/api/patients", body); m.close(); toast(p ? "Saved" : "Patient added"); go("patient", r.id); }
+    catch (er) { $("#err", m.el).textContent = er.message; }
+  };
+  const d = $("#del", m.el);
+  if (d) d.onclick = async () => { m.close(); if (await confirmBox("Delete patient?", `This permanently deletes ${esc(p.name)} and all ${p.file_count} files from this server. Existing backups keep their copy.`)) { await API.req("DELETE", `/api/patients/${p.id}`); toast("Deleted"); go("patients"); } };
+}
+
+async function viewPatient(id) {
+  const [p, studies] = await Promise.all([API.req("GET", `/api/patients/${id}`), API.req("GET", `/api/patients/${id}/studies`)]);
+  const thumbs = {};
+  await Promise.all(studies.slice(0, 30).map(async s => { if (s.file_count) thumbs[s.id] = (await API.req("GET", `/api/studies/${s.id}/files`)).slice(0, 4); }));
+  const m = main();
+  m.innerHTML = `${mobileHead()}<div class="crumbs"><a href="#/patients" data-go="patients">Patients</a><span>/</span><span>${esc(p.name)}</span></div>
+  <div class="card phead"><div class="avatar">${esc(initials(p.name))}</div>
+    <div><h1>${esc(p.name)}</h1><div class="facts">
+      ${p.date_of_birth ? `<span>Born <b>${esc(fmtDate(p.date_of_birth))}</b> (${age(p.date_of_birth)})</span>` : ""}${p.sex ? `<span>Sex <b>${esc(p.sex)}</b></span>` : ""}${p.mrn ? `<span>MRN <b>${esc(p.mrn)}</b></span>` : ""}
+      <span><b>${p.study_count}</b> ${p.study_count === 1 ? "study" : "studies"}</span><span><b>${p.file_count}</b> ${p.file_count === 1 ? "file" : "files"}</span></div>
+      ${p.notes ? `<p class="small muted" style="margin-top:8px;white-space:pre-wrap">${esc(p.notes)}</p>` : ""}</div>
+    <div class="row"><button class="btn" id="edit">Edit</button><button class="btn primary" id="up">${I.upload} Upload</button></div></div>
+  <div class="drop" id="drop">${I.upload}<div><b>Drop scans or reports here</b><div class="small muted">DICOM files or a whole CD/zip export, JPG/PNG photos of films, PDF reports. DICOM is grouped into studies automatically.</div></div>
+    <div class="row" style="justify-content:center"><label class="btn sm">Choose files<input type="file" id="fi" multiple hidden accept=".dcm,.dicom,.zip,image/*,application/pdf,application/dicom,application/zip,*/*"></label>
+    <label class="btn sm">${I.camera} Take photo<input type="file" id="cam" accept="image/*" capture="environment" hidden></label></div></div>
+  <div class="queue" id="queue"></div>
+  <div class="section-h"><h2>Studies</h2><button class="btn sm" id="ns">${I.plus} New study</button></div>
+  <div class="timeline" id="tl">${studies.length ? studies.map(s => `<a class="card study" href="#/study/${esc(s.id)}" data-go="study/${esc(s.id)}">
+    <div class="date">${esc(s.study_date ? fmtDate(s.study_date) : "No date")}<small>${s.modality ? esc(s.modality) : ""}</small></div>
+    <div><h3>${esc(s.title)}</h3><div class="small muted">${[s.facility, `${s.file_count} file${s.file_count === 1 ? "" : "s"}`].filter(Boolean).map(esc).join(" · ")}</div></div>
+    <div class="film">${(thumbs[s.id] || []).map(f => `<div class="t">${f.has_thumbnail ? `<img alt="" loading="lazy" src="${esc(API.thumbUrl(f.id))}">` : f.kind === "report" ? I.pdf : I.file}</div>`).join("")}</div></a>`).join("")
+    : `<div class="card empty">${I.scan}<h2>No studies yet</h2><p>Upload the files an imaging center gave you, or create a study first and add files to it.</p></div>`}</div>`;
+  $("#edit").onclick = () => patientForm(p);
+  $("#ns").onclick = () => studyForm(p.id);
+  $("#up").onclick = () => $("#fi").click();
+  wireDrop($("#drop"), files => uploadFiles(`/api/patients/${p.id}/import`, files, () => viewPatient(id)));
+  $("#fi").onchange = e => uploadFiles(`/api/patients/${p.id}/import`, [...e.target.files], () => viewPatient(id));
+  $("#cam").onchange = e => uploadFiles(`/api/patients/${p.id}/import`, [...e.target.files], () => viewPatient(id));
+}
+
+function wireDrop(el, cb) {
+  ["dragenter", "dragover"].forEach(t => el.addEventListener(t, e => { e.preventDefault(); el.classList.add("over"); }));
+  ["dragleave", "drop"].forEach(t => el.addEventListener(t, e => { e.preventDefault(); el.classList.remove("over"); }));
+  el.addEventListener("drop", e => { const f = [...e.dataTransfer.files]; if (f.length) cb(f); });
+}
+
+async function uploadFiles(path, files, done) {
+  const q = $("#queue");
+  let ok = 0, skipped = 0;
+  // Patient imports go up as one batch so reports land in the same study as the DICOM beside them.
+  const batches = path.includes("/import") && files.length > 1 ? [files] : files.map(f => [f]);
+  for (const batch of batches) {
+    const row = document.createElement("div");
+    row.className = "qitem";
+    const label = batch.length > 1 ? `${batch.length} files (${batch.slice(0, 3).map(f => f.name).join(", ")}${batch.length > 3 ? "…" : ""})` : batch[0].name;
+    row.innerHTML = `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(label)}</span><span class="muted nowrap">${fmtBytes(batch.reduce((a, f) => a + f.size, 0))}</span><div class="bar"><i></i></div>`;
+    q.appendChild(row);
+    const fd = new FormData(); batch.forEach(f => fd.append("file", f, f.name));
+    try {
+      const r = await API.upload(path, fd, p => { $("i", row).style.width = Math.round(p * 95) + "%"; });
+      $("i", row).style.width = "100%";
+      const n = Array.isArray(r) ? r.length : r.files.length; ok += n; skipped += (r.skipped || []).length;
+      row.lastElementChild.previousElementSibling.textContent = n > 1 ? `${n} files encrypted` : "Encrypted ✓";
+    } catch (e) {
+      if (handleErr(e) && e.code) return;
+      row.lastElementChild.previousElementSibling.innerHTML = `<span style="color:var(--red)">${esc(e.message)}</span>`;
+    }
+  }
+  toast(`${ok} file${ok === 1 ? "" : "s"} stored` + (skipped ? `, ${skipped} skipped` : ""));
+  setTimeout(done, 700);
+}
+
+function studyForm(pid, s) {
+  const mods = ["CT", "MR", "CR", "DX", "US", "MG", "NM", "PT", "XA", "RF", "OT"];
+  const m = modal(s ? "Edit study" : "New study", `<form class="form" id="sf">
+    <label class="f">Title<input name="title" required value="${esc(s?.title)}" placeholder="MRI left knee"></label>
+    <div class="grid2"><label class="f">Study date<input name="study_date" type="date" value="${esc(s?.study_date)}"></label>
+    <label class="f">Modality<select name="modality"><option value=""></option>${mods.map(x => `<option ${s?.modality === x ? "selected" : ""}>${x}</option>`).join("")}</select></label></div>
+    <label class="f">Imaging center<input name="facility" value="${esc(s?.facility)}" placeholder="Lakeside Imaging Center"></label>
+    <label class="f">Notes<textarea name="description">${esc(s?.description)}</textarea></label>
+    <p class="err" id="err"></p></form>`, { footer: `${s ? '<button class="btn danger" id="del">Delete</button><span class="spacer"></span>' : ""}<button class="btn" data-close>Cancel</button><button class="btn primary" form="sf">${s ? "Save" : "Create study"}</button>` });
+  $("#sf", m.el).onsubmit = async e => {
+    e.preventDefault(); const body = Object.fromEntries(new FormData(e.target));
+    try { const r = s ? await API.req("PUT", `/api/studies/${s.id}`, body) : await API.req("POST", `/api/patients/${pid}/studies`, body); m.close(); go("study", r.id); }
+    catch (er) { $("#err", m.el).textContent = er.message; }
+  };
+  const d = $("#del", m.el);
+  if (d) d.onclick = async () => { m.close(); if (await confirmBox("Delete study?", `Deletes "${esc(s.title)}" and its ${s.file_count} files from this server.`)) { await API.req("DELETE", `/api/studies/${s.id}`); toast("Deleted"); go("patient", pid); } };
+}
+
+async function viewStudy(id) {
+  const s = await API.req("GET", `/api/studies/${id}`);
+  const [p, files] = await Promise.all([API.req("GET", `/api/patients/${s.patient_id}`), API.req("GET", `/api/studies/${id}/files`)]);
+  const m = main();
+  const reports = files.filter(f => f.kind === "report"), imgs = files.filter(f => f.kind !== "report");
+  const tile = f => `<button class="tile" data-f="${esc(f.id)}"><div class="img">${f.has_thumbnail ? `<img alt="" loading="lazy" src="${esc(API.thumbUrl(f.id))}">` : f.kind === "report" ? I.pdf : I.file}</div>
+    <div class="cap"><b>${esc(f.dicom?.series_description || f.filename)}</b><span>${f.kind === "dicom" ? `DICOM${f.dicom?.instance_number ? " #" + esc(f.dicom.instance_number) : ""}` : f.kind === "report" ? "Report" : esc(f.kind)} · ${fmtBytes(f.size_bytes)}</span></div></button>`;
+  m.innerHTML = `${mobileHead()}<div class="crumbs"><a href="#/patients" data-go="patients">Patients</a><span>/</span><a href="#/patient/${esc(p.id)}" data-go="patient/${esc(p.id)}">${esc(p.name)}</a><span>/</span><span>${esc(s.title)}</span></div>
+  <div class="top"><div><h1>${esc(s.title)}</h1><p class="sub">${[s.study_date && fmtDate(s.study_date), s.modality, s.facility, s.referring_physician && "Ref. " + s.referring_physician, s.accession && "Acc. " + s.accession].filter(Boolean).map(esc).join(" · ")}</p>
+    ${s.description ? `<p class="small" style="margin-top:8px;max-width:70ch">${esc(s.description)}</p>` : ""}</div>
+    <div class="row"><button class="btn" id="edit">Edit</button><label class="btn primary">${I.upload} Add files<input type="file" id="fi" multiple hidden></label></div></div>
+  <div class="drop" id="drop" style="padding:16px">${I.upload}<div class="small"><b>Drop more files for this study</b></div></div>
+  <div class="queue" id="queue"></div>
+  ${reports.length ? `<div class="section-h"><h2>Reports</h2></div><div class="lightbox">${reports.map(tile).join("")}</div>` : ""}
+  <div class="section-h"><h2>Images</h2><span class="muted small">${imgs.length} file${imgs.length === 1 ? "" : "s"}</span></div>
+  ${imgs.length ? `<div class="lightbox">${imgs.map(tile).join("")}</div>` : `<div class="card empty">${I.scan}<p>No images in this study yet.</p></div>`}`;
+  $("#edit").onclick = () => studyForm(p.id, s);
+  const up = fl => uploadFiles(`/api/studies/${id}/files?format=full`, fl, () => viewStudy(id));
+  wireDrop($("#drop"), up);
+  $("#fi").onchange = e => up([...e.target.files]);
+  $$(".tile", m).forEach(t => t.onclick = () => viewer(files, files.findIndex(f => f.id === t.dataset.f), () => viewStudy(id)));
+}
+
+function viewer(files, idx, refresh) {
+  let f = files[idx], zoom = 1, br = 100, ct = 100, inv = false, px = 0, py = 0;
+  const m = modal(f.filename, `<div class="viewer"><div class="stage" id="stage"></div><aside id="side"></aside></div>`, { wide: true });
+  $(".modal .body", m.el).style.padding = "0";
+  const draw = () => {
+    f = files[idx]; zoom = 1; px = py = 0;
+    $("header h2", m.el).textContent = f.filename;
+    const stage = $("#stage", m.el);
+    const isImg = f.kind === "image" || f.kind === "dicom";
+    const rep = API.reportImage && API.reportImage(f);
+    if (rep) stage.innerHTML = `<img id="im" alt="${esc(f.filename)}" src="${esc(rep)}" style="background:#fff">`;
+    else if (f.kind === "report" && (f.content_type || "").includes("pdf")) stage.innerHTML = `<iframe title="${esc(f.filename)}" src="${esc(API.fileUrl(f.id))}"></iframe>`;
+    else if (isImg && (f.has_thumbnail || f.kind === "image")) stage.innerHTML = `<img id="im" alt="${esc(f.filename)}" src="${esc(f.kind === "dicom" ? (API.previewUrl || API.thumbUrl)(f.id) : API.fileUrl(f.id))}"><div class="zoombar"><button data-z="-1" aria-label="Zoom out">−</button><button data-z="0" aria-label="Reset">1:1</button><button data-z="1" aria-label="Zoom in">+</button></div>`;
+    else stage.innerHTML = `<div class="empty" style="color:#9fb3b6">${I.file}<p>No preview for this file type.${f.kind === "dicom" ? " The DICOM is stored intact; open it in a DICOM viewer." : ""}</p></div>`;
+    const d = f.dicom || {};
+    const rows = [["Type", f.kind === "dicom" ? "DICOM" : f.kind === "report" ? "Report" : f.content_type], ["Size", fmtBytes(f.size_bytes)], ["Uploaded", fmtDT(f.uploaded_at)],
+      ["Modality", d.modality], ["Study date", d.study_date && fmtDate(d.study_date)], ["Series", d.series_description], ["Body part", d.body_part], ["Institution", d.institution],
+      ["Instance", d.instance_number], ["Matrix", d.rows && `${d.rows} × ${d.columns}`], ["Frames", d.frames !== "1" && d.frames], ["DICOM name", d.patient_name], ["SHA-256", f.sha256 && f.sha256.slice(0, 16) + "…"]].filter(r => r[1]);
+    $("#side", m.el).innerHTML = `<div class="row"><button class="btn sm" id="prev" ${idx ? "" : "disabled"}>‹ Prev</button><span class="muted small">${idx + 1} / ${files.length}</span><button class="btn sm" id="next" ${idx < files.length - 1 ? "" : "disabled"}>Next ›</button></div>
+      ${isImg ? `<div class="sliders"><label>Brightness<input type="range" min="40" max="220" value="100" id="br"></label><label>Contrast<input type="range" min="40" max="300" value="100" id="ct"></label><label class="check"><input type="checkbox" id="inv"> Invert</label></div>` : ""}
+      <dl>${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
+      <div class="row"><a class="btn sm" href="${esc(API.fileUrl(f.id, 1))}" download="${esc(f.filename)}">${I.dl} Original</a><button class="btn sm danger" id="del">Delete</button></div>
+      <p class="small muted">Stored encrypted (AES-256-GCM). Decrypted only while you view it.</p>`;
+    const im = $("#im", m.el);
+    const apply = () => { if (im) { im.style.filter = `brightness(${br}%) contrast(${ct}%)${inv ? " invert(1)" : ""}`; im.style.transform = `translate(${px}px,${py}px) scale(${zoom})`; } };
+    br = 100; ct = 100; inv = false; apply();
+    if (isImg) { $("#br", m.el).oninput = e => { br = +e.target.value; apply(); }; $("#ct", m.el).oninput = e => { ct = +e.target.value; apply(); }; $("#inv", m.el).onchange = e => { inv = e.target.checked; apply(); }; }
+    $$("[data-z]", m.el).forEach(b => b.onclick = () => { const z = +b.dataset.z; zoom = z ? Math.max(.5, Math.min(8, zoom * (z > 0 ? 1.4 : 1 / 1.4))) : 1; if (!z) px = py = 0; apply(); });
+    if (im) {
+      stage.onwheel = e => { e.preventDefault(); zoom = Math.max(.5, Math.min(8, zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15))); apply(); };
+      let drag = null;
+      stage.onpointerdown = e => { if (e.target.closest("button")) return; drag = [e.clientX - px, e.clientY - py]; stage.setPointerCapture(e.pointerId); };
+      stage.onpointermove = e => { if (drag) { px = e.clientX - drag[0]; py = e.clientY - drag[1]; apply(); } };
+      stage.onpointerup = () => drag = null;
+    }
+    $("#prev", m.el).onclick = () => { idx--; draw(); };
+    $("#next", m.el).onclick = () => { idx++; draw(); };
+    $("#del", m.el).onclick = async () => { if (await confirmBox("Delete file?", `Delete ${esc(f.filename)} from this server?`)) { await API.req("DELETE", `/api/files/${f.id}`); m.close(); toast("Deleted"); refresh(); } };
+  };
+  const key = e => { if (!document.body.contains(m.el)) return document.removeEventListener("keydown", key); if (e.key === "ArrowRight" && idx < files.length - 1) { idx++; draw(); } if (e.key === "ArrowLeft" && idx > 0) { idx--; draw(); } };
+  document.addEventListener("keydown", key);
+  draw();
+}
+
+// ------------------------------------------------------------------ upload page (mobile-first)
+async function viewUploadPage() {
+  const list = await API.req("GET", "/api/patients");
+  const m = main();
+  m.innerHTML = `${mobileHead()}<div class="top"><div><h1>Upload</h1><p class="sub">Files are encrypted on this server as they arrive.</p></div></div>
+  ${list.length ? `<div class="card pad stack" style="max-width:720px">
+    <label class="f">Patient<select id="pt">${list.map(p => `<option value="${esc(p.id)}">${esc(p.name)}${p.date_of_birth ? " · " + esc(fmtDate(p.date_of_birth)) : ""}</option>`).join("")}</select></label>
+    <label class="f">Put files in<select id="st"><option value="">Automatic: group DICOM by study, others under today's date</option></select></label>
+    <div class="drop" id="drop">${I.upload}<div><b>Drop files or a CD/zip export</b><div class="small muted">DICOM, JPG/PNG, PDF reports, ZIP</div></div>
+      <div class="row" style="justify-content:center"><label class="btn primary">Choose files<input type="file" id="fi" multiple hidden></label><label class="btn">${I.camera} Take photo<input type="file" id="cam" accept="image/*" capture="environment" hidden></label></div></div>
+    <div class="queue" id="queue"></div></div>`
+    : `<div class="card empty">${I.users}<h2>Add a patient first</h2><p>Uploads always belong to a patient.</p><button class="btn primary" id="add">${I.plus} Add patient</button></div>`}`;
+  if (!list.length) { $("#add").onclick = () => patientForm(); return; }
+  const fillStudies = async () => {
+    const ss = await API.req("GET", `/api/patients/${$("#pt").value}/studies`);
+    $("#st").innerHTML = `<option value="">Automatic: group DICOM by study, others under today's date</option>` + ss.map(s => `<option value="${esc(s.id)}">${esc((s.study_date ? fmtDate(s.study_date) + " · " : "") + s.title)}</option>`).join("");
+  };
+  $("#pt").onchange = fillStudies; await fillStudies();
+  const send = fl => { const sid = $("#st").value; uploadFiles(sid ? `/api/studies/${sid}/files?format=full` : `/api/patients/${$("#pt").value}/import`, fl, fillStudies); };
+  wireDrop($("#drop"), send);
+  $("#fi").onchange = e => send([...e.target.files]);
+  $("#cam").onchange = e => send([...e.target.files]);
+}
+
+// ------------------------------------------------------------------ backups
+const TT = { gdrive: ["Google Drive", I.drive], box: ["Box", I.box], sftp: ["SFTP / SCP server", I.server] };
+async function viewBackups() {
+  const [tg, runs] = await Promise.all([API.req("GET", "/api/backups/targets"), API.req("GET", "/api/backups/runs")]);
+  const m = main();
+  const badge = s => s === "ok" ? '<span class="badge ok">OK</span>' : s === "error" ? '<span class="badge err">Failed</span>' : s === "running" ? '<span class="badge warn">Running</span>' : '<span class="badge gray">Not run yet</span>';
+  m.innerHTML = `${mobileHead()}<div class="top"><div><h1>Backups</h1><p class="sub">Each backup is one archive, encrypted here with your key before upload. Providers only ever see ciphertext.</p></div>
+    <div class="row"><a class="btn" href="${esc(API.backupDownloadUrl())}" id="dlb">${I.dl} Download backup</a><button class="btn primary" id="all" ${tg.length ? "" : "disabled"}>Back up now</button></div></div>
+  <div class="targets">${tg.map(t => `<div class="card target">
+      <div class="row"><div class="logo">${TT[t.type][1]}</div><div style="flex:1"><h3>${esc(t.name)}</h3><div class="small muted">${esc(TT[t.type][0])}${t.type === "sftp" ? " · " + esc((t.config.protocol || "sftp").toUpperCase()) + " " + esc(t.config.host || "") : ""}</div></div>${t.enabled ? badge(t.last_status) : '<span class="badge gray">Paused</span>'}</div>
+      <div class="small"><div>Schedule: <b>${t.schedule_hours ? `every ${t.schedule_hours} h` : "manual only"}</b> · keep last <b>${t.keep_last || "all"}</b></div><div class="muted">Last run ${esc(fmtDT(t.last_run))}</div></div>
+      ${!t.connected ? `<div class="note">${I.warn}<div>Not connected yet. <button class="btn sm" data-conn="${esc(t.id)}" data-type="${esc(t.type)}">Connect ${esc(TT[t.type][0])} account</button></div></div>` : ""}
+      <div class="row"><button class="btn sm" data-run="${esc(t.id)}">Run now</button><button class="btn sm" data-test="${esc(t.id)}">Test</button><button class="btn sm ghost" data-edit="${esc(t.id)}">Edit</button></div></div>`).join("")}
+    <button class="addtarget" id="add">${I.plus}<span>Add destination</span><span class="small" style="font-weight:400">Google Drive · Box · SFTP/SCP</span></button></div>
+  <div class="section-h"><h2>History</h2></div>
+  <div class="card scroll">${runs.length ? `<table class="stk"><thead><tr><th>When</th><th>Destination</th><th>Status</th><th>Details</th><th style="text-align:right">Size</th></tr></thead><tbody>
+    ${runs.map(r => `<tr><td class="nowrap">${esc(fmtDT(r.started_at))}</td><td>${esc(r.target_name)}</td><td>${badge(r.status)}</td><td class="small">${esc(r.message || r.filename || "")}</td><td class="num">${r.size ? fmtBytes(r.size) : ""}</td></tr>`).join("")}</tbody></table>`
+    : `<p class="pad muted">No backups have run yet.</p>`}</div>
+  <div class="section-h"><h2>Restore</h2></div>
+  <div class="card pad stack"><p class="small">Replace this vault's contents with a backup made with the same key. Logins and backup destinations are kept. To restore onto a new server, use "Restore from a backup" during setup with your recovery key file.</p>
+    <div class="row"><label class="btn">${I.restore} Restore from file…<input type="file" id="rf" accept=".svb" hidden></label>${tg.length ? `<button class="btn" id="rr">Restore from a destination…</button>` : ""}</div></div>`;
+  $("#add").onclick = () => chooseTargetType();
+  $("#all").onclick = async e => { e.target.disabled = true; e.target.innerHTML = '<span class="spin"></span> Backing up…'; try { const r = await API.req("POST", "/api/backups/run"); toast(r.results.every(x => x.status === "ok") ? "Backup complete" : "Some backups failed"); } catch (er) { handleErr(er); } viewBackups(); };
+  $$("[data-run]", m).forEach(b => b.onclick = async () => { b.disabled = true; b.innerHTML = '<span class="spin"></span>'; try { const r = await API.req("POST", `/api/backups/targets/${b.dataset.run}/run`); toast(r.results[0].status === "ok" ? "Backup uploaded" : "Backup failed: " + r.results[0].message); } catch (er) { handleErr(er); } viewBackups(); });
+  $$("[data-test]", m).forEach(b => b.onclick = async () => { b.disabled = true; try { const r = await API.req("POST", `/api/backups/targets/${b.dataset.test}/test`); toast(r.message); } catch (er) { toast(er.message); } b.disabled = false; });
+  $$("[data-edit]", m).forEach(b => b.onclick = () => targetForm(tg.find(t => t.id === b.dataset.edit).type, tg.find(t => t.id === b.dataset.edit)));
+  $$("[data-conn]", m).forEach(b => b.onclick = () => API.oauthStart(b.dataset.type, b.dataset.conn));
+  $("#rf").onchange = e => restoreDialog({ file: e.target.files[0] });
+  const rr = $("#rr"); if (rr) rr.onclick = () => restoreDialog({ targets: tg });
+}
+
+function chooseTargetType() {
+  const m = modal("Add backup destination", `<div class="choice">${Object.entries(TT).map(([k, [l, ic]]) => `<button data-t="${k}">${ic}<b>${l}</b><span>${{ gdrive: "Your Google account (OAuth) or a Shared Drive via service account.", box: "Your Box account (OAuth) or a Box Custom App (client credentials).", sftp: "Any server you can SSH into: NAS, VPS, Synology, TrueNAS. SFTP or SCP." }[k]}</span></button>`).join("")}</div>`);
+  $$("[data-t]", m.el).forEach(b => b.onclick = () => { m.close(); targetForm(b.dataset.t); });
+}
+
+async function targetForm(type, t) {
+  const c = t?.config || {}, sec = t?.secrets_set || {};
+  const ph = k => sec[k] ? 'placeholder="•••••• saved (leave blank to keep)"' : "";
+  let redirect = "";
+  if (type !== "sftp") { try { redirect = (await API.req("GET", `/api/oauth/${type}/redirect-uri`)).redirect_uri; } catch { redirect = location.origin + `/api/oauth/${type}/callback`; } }
+  const common = `<div class="grid3"><label class="f">Name<input name="name" value="${esc(t?.name || TT[type][0])}"></label>
+    <label class="f">Every (hours) <span class="hint">0 = manual</span><input name="schedule_hours" type="number" min="0" value="${t ? t.schedule_hours : 24}"></label>
+    <label class="f">Keep last<input name="keep_last" type="number" min="0" value="${t ? t.keep_last : 14}"></label></div>
+    <label class="check"><input type="checkbox" name="enabled" ${!t || t.enabled ? "checked" : ""}> Enabled</label>`;
+  let fields = "";
+  if (type === "gdrive") fields = `<div class="seg" id="am"><button type="button" data-a="oauth" class="${c.auth_mode !== "service_account" ? "on" : ""}">Google account</button><button type="button" data-a="service_account" class="${c.auth_mode === "service_account" ? "on" : ""}">Service account</button></div>
+    <div data-mode="oauth" class="form"><div class="note info">${I.info}<div>In Google Cloud Console create an OAuth client (type "Web application"), enable the Drive API, and add this redirect URI: <code>${esc(redirect)}</code>. ScanVault only asks for access to files it creates.</div></div>
+      <div class="grid2"><label class="f">Client ID<input name="client_id" value="${esc(c.client_id)}"></label><label class="f">Client secret<input name="client_secret" type="password" ${ph("client_secret")}></label></div>
+      <label class="f">Refresh token <span class="hint">Optional: paste one instead of clicking Connect</span><input name="refresh_token" type="password" ${ph("refresh_token")}></label></div>
+    <div data-mode="service_account" class="form" hidden><label class="f">Service account JSON key <span class="hint">Share a Shared Drive folder with the service account's email</span><textarea name="service_account_json" ${ph("service_account_json")}></textarea></label></div>
+    <label class="f">Folder ID <span class="hint">From the folder's URL. Blank = My Drive root</span><input name="folder_id" value="${esc(c.folder_id)}"></label>`;
+  if (type === "box") fields = `<div class="seg" id="am"><button type="button" data-a="oauth" class="${c.auth_mode !== "ccg" ? "on" : ""}">Box account</button><button type="button" data-a="ccg" class="${c.auth_mode === "ccg" ? "on" : ""}">Custom App (CCG)</button></div>
+    <div class="grid2"><label class="f">Client ID<input name="client_id" value="${esc(c.client_id)}"></label><label class="f">Client secret<input name="client_secret" type="password" ${ph("client_secret")}></label></div>
+    <div data-mode="oauth" class="form"><div class="note info">${I.info}<div>In the Box Developer Console create a Custom App with "User Authentication (OAuth 2.0)" and add the redirect URI <code>${esc(redirect)}</code>.</div></div></div>
+    <div data-mode="ccg" class="form" hidden><div class="grid2"><label class="f">Subject type<select name="subject_type"><option value="user" ${c.subject_type !== "enterprise" ? "selected" : ""}>user</option><option value="enterprise" ${c.subject_type === "enterprise" ? "selected" : ""}>enterprise</option></select></label><label class="f">User or enterprise ID<input name="subject_id" value="${esc(c.subject_id)}"></label></div></div>
+    <label class="f">Folder ID <span class="hint">From the folder's URL. Blank = All Files root</span><input name="folder_id" value="${esc(c.folder_id)}"></label>`;
+  if (type === "sftp") fields = `<div class="seg" id="pr"><button type="button" data-p="sftp" class="${c.protocol !== "scp" ? "on" : ""}">SFTP</button><button type="button" data-p="scp" class="${c.protocol === "scp" ? "on" : ""}">SCP</button></div>
+    <div class="grid3"><label class="f" style="grid-column:span 2">Host<input name="host" value="${esc(c.host)}" placeholder="nas.local" autocapitalize="none"></label><label class="f">Port<input name="port" type="number" value="${esc(c.port || 22)}"></label></div>
+    <div class="grid2"><label class="f">Username<input name="username" value="${esc(c.username)}" autocapitalize="none"></label><label class="f">Password<input name="password" type="password" ${ph("password")}></label></div>
+    <label class="f">Private key <span class="hint">OpenSSH or PEM. Use instead of, or with, a password.</span><textarea name="private_key" class="mono" ${ph("private_key")}></textarea></label>
+    <div class="grid2"><label class="f">Key passphrase<input name="key_passphrase" type="password" ${ph("key_passphrase")}></label><label class="f">Remote folder<input name="remote_dir" value="${esc(c.remote_dir || "scanvault-backups")}"></label></div>
+    <label class="f">Pinned host key <span class="hint">Filled in automatically on the first successful test; a different key later blocks the connection.</span><input name="host_key" class="mono" value="${esc(c.host_key)}"></label>`;
+  const m = modal((t ? "Edit " : "Add ") + TT[type][0], `<form class="form" id="tf">${common}${fields}<p class="err" id="err"></p></form>`,
+    { footer: `${t ? '<button class="btn danger" id="del">Remove</button><span class="spacer"></span>' : ""}<button class="btn" data-close>Cancel</button><button class="btn primary" form="tf" id="save">Save</button>` });
+  let auth = c.auth_mode || "oauth", proto = c.protocol || "sftp";
+  const showMode = () => $$("[data-mode]", m.el).forEach(d => d.hidden = d.dataset.mode !== auth);
+  $$("#am button", m.el).forEach(b => b.onclick = () => { auth = b.dataset.a; $$("#am button", m.el).forEach(x => x.classList.toggle("on", x === b)); showMode(); });
+  $$("#pr button", m.el).forEach(b => b.onclick = () => { proto = b.dataset.p; $$("#pr button", m.el).forEach(x => x.classList.toggle("on", x === b)); });
+  showMode();
+  $("#tf", m.el).onsubmit = async e => {
+    e.preventDefault();
+    const fd = Object.fromEntries(new FormData(e.target));
+    const top = { name: fd.name, schedule_hours: +fd.schedule_hours || 0, keep_last: +fd.keep_last || 0, enabled: !!e.target.enabled.checked };
+    ["name", "schedule_hours", "keep_last", "enabled"].forEach(k => delete fd[k]);
+    if (type === "sftp") fd.protocol = proto; else fd.auth_mode = auth;
+    try {
+      const r = t ? await API.req("PUT", `/api/backups/targets/${t.id}`, { ...top, config: fd }) : await API.req("POST", "/api/backups/targets", { type, ...top, config: fd });
+      m.close(); toast("Saved");
+      if (!r.connected && type !== "sftp") { if (await confirmBox(`Connect ${TT[type][0]}?`, `You'll sign in to ${TT[type][0]} and allow ScanVault to store backups there.`, "Connect", false)) return API.oauthStart(type, r.id); }
+      viewBackups();
+    } catch (er) { $("#err", m.el).textContent = er.message; }
+  };
+  const d = $("#del", m.el);
+  if (d) d.onclick = async () => { m.close(); if (await confirmBox("Remove destination?", "Stops backing up here. Backups already uploaded stay where they are.", "Remove")) { await API.req("DELETE", `/api/backups/targets/${t.id}`); viewBackups(); } };
+}
+
+async function restoreDialog({ file, targets }) {
+  let remote = [];
+  const m = modal("Restore backup", `<form class="form" id="rf">
+    ${file ? `<p>Restore from <b>${esc(file.name)}</b> (${fmtBytes(file.size)}).</p>` : `<label class="f">Destination<select name="t">${targets.map(t => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")}</select></label><label class="f">Backup<select name="h"><option>Loading…</option></select></label>`}
+    <div class="note">${I.warn}<div>This replaces every patient, study and file on this server with the backup's contents. Anything added since that backup is lost unless it's in another backup.</div></div>
+    <label class="f">Type REPLACE to confirm<input name="c" autocomplete="off" autocapitalize="characters"></label><p class="err" id="err"></p></form>`,
+    { footer: `<button class="btn" data-close>Cancel</button><button class="btn danger" form="rf" id="go">Restore</button>` });
+  const loadRemote = async () => { try { remote = await API.req("GET", `/api/backups/targets/${$("[name=t]", m.el).value}/remote`); $("[name=h]", m.el).innerHTML = remote.length ? remote.map(r => `<option value="${esc(r.handle)}">${esc(r.name)}</option>`).join("") : "<option value=''>No backups found</option>"; } catch (er) { $("#err", m.el).textContent = er.message; } };
+  if (!file) { $("[name=t]", m.el).onchange = loadRemote; loadRemote(); }
+  $("#rf", m.el).onsubmit = async e => {
+    e.preventDefault(); const f = e.target; const fd = new FormData(); fd.append("confirm", f.c.value);
+    if (file) fd.append("backup_file", file); else { fd.append("target_id", f.t.value); fd.append("handle", f.h.value); }
+    $("#go", m.el).disabled = true; $("#go", m.el).innerHTML = '<span class="spin"></span> Restoring…';
+    try { const r = await API.upload("/api/backups/restore", fd); m.close(); toast(`Restored: ${r.patients} patients, ${r.files} files`); go("patients"); }
+    catch (er) { $("#err", m.el).textContent = er.message; $("#go", m.el).disabled = false; $("#go", m.el).textContent = "Restore"; }
+  };
+}
+
+// ------------------------------------------------------------------ settings
+async function viewSettings() {
+  const st = S.status = await API.req("GET", "/api/status");
+  const m = main();
+  m.innerHTML = `${mobileHead()}<div class="top"><div><h1>Settings</h1></div></div>
+  <div class="settings">
+    ${st.recovery_key_saved === false ? `<div class="note">${I.warn}<div>You haven't confirmed that you saved your recovery key file. Without it, a forgotten encryption key means your backups can't be opened.</div></div>` : ""}
+    <div class="card pad stack"><h2>Encryption</h2>
+      <div class="facts"><span>Vault <b class="mono">${esc(st.vault_id)}</b></span><span>Key fingerprint <b class="mono">${esc(st.fingerprint)}</b></span></div>
+      <p class="small muted">AES-256-GCM for every file, preview and patient record. Your encryption key is stretched with scrypt and only unlocks the master key, which lives in memory while the vault is unlocked.</p>
+      <div class="row"><button class="btn" id="rk">${I.key} Download recovery key file</button><button class="btn" id="cpw">Change encryption key</button><button class="btn" id="lock">${I.lock} Lock now</button></div></div>
+    <div class="card pad stack"><h2>Account</h2><p class="small">Signed in as <b>${esc(st.username)}</b>.</p>
+      <div class="row"><button class="btn" id="pw">Change password</button><button class="btn ghost" id="out">Sign out</button></div></div>
+    <div class="card pad stack"><h2>Install on your phone</h2>
+      <p class="small">Open this address in Safari (iPhone) or Chrome (Android) and choose <b>Add to Home Screen</b>. ScanVault opens full screen and can take photos of films and paper reports. Use HTTPS when you reach it from outside your home network.</p></div>
+    <div class="card pad stack"><h2>Privacy and HIPAA</h2>
+      <ul class="small" style="margin:0;padding-left:18px;display:grid;gap:6px">
+        <li>For personal and family records, HIPAA generally doesn't apply to you. If a practice uses ScanVault for patients, it is responsible for HIPAA safeguards, including business associate agreements with Google or Box.</li>
+        <li>Backups are encrypted before upload, so cloud providers hold only ciphertext, but file sizes and backup times are visible to them.</li>
+        <li>Put ScanVault behind HTTPS (a reverse proxy such as Caddy or Traefik) before exposing it beyond your LAN.</li>
+        <li>Losing both the encryption key and the recovery key file makes the data unrecoverable. That is by design.</li></ul></div>
+    <p class="small muted">ScanVault ${esc(st.version)}</p>
+  </div>`;
+  $("#rk").onclick = () => {
+    const mm = modal("Download recovery key", `<form class="form" id="f"><p class="small">Enter your encryption key to download the recovery key file again.</p><label class="f">Encryption key<input name="k" type="password" autocomplete="off" required></label><p class="err" id="err"></p></form>`, { footer: `<button class="btn" data-close>Cancel</button><button class="btn primary" form="f">Download</button>` });
+    $("#f", mm.el).onsubmit = async e => { e.preventDefault(); try { const t = await API.req("POST", "/api/vault/recovery-key", { passphrase: e.target.k.value }); saveText("scanvault-recovery-key.txt", t); await API.req("POST", "/api/vault/recovery-key/confirm", { recovery_key: t }); mm.close(); toast("Recovery key downloaded"); } catch (er) { $("#err", mm.el).textContent = er.message; } };
+  };
+  $("#cpw").onclick = () => {
+    const mm = modal("Change encryption key", `<form class="form" id="f"><p class="small">Your files and existing backups stay valid and your recovery key file keeps working. Only the passphrase you type changes.</p>
+      <label class="f">Current encryption key<input name="a" type="password" required autocomplete="off"></label><label class="f">New encryption key<input name="b" type="password" required minlength="12" autocomplete="new-password"></label><label class="f">Repeat new key<input name="c" type="password" required autocomplete="new-password"></label><p class="err" id="err"></p></form>`, { footer: `<button class="btn" data-close>Cancel</button><button class="btn primary" form="f">Change</button>` });
+    $("#f", mm.el).onsubmit = async e => { e.preventDefault(); const f = e.target; if (f.b.value !== f.c.value) return $("#err", mm.el).textContent = "New keys don't match."; try { await API.req("POST", "/api/vault/passphrase", { current: f.a.value, new: f.b.value }); mm.close(); toast("Encryption key changed"); } catch (er) { $("#err", mm.el).textContent = er.message; } };
+  };
+  $("#pw").onclick = () => {
+    const mm = modal("Change password", `<form class="form" id="f"><label class="f">Current password<input name="a" type="password" required autocomplete="current-password"></label><label class="f">New password<input name="b" type="password" required minlength="10" autocomplete="new-password"></label><p class="err" id="err"></p></form>`, { footer: `<button class="btn" data-close>Cancel</button><button class="btn primary" form="f">Change</button>` });
+    $("#f", mm.el).onsubmit = async e => { e.preventDefault(); try { await API.req("POST", "/api/auth/password", { current: e.target.a.value, new: e.target.b.value }); mm.close(); toast("Password changed"); } catch (er) { $("#err", mm.el).textContent = er.message; } };
+  };
+  $("#lock").onclick = async () => { await API.req("POST", "/api/vault/lock"); S.status.unlocked = false; render(); };
+  $("#out").onclick = async () => { await API.req("POST", "/api/auth/logout"); S.status.authenticated = false; render(); };
+}
+
+boot();
+})();
