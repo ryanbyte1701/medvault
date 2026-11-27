@@ -34,6 +34,36 @@ a USB disk.
   **recovery key file** for emergency restore. `tools/restore.py` decrypts
   any backup into plain folders without ScanVault running at all.
 
+## Screenshots
+
+All screenshots use the default dark theme and the built-in sample vault
+(fictional patients and synthetic scans, no real data).
+
+![Home dashboard: vault status, backup health, quick upload and recent studies](docs/screenshots/home.png)
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/patient-timeline.png" alt="Patient record with a timeline of studies"><br><sub><b>Patient timeline.</b> One record per person, studies newest first.</sub></td>
+<td width="50%"><img src="docs/screenshots/viewer.png" alt="DICOM viewer showing a chest CT with the lung window preset"><br><sub><b>DICOM viewer.</b> True window/level in HU (here the Lung preset, -600/1500).</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/study.png" alt="Study page with the report and image series"><br><sub><b>Study.</b> Reports and images, with tags filled in from DICOM.</sub></td>
+<td><img src="docs/screenshots/patients.png" alt="Patients list with search and totals"><br><sub><b>Patients.</b> Search by name, MRN or date of birth.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/backups.png" alt="Backup destinations with schedule, retention and history"><br><sub><b>Backups.</b> Per-destination schedule, retention and run history.</sub></td>
+<td><img src="docs/screenshots/settings.png" alt="Settings with theme, dark color presets and encryption details"><br><sub><b>Settings.</b> Theme, dark color presets and key fingerprint.</sub></td>
+</tr>
+</table>
+
+<p>
+<img src="docs/screenshots/mobile-home.png" width="19%" alt="Phone: home dashboard">
+<img src="docs/screenshots/mobile-patient.png" width="19%" alt="Phone: patient record">
+<img src="docs/screenshots/mobile-study.png" width="19%" alt="Phone: study">
+<img src="docs/screenshots/mobile-viewer.png" width="19%" alt="Phone: DICOM viewer">
+<img src="docs/screenshots/mobile-backups.png" width="19%" alt="Phone: backups">
+</p>
+
 ## Quick start
 
 ```bash
@@ -49,6 +79,13 @@ First run walks you through:
    for six random words). It is separate from the sign-in password.
 3. **Recovery key file**: download `scanvault-recovery-key.txt`, then
    upload it back to prove you saved it. Print it or keep it offline.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/setup-encryption-key.png" alt="First-run setup: set the encryption key"></td>
+<td width="50%"><img src="docs/screenshots/setup-recovery-key.png" alt="First-run setup: save the recovery key file"></td>
+</tr>
+</table>
 
 Data lives in the `scanvault-data` volume (`/data` in the container).
 
@@ -270,4 +307,5 @@ pip install -r requirements-dev.txt
 SCANVAULT_DATA=./data uvicorn app.main:app --reload --port 8080
 pytest -q                     # crypto, API, restore tool, every backup destination
 python3 tools/build_demo.py preview/index.html   # self-contained clickable demo, sample data only
+python3 tools/screenshots.py  # regenerate docs/screenshots (needs playwright; dark theme, sample data)
 ```
