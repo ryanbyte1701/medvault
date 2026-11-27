@@ -94,6 +94,7 @@ LABELS = {
     "study.update": "Edited a study",
     "study.delete": "Deleted a study",
     "study.view": "Viewed a study",
+    "study.compare": "Opened study comparison",
     "file.upload": "Uploaded files",
     "file.update": "Edited a file",
     "file.move": "Moved a file",
