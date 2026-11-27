@@ -283,6 +283,7 @@ def test_lab_actions_reach_the_activity_log(vault, monkeypatch):
     c.put(f"/api/labs/reports/{d['id']}", json={"save": True}, headers=B)
     c.get(f"/api/patients/{p['id']}/labs/export.csv", headers=B)
     c.delete(f"/api/labs/reports/{d['id']}", headers=B)
+    seen = [(a, kw) for a, kw in seen if a.startswith("lab.")]  # the app's own events (patient.create...) go through it too
     assert [a for a, _ in seen] == ["lab.upload", "lab.save", "lab.export", "lab.delete"]
     assert all(kw["patient_id"] == p["id"] for _, kw in seen)
     assert "5.120" not in repr(seen)  # no lab values in the log

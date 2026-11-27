@@ -118,6 +118,32 @@ const bname = d => "scanvault-backup-" + new Date(now - d * 86400000).toISOStrin
 [[0.1, 1], [0.3, 0], [0.35, 1], [1.3, 0], [1.35, 1], [2.3, 0]].forEach(([d, t]) => db.runs.push({ id: id(), target_id: db.targets[t].id, target_name: db.targets[t].name, target_type: db.targets[t].type, started_at: iso(d), finished_at: iso(d), status: "ok", message: `Uploaded ${bname(d)} (${size0().toLocaleString()} bytes)`, size: Math.round(size0() * 1.002), filename: bname(d) }));
 db.runs.splice(4, 0, { id: id(), target_id: db.targets[1].id, target_name: "Home NAS", target_type: "sftp", started_at: iso(1.6), finished_at: iso(1.6), status: "error", message: "SSH connection failed: timed out (NAS was asleep)", size: null, filename: bname(1.6) });
 
+// Sample activity log, built from the sample vault.
+const LBL = { "auth.login": "Signed in", "auth.login_failed": "Failed sign-in", "vault.unlock": "Unlocked the vault", "vault.lock": "Locked the vault", "file.upload": "Uploaded files",
+  "study.view": "Viewed a study", "file.view": "Viewed a file", "file.download": "Downloaded a file", "patient.update": "Edited a patient", "backup.run": "Ran a backup", "patient.create": "Added a patient",
+  "study.update": "Edited a study", "file.delete": "Deleted a file" };
+const actLog = [];
+{
+  const add = (d, action, x = {}) => actLog.push({ at: iso(d), action, label: LBL[action], category: action.split(".")[0], outcome: x.outcome || "ok", user_id: x.anon || x.sys ? null : "u1",
+    username: x.sys ? "ScanVault" : x.anon ? (x.details?.attempted_username || "Unknown") : "ryan", patient_id: x.p?.id || null, patient_name: x.p?.name || null, study_id: x.s?.id || null, study_title: x.s?.title || null,
+    ip: x.ip || "192.168.1.24", client: x.client || "web", user_agent: x.client === "android" ? "ScanVault-Android/1.0 (Pixel 8)" : "Mozilla/5.0 (Macintosh) Firefox/146.0", signed: true, readable: true, details: x.details || {} });
+  const st = t => db.studies.find(s => s.title === t);
+  const knee = st("MRI left knee without contrast"), cxr = st("Chest X-ray"), head = st("CT head without contrast");
+  add(3.2, "auth.login", { details: { method: "password" } }); add(3.2, "vault.unlock", { details: { method: "passphrase" } });
+  add(3.1, "file.upload", { p: mom, s: head, details: { how: "import", files: 7, bytes: 3870000, filenames: ["CT-head-report.pdf", "IM000001.dcm", "IM000002.dcm"] } });
+  add(2.9, "patient.update", { p: mom, details: { changed: ["notes"] } });
+  db.runs.forEach(r => add((now - Date.parse(r.started_at)) / 86400000, "backup.run", { sys: true, client: "system", ip: null, details: { trigger: "schedule", target_name: r.target_name, outcome: r.status, message: r.message } }));
+  add(1.2, "auth.login_failed", { anon: true, outcome: "failed", ip: "203.0.113.77", details: { attempted_username: "admin", method: "password", reason: "unknown username" } });
+  add(0.9, "auth.login", { client: "android", ip: "10.0.0.31", details: { method: "password" } });
+  add(0.9, "study.view", { p: sam, s: cxr, client: "android", ip: "10.0.0.31" });
+  add(0.89, "file.view", { p: sam, s: cxr, client: "android", ip: "10.0.0.31", details: { filename: "CXR-report.pdf" } });
+  add(0.4, "file.upload", { p: jane, s: knee, details: { how: "study upload", files: 9, bytes: 4512000, filenames: ["MRI-knee-report.pdf", "IM000001.dcm"] } });
+  add(0.35, "study.update", { p: jane, s: knee, details: { changed: ["facility", "referring_physician"] } });
+  add(0.2, "file.download", { p: jane, s: knee, details: { filename: "MRI-knee-report.pdf", bytes: 182000 } });
+  add(0.05, "vault.lock");
+  actLog.sort((a, b) => a.at.localeCompare(b.at)).forEach((e, i) => { e.seq = i + 1; });
+  actLog.reverse();
+}
 const state = { prefs: { theme: "system", dark_color: "#0d1416" }, setup: false, authed: false, unlocked: false, passphrase: null, recovery: null, saved: false, vault_id: "SV-7F3A91C2", fp: "8C1E-55D0-A7F2-0B94" };
 function recoveryText() {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; const a = new Uint8Array(58); crypto.getRandomValues(a);
@@ -179,7 +205,7 @@ async function req(method, path, body) {
   await wait();
   const url = path.split("?")[0];
   let m;
-  if (url === "/api/status") return { setup_complete: state.setup, unlocked: state.unlocked, authenticated: state.authed, username: state.authed ? "ryan" : null, vault_id: state.vault_id, fingerprint: state.authed ? state.fp : null, recovery_key_saved: state.authed ? state.saved : null, passphrase_restore: state.authed ? !!state.pr : null, secure: true, setup_code_required: !state.setup, version: "0.2.0 (preview)" };
+  if (url === "/api/status") return { setup_complete: state.setup, unlocked: state.unlocked, authenticated: state.authed, username: state.authed ? "ryan" : null, role: state.authed ? "admin" : null, vault_id: state.vault_id, fingerprint: state.authed ? state.fp : null, recovery_key_saved: state.authed ? state.saved : null, passphrase_restore: state.authed ? !!state.pr : null, secure: true, setup_code_required: !state.setup, version: "0.2.0 (preview)" };
   if (url === "/api/setup") { await wait(700); state.setup = state.authed = state.unlocked = true; state.passphrase = body.passphrase; state.recovery = recoveryText(); return { token: "demo", recovery_key: state.recovery, fingerprint: state.fp, vault_id: state.vault_id }; }
   if (url === "/api/auth/login") { state.authed = true; return { token: "demo", unlocked: state.unlocked }; }
   if (url === "/api/auth/logout") { state.authed = false; return { ok: true }; }
@@ -263,6 +289,20 @@ async function req(method, path, body) {
   if (url === "/api/backups/runs") return db.runs;
   if ((m = url.match(/^\/api\/backups\/targets\/([^/]+)\/remote$/))) { const t = findT(m[1]); return db.runs.filter(r => r.target_id === t.id && r.status === "ok").map(r => ({ name: r.filename, handle: r.filename })); }
   if ((m = url.match(/^\/api\/oauth\/([^/]+)\/redirect-uri$/))) return { redirect_uri: `https://scanvault.example.com/api/oauth/${m[1]}/callback` };
+  if (url === "/api/activity") {
+    const q = new URLSearchParams(path.split("?")[1] || "");
+    const a = q.get("action") || "", needle = (q.get("q") || "").toLowerCase();
+    const list = actLog.filter(e => (!q.get("user_id") || e.user_id === q.get("user_id")) && (!q.get("patient_id") || e.patient_id === q.get("patient_id")) && (!q.get("study_id") || e.study_id === q.get("study_id"))
+      && (!a || (a.endsWith(".") ? e.action.startsWith(a) : e.action === a)) && (!q.get("since") || e.at >= q.get("since")) && (!q.get("until") || e.at < q.get("until"))
+      && (!needle || JSON.stringify(e).toLowerCase().includes(needle)));
+    return { entries: list, next_before: null };
+  }
+  if (url === "/api/activity/filters") {
+    const acts = [...new Set(actLog.map(e => e.action))].sort();
+    const cats = { auth: "Sign-in", vault: "Encryption and keys", patient: "Patients", study: "Studies", file: "Files", backup: "Backups" };
+    return { users: [{ id: "u1", username: "ryan" }], actions: acts.map(x => ({ action: x, label: LBL[x], category: x.split(".")[0] })), categories: Object.entries(cats).filter(([k]) => acts.some(x => x.startsWith(k + "."))).map(([id, label]) => ({ id, label })) };
+  }
+  if (url === "/api/activity/verify") { await wait(500); return { ok: true, entries: actLog.length, signed_through: actLog.length, unsigned_tail: 0, problems: [] }; }
   err(404, "Not available in the preview: " + url);
 }
 

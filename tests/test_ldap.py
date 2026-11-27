@@ -1,6 +1,7 @@
 """Directory (LDAPS) sign-in: TLS checks against a local TLS server, and the
 sign-in logic against ldap3's in-memory mock directory."""
 import datetime
+import json
 import hashlib
 import ipaddress
 import socket
@@ -323,3 +324,22 @@ def test_hostname_matching():
     assert not ldapauth._hostname_ok(der, "home.lan")
     assert not ldapauth._hostname_ok(der, "10.0.0.6")
     assert not ldapauth._hostname_ok(der, "evil.example.com")
+
+
+def test_directory_activity_is_logged(env):
+    c, B, _ = env
+    configure(c, B)
+    assert login(c, "ryan", "dir-pass-1").status_code == 401  # valid directory password, not linked yet
+    assert link(c, B).status_code == 200
+    r = login(c, "ryan", "dir-pass-1")
+    assert r.status_code == 200
+    assert login(c, "ryan", "wrong-pass").status_code == 401
+    entries = c.get("/api/activity", headers=B).json()["entries"]
+    acts = [(e["action"], e["details"].get("method"), e["details"].get("reason")) for e in entries]
+    assert ("auth.login_failed", "ldaps", "bad credentials") in acts
+    assert ("auth.login", "ldaps", None) in acts
+    assert ("auth.login_failed", "ldaps", "directory account not linked") in acts
+    assert any(a == "auth.sso_linked" for a, _, _ in acts) and any(a == "ldap.settings" for a, _, _ in acts)
+    ok = next(e for e in entries if e["action"] == "auth.login")
+    assert ok["username"] == "ryan" and ok["client"] == "android"
+    assert "dir-pass-1" not in json.dumps(entries) and "svc-secret" not in json.dumps(entries)

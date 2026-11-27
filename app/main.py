@@ -31,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import backup, crypto, ldapauth, media, similar, sso, targets
+from . import audit, backup, crypto, ldapauth, media, similar, sso, targets
 from .forms import Form as UploadForm, FormError, UploadPart, parse_form
 from .spool import Spool, SpoolFull
 from .store import fsync_dir, fsync_tree, write_durable, Store, seal, unseal
@@ -69,6 +69,7 @@ app = FastAPI(
 )
 store = Store()
 vault = crypto.Vault()
+activity = audit.AuditLog(lambda: store)
 backup_lock = threading.Lock()
 _state = {"maintenance": None, "last_activity": time.time(), "setup_code": None, "rekeying": False}
 _MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -305,6 +306,7 @@ def require_user(request: Request) -> dict:
     if not u:
         raise ApiError(401, "Not signed in", "unauthenticated")
     _csrf(request, u["via"])
+    request.state.sv_user = u
     return u
 
 
@@ -430,6 +432,86 @@ def _header_safe(v) -> str:
 
 # =================================================================== status/setup
 
+# =================================================================== activity log hooks
+
+def _client_kind(request: Request | None, u: dict | None) -> str:
+    if request is None:
+        return "system"
+    ua = request.headers.get("user-agent", "")
+    if "ScanVault-Android" in ua or "okhttp" in ua.lower():
+        return "android"
+    if u and u.get("via") == "bearer":
+        return "api"
+    return "web"
+
+
+def _names(pid: str | None, sid: str | None) -> dict:
+    """Patient name and study title as they are now, so the entry stays
+    readable after the patient or study is deleted."""
+    out: dict = {}
+    master = vault.master_key
+    if not master or not (pid or sid):
+        return out
+    c = store.conn()
+    try:
+        if sid:
+            r = c.execute("SELECT id, patient_id, blob FROM studies WHERE id=?", (sid,)).fetchone()
+            if r:
+                out["study_title"] = unseal(master, r["blob"], f"study:{sid}").get("title")
+                pid = pid or r["patient_id"]
+        if pid:
+            r = c.execute("SELECT blob FROM patients WHERE id=?", (pid,)).fetchone()
+            if r:
+                out["patient_name"] = unseal(master, r["blob"], f"patient:{pid}").get("name")
+    except Exception:
+        pass
+    return out
+
+
+def log_event(
+    request: Request | None,
+    action: str,
+    *,
+    user: dict | None = None,
+    patient_id: str | None = None,
+    study_id: str | None = None,
+    dedupe: float = 0,
+    **details,
+) -> None:
+    """Record an activity log entry: who (the signed-in user of ``request``
+    unless ``user`` is given), what (``action``, e.g. "study.view"), which
+    patient/study, and any extra ``details`` (encrypted). Never raises.
+
+    Other features call this too, e.g.
+    ``log_event(request, "ai.explain", patient_id=pid, study_id=sid, file_id=fid)``."""
+    try:
+        u = user or (getattr(request.state, "sv_user", None) if request is not None else None)
+        if study_id and not patient_id:
+            r = store.conn().execute("SELECT patient_id FROM studies WHERE id=?", (study_id,)).fetchone()
+            patient_id = r["patient_id"] if r else None
+        d = {
+            "username": (u or {}).get("username"),
+            "ip": client_ip(request) if request is not None else None,
+            "client": _client_kind(request, u),
+            "agent": (request.headers.get("user-agent", "")[:200] if request is not None else None),
+            **_names(patient_id, study_id),
+            **details,
+        }
+        activity.record(action, user_id=(u or {}).get("id"), patient_id=patient_id, study_id=study_id, details=d, dedupe=dedupe)
+    except Exception:
+        log.exception("Activity log hook failed for %s", action)
+
+
+def _unlock_activity(master: bytes) -> None:
+    try:
+        activity.load(master)
+    except Exception:
+        log.exception("Could not open the activity log keys")
+
+
+VIEW_DEDUPE = 15 * 60  # one "viewed" entry per user and item per 15 minutes
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
@@ -446,6 +528,7 @@ def status(request: Request):
         "unlocked": vault.unlocked,
         "authenticated": bool(u),
         "username": u["username"] if u else None,
+        "role": u["role"] if u else None,
         "vault_id": ks["vault_id"] if (ks and u) else None,
         "fingerprint": ks["fingerprint"] if (ks and u) else None,
         "recovery_key_saved": bool(store.get_config("recovery_key_saved", False)) if u else None,
@@ -592,7 +675,11 @@ async def setup(request: Request):
         store.set_config("setup_complete", True)
         _state["setup_code"] = None
         vault.master_key = master
+        c.execute("DELETE FROM audit_log")  # a vault set up again starts a new log
+        c.execute("DELETE FROM config WHERE key IN (?,?)", (audit.KEYS_CFG, audit.HEAD_CFG))
+        _unlock_activity(master)
         tok, exp = new_session(uid)
+        log_event(request, "auth.setup", user={"id": uid, "username": username}, vault_id=vault_id)
     return session_response(
         request,
         {"expires_at": iso(exp), "vault_id": vault_id, "fingerprint": ks["fingerprint"], "recovery_key": recovery_text(master)},
@@ -648,7 +735,9 @@ async def setup_restore(request: Request):
             _state["setup_code"] = None
             vault.master_key = master
             await asyncio.to_thread(migrate_file_macs, master)
+            _unlock_activity(master)
             tok, exp = new_session(uid)
+            log_event(request, "backup.restore", user={"id": uid, "username": username}, mode="fresh install", backup_created=header.get("created"), **_counts())
     finally:
         form.close()
     counts = _counts()
@@ -681,21 +770,38 @@ async def login(request: Request):
     ok = local_ok and await asyncio.to_thread(crypto.verify_password, password, r["password_hash"] if r else crypto.DUMMY_PASSWORD_HASH)
     if not r or not ok:
         # Not a ScanVault password: try the directory, for linked accounts only.
+        reason = ("wrong password" if r else "unknown username") if local_ok else "password sign-in off"
+        method = "password"
         if ldap_on and password:
-            ident = await _ldap_auth(_ldap_cfg(), username, password)
+            method = "ldaps"
+            try:
+                ident = await _ldap_auth(_ldap_cfg(), username, password)
+            except ApiError:
+                log_event(request, "auth.login_failed", user={"id": r["id"], "username": r["username"]} if r else None,
+                          attempted_username=username[:100], method="ldaps", reason="directory unavailable")
+                raise
             row = _ldap_login_identity(ident) if ident else None
             if row:
                 login_throttle.success(*keys)
                 (device_throttle if dev_id else account_throttle).reset(akey)
                 store.conn().execute("UPDATE user_identities SET last_login=? WHERE id=?", (time.time(), row["id"]))
                 tok, exp = new_session(row["uid"], row["id"])
+                urow = store.conn().execute("SELECT id, username FROM users WHERE id=?", (row["uid"],)).fetchone()
+                log_event(request, "auth.login", user=dict(urow) if urow else {"id": row["uid"]}, method="ldaps",
+                          provider=_ldap_name(), directory_username=username[:100])
                 return session_response(request, {"expires_at": iso(exp), "unlocked": vault.unlocked, "method": "ldap"}, tok, exp)
             if ident:
                 log.info("Directory account %r signed in correctly but is not linked to a ScanVault login", ident["dn"])
+                reason = "directory account not linked"
+            else:
+                reason = "bad credentials"
+        log_event(request, "auth.login_failed", user={"id": r["id"], "username": r["username"]} if r else None,
+                  attempted_username=username[:100], method=method, reason=reason)
         raise ApiError(401, "Wrong username or password")
     login_throttle.success(*keys)
     (device_throttle if dev_id else account_throttle).reset(akey)
     tok, exp = new_session(r["id"])
+    log_event(request, "auth.login", user={"id": r["id"], "username": r["username"]}, method="password")
     dev = None if dev_id else _new_device(r["id"])
     body = {"expires_at": iso(exp), "unlocked": vault.unlocked}
     if dev and not _is_browser(request):
@@ -739,7 +845,10 @@ def logout(request: Request):
     tok, how = _token_from(request)
     if tok:
         _csrf(request, how)
+        u = current_user(request)
         store.conn().execute("DELETE FROM sessions WHERE token_hash=?", (_th(tok),))
+        if u:
+            log_event(request, "auth.logout", user=u)
     resp = JSONResponse({"ok": True})
     resp.delete_cookie("sv_session", path="/", httponly=True, samesite="strict", secure=_secure(request))
     return resp
@@ -750,6 +859,7 @@ def logout_others(request: Request):
     """Sign out every other device and browser."""
     u = require_user(request)
     n = store.conn().execute("DELETE FROM sessions WHERE user_id=? AND token_hash<>?", (u["id"], u["token_hash"])).rowcount
+    log_event(request, "auth.logout_others", signed_out=n)
     return {"ok": True, "signed_out": n}
 
 
@@ -760,6 +870,7 @@ async def change_password(request: Request):
     key_throttle.attempt("pw:" + u["id"])
     r = store.conn().execute("SELECT password_hash FROM users WHERE id=?", (u["id"],)).fetchone()
     if not await asyncio.to_thread(crypto.verify_password, jstr(j, "current"), r["password_hash"]):
+        log_event(request, "auth.password_changed", outcome="failed", reason="current password wrong")
         raise ApiError(400, "Current password is wrong")
     key_throttle.success("pw:" + u["id"])
     new = jstr(j, "new")
@@ -775,6 +886,7 @@ async def change_password(request: Request):
     c.execute("UPDATE users SET password_hash=? WHERE id=?", (h, u["id"]))
     n = c.execute("DELETE FROM sessions WHERE user_id=? AND token_hash<>?", (u["id"], u["token_hash"])).rowcount
     c.execute("DELETE FROM user_devices WHERE user_id=?", (u["id"],))
+    log_event(request, "auth.password_changed", signed_out=n)
     return {"ok": True, "signed_out": n}
 
 
@@ -813,6 +925,7 @@ async def _verify_passphrase(request: Request, passphrase: str, wrong_msg: str =
     try:
         master = await asyncio.to_thread(crypto.unwrap_master_key, ks, passphrase)
     except crypto.CryptoError:
+        log_event(request, "vault.unlock_failed" if request.url.path.endswith("/unlock") else "vault.passphrase_failed", method="passphrase", path=request.url.path)
         await asyncio.sleep(0.3)
         raise ApiError(400, wrong_msg)
     key_throttle.success(*keys)
@@ -834,22 +947,33 @@ async def unlock(request: Request):
     if j.get("recovery_key"):
         keys = _unlock_keys(request)
         key_throttle.attempt(*keys)
-        master = crypto.parse_recovery_file(jstr(j, "recovery_key"))
+        try:
+            master = crypto.parse_recovery_file(jstr(j, "recovery_key"))
+        except crypto.CryptoError:
+            log_event(request, "vault.unlock_failed", method="recovery key", reason="not a valid recovery key")
+            raise
         if crypto.fingerprint(master) != ks["fingerprint"]:
+            log_event(request, "vault.unlock_failed", method="recovery key", reason="different vault")
             raise ApiError(400, "That recovery key belongs to a different vault")
         key_throttle.success(*keys)
+        method = "recovery key"
     else:
         master = await _verify_passphrase(request, jstr(j, "passphrase"))
+        method = "passphrase"
     vault.master_key = master
     _state["last_activity"] = time.time()
     await asyncio.to_thread(migrate_file_macs, master)
+    _unlock_activity(master)
+    log_event(request, "vault.unlock", method=method)
     return {"unlocked": True}
 
 
 @app.post("/api/vault/lock")
 def lock(request: Request):
     require_user(request)
+    log_event(request, "vault.lock")
     vault.lock()
+    activity.forget()
     _clear_caches()
     return {"unlocked": False}
 
@@ -861,6 +985,7 @@ async def get_recovery_key(request: Request):
     gate_request(request)
     j = await body_json(request, 64 * 1024)
     master = await _verify_passphrase(request, jstr(j, "passphrase"))
+    log_event(request, "vault.recovery_key_downloaded")
     return PlainTextResponse(recovery_text(master), headers={"Content-Disposition": 'attachment; filename="scanvault-recovery-key.txt"'})
 
 
@@ -874,6 +999,7 @@ async def confirm_recovery_key(request: Request):
         if crypto.fingerprint(master) != store.keystore()["fingerprint"]:
             raise ApiError(400, "That key file belongs to a different vault")
         store.set_config("recovery_key_saved", True)
+        log_event(request, "vault.recovery_key_confirmed")
     elif not j.get("skip"):
         raise ApiError(400, "Upload the recovery key file to confirm")
     return {"ok": True, "recovery_key_saved": bool(store.get_config("recovery_key_saved", False))}
@@ -897,6 +1023,7 @@ async def change_passphrase(request: Request):
     nks = await asyncio.to_thread(crypto.wrap_master_key, master, new, ks["vault_id"])
     nks["created"] = ks.get("created")
     store.write_keystore(nks)
+    log_event(request, "vault.passphrase_changed")
     return {"ok": True}
 
 
@@ -911,7 +1038,10 @@ async def put_vault_settings(request: Request):
     require_user(request)
     j = await body_json(request, 64 * 1024)
     if "passphrase_restore" in j:
+        old = bool(store.get_config("backup_include_wrapped_key", False))
         store.set_config("backup_include_wrapped_key", bool(j["passphrase_restore"]))
+        if old != bool(j["passphrase_restore"]):
+            log_event(request, "vault.settings", setting="passphrase restore", value="on" if j["passphrase_restore"] else "off")
     return vault_settings(request)
 
 
@@ -965,6 +1095,8 @@ async def rekey(request: Request):
         backup_lock.release()
     vault.master_key = new_master
     _clear_caches()
+    _unlock_activity(new_master)
+    log_event(request, "vault.rekey", fingerprint=store.keystore()["fingerprint"])
     return {"ok": True, "fingerprint": store.keystore()["fingerprint"], "recovery_key": recovery_text(new_master)}
 
 
@@ -1017,6 +1149,7 @@ def _rekey(old: bytes, passphrase: str) -> bytes:
                 for r in c.execute("SELECT id, config FROM backup_targets").fetchall():
                     d = unseal(old, r["config"], f"target:{r['id']}")
                     c.execute("UPDATE backup_targets SET config=? WHERE id=?", (seal(new, d, f"target:{r['id']}"), r["id"]))
+                activity.reseal(c, old, new)
                 c.execute(
                     "INSERT INTO config(key,value) VALUES('rekey_id',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     (json.dumps(jid),),
@@ -1100,6 +1233,11 @@ def _patient_out(row, master: bytes, counts: dict | None = None) -> dict:
     return out
 
 
+def _changed(old: dict, new: dict) -> list[str]:
+    """Names of the fields an edit changed (not their values)."""
+    return sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
+
+
 def _patient_fields(j: dict, existing: dict | None = None) -> dict:
     d = dict(existing or {})
     for k in ("name", "date_of_birth", "mrn", "sex", "notes"):
@@ -1145,6 +1283,7 @@ async def create_patient(request: Request):
     store.conn().execute(
         "INSERT INTO patients(id,created_at,updated_at,blob) VALUES(?,?,?,?)", (pid, now, now, seal(master, d, f"patient:{pid}"))
     )
+    log_event(request, "patient.create", patient_id=pid)
     return _get_patient(pid, master)
 
 
@@ -1157,7 +1296,9 @@ def _get_patient(pid: str, master: bytes) -> dict:
 
 @app.get("/api/patients/{pid}")
 def get_patient(pid: str, request: Request):
-    return _get_patient(pid, data_access(request))
+    out = _get_patient(pid, data_access(request))
+    log_event(request, "patient.view", patient_id=pid, dedupe=VIEW_DEDUPE)
+    return out
 
 
 @app.put("/api/patients/{pid}")
@@ -1166,8 +1307,10 @@ async def update_patient(pid: str, request: Request):
     r = store.conn().execute("SELECT * FROM patients WHERE id=?", (pid,)).fetchone()
     if not r:
         raise ApiError(404, "Patient not found")
-    d = _patient_fields(await body_json(request), unseal(master, r["blob"], f"patient:{pid}"))
+    old = unseal(master, r["blob"], f"patient:{pid}")
+    d = _patient_fields(await body_json(request), old)
     store.conn().execute("UPDATE patients SET blob=?, updated_at=? WHERE id=?", (seal(master, d, f"patient:{pid}"), time.time(), pid))
+    log_event(request, "patient.update", patient_id=pid, changed=_changed(old, d), previous_name=old.get("name") if old.get("name") != d.get("name") else None)
     return _get_patient(pid, master)
 
 
@@ -1177,6 +1320,8 @@ def delete_patient(pid: str, request: Request):
     if not store.conn().execute("SELECT 1 FROM patients WHERE id=?", (pid,)).fetchone():
         raise ApiError(404, "Patient not found")
     ids = [f["id"] for f in store.conn().execute("SELECT id FROM files WHERE patient_id=?", (pid,)).fetchall()]
+    nstudies = store.conn().execute("SELECT COUNT(*) FROM studies WHERE patient_id=?", (pid,)).fetchone()[0]
+    log_event(request, "patient.delete", patient_id=pid, studies=nstudies, files=len(ids))
     store.conn().execute("DELETE FROM patients WHERE id=?", (pid,))
     for fid in ids:
         _remove_blobs(fid)
@@ -1236,6 +1381,7 @@ async def create_study(pid: str, request: Request):
     master = data_access(request)
     _get_patient(pid, master)
     sid = _insert_study(pid, _study_fields(await body_json(request)), master)
+    log_event(request, "study.create", patient_id=pid, study_id=sid)
     return _get_study(sid, master)
 
 
@@ -1278,7 +1424,9 @@ def _get_study(sid: str, master: bytes) -> dict:
 
 @app.get("/api/studies/{sid}")
 def get_study(sid: str, request: Request):
-    return _get_study(sid, data_access(request))
+    out = _get_study(sid, data_access(request))
+    log_event(request, "study.view", patient_id=out["patient_id"], study_id=sid, dedupe=VIEW_DEDUPE)
+    return out
 
 
 @app.get("/api/studies/{sid}/similar")
@@ -1298,6 +1446,7 @@ def similar_studies(sid: str, request: Request):
         s["thumbnail_ids"] = [f["id"] for f in fl if f["has_preview"]][:3]
         s["image_count"] = sum(1 for f in fl if f["kind"] != "report")
         others.append(s)
+    log_event(request, "study.compare", patient_id=base["patient_id"], study_id=sid, dedupe=VIEW_DEDUPE)
     return similar.rank(base, others)
 
 
@@ -1305,16 +1454,19 @@ def similar_studies(sid: str, request: Request):
 async def update_study(sid: str, request: Request):
     master = data_access(request)
     r = _study_row(sid)
-    d = _study_fields(await body_json(request), unseal(master, r["blob"], f"study:{sid}"))
+    old = unseal(master, r["blob"], f"study:{sid}")
+    d = _study_fields(await body_json(request), old)
     store.conn().execute("UPDATE studies SET blob=? WHERE id=?", (seal(master, d, f"study:{sid}"), sid))
+    log_event(request, "study.update", patient_id=r["patient_id"], study_id=sid, changed=_changed(old, d))
     return _get_study(sid, master)
 
 
 @app.delete("/api/studies/{sid}")
 def delete_study(sid: str, request: Request):
     data_access(request)
-    _study_row(sid)
+    st = _study_row(sid)
     ids = [f["id"] for f in store.conn().execute("SELECT id FROM files WHERE study_id=?", (sid,)).fetchall()]
+    log_event(request, "study.delete", patient_id=st["patient_id"], study_id=sid, files=len(ids))
     store.conn().execute("DELETE FROM studies WHERE id=?", (sid,))
     for fid in ids:
         _remove_blobs(fid)
@@ -1561,6 +1713,31 @@ def _ingest_all(parts: list[UploadPart], pid: str, sid: str | None, master: byte
     return res
 
 
+def _log_upload(request: Request, res: dict, pid: str, started: float, how: str) -> None:
+    """One entry per study that received files."""
+    by: dict = {}
+    for f in res["files"]:
+        by.setdefault(f["study_id"], []).append(f)
+    c = store.conn()
+    for sid, files in by.items():
+        new = [f for f in files if not f.get("duplicate")]
+        r = c.execute("SELECT created_at FROM studies WHERE id=?", (sid,)).fetchone()
+        log_event(
+            request,
+            "file.upload",
+            patient_id=pid,
+            study_id=sid,
+            how=how,
+            files=len(new),
+            duplicates=len(files) - len(new) or None,
+            bytes=sum(f.get("size_bytes") or 0 for f in new),
+            filenames=[f["filename"] for f in new][:100],
+            file_ids=[f["id"] for f in new][:100],
+            new_study=bool(r and r["created_at"] >= started) or None,
+            skipped=len(res.get("skipped") or []) or None,
+        )
+
+
 async def _upload_form(request: Request) -> UploadForm:
     return await parse_form(request, store.tmp_dir, MAX_UPLOAD)
 
@@ -1576,9 +1753,11 @@ async def upload_files(sid: str, request: Request):
             raise ApiError(400, "Choose at least one file")
         if len(parts) == 1 and parts[0].size == 0:
             raise ApiError(400, f"{clean_filename(parts[0].filename)} is empty")
+        started = time.time()
         res = await asyncio.to_thread(_ingest_all, parts, st["patient_id"], sid, master, form.get("kind"))
     finally:
         form.close()
+    _log_upload(request, res, st["patient_id"], started, "study upload")
     res.pop("_sids")
     return res["files"] if request.query_params.get("format") != "full" else res
 
@@ -1594,9 +1773,11 @@ async def import_files(pid: str, request: Request):
             raise ApiError(400, "Choose at least one file")
         if len(parts) == 1 and parts[0].size == 0:
             raise ApiError(400, f"{clean_filename(parts[0].filename)} is empty")
+        started = time.time()
         res = await asyncio.to_thread(_ingest_all, parts, pid, None, master, None)
     finally:
         form.close()
+    _log_upload(request, res, pid, started, "import")
     res["studies"] = [_get_study(s, master) for s in res.pop("_sids")]
     return res
 
@@ -1669,6 +1850,10 @@ def file_content(fid: str, request: Request, download: int = 0):
         "Content-Security-Policy": "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; object-src 'self'",
         "Cache-Control": "private, no-store",
     }
+    if download:
+        log_event(request, "file.download", study_id=row["study_id"], patient_id=row["patient_id"], file_id=fid, filename=f["filename"], bytes=row["size"])
+    else:
+        log_event(request, "file.view", study_id=row["study_id"], patient_id=row["patient_id"], file_id=fid, filename=f["filename"], dedupe=VIEW_DEDUPE)
     return StreamingResponse(_stream(store.blob_path(fid), master, f"file:{fid}".encode()), media_type=ctype, headers=headers)
 
 
@@ -1794,15 +1979,22 @@ async def update_file(fid: str, request: Request):
     master = data_access(request)
     row = _file_row(fid)
     j = await body_json(request)
+    d = unseal(master, row["blob"], f"file:{fid}")
     if "study_id" in j:
         st = _study_row(str(j["study_id"]))
         if st["patient_id"] != row["patient_id"]:
             raise ApiError(400, "Can only move a file to a study of the same patient")
         store.conn().execute("UPDATE files SET study_id=? WHERE id=?", (st["id"], fid))
+        if st["id"] != row["study_id"]:
+            log_event(request, "file.move", study_id=st["id"], file_id=fid, filename=d.get("filename"),
+                      from_study_id=row["study_id"], from_study_title=_names(None, row["study_id"]).get("study_title"))
     if j.get("filename"):
-        d = unseal(master, row["blob"], f"file:{fid}")
+        old_name = d.get("filename")
         d["filename"] = clean_filename(jstr(j, "filename"))
         store.conn().execute("UPDATE files SET blob=? WHERE id=?", (seal(master, d, f"file:{fid}"), fid))
+        if old_name != d["filename"]:
+            log_event(request, "file.update", study_id=row["study_id"] if "study_id" not in j else str(j["study_id"]), file_id=fid,
+                      filename=d["filename"], previous_filename=old_name)
     return _file_out(_file_row(fid), master)
 
 
@@ -1812,8 +2004,13 @@ def _remove_blobs(fid: str) -> None:
 
 @app.delete("/api/files/{fid}")
 def delete_file(fid: str, request: Request):
-    data_access(request)
-    _file_row(fid)
+    master = data_access(request)
+    row = _file_row(fid)
+    try:
+        fname = unseal(master, row["blob"], f"file:{fid}").get("filename")
+    except crypto.CryptoError:
+        fname = None
+    log_event(request, "file.delete", study_id=row["study_id"], patient_id=row["patient_id"], file_id=fid, filename=fname, bytes=row["size"])
     store.conn().execute("DELETE FROM files WHERE id=?", (fid,))
     _remove_blobs(fid)
     return {"ok": True}
@@ -1985,7 +2182,9 @@ async def create_target(request: Request):
             time.time(),
         ),
     )
-    return _target_out(_target_row(tid), master)
+    out = _target_out(_target_row(tid), master)
+    log_event(request, "backup.target_create", target_id=tid, target_name=out.get("name"), target_type=t)
+    return out
 
 
 @app.put("/api/backups/targets/{tid}")
@@ -2007,13 +2206,17 @@ async def update_target(tid: str, request: Request):
                 tid,
             ),
         )
-    return _target_out(_target_row(tid), master)
+    out = _target_out(_target_row(tid), master)
+    log_event(request, "backup.target_update", target_id=tid, target_name=out.get("name"), target_type=row["type"],
+              changed=sorted(k for k in j if k != "password") or None, credentials_changed=bool(j.get("config")) or None)
+    return out
 
 
 @app.delete("/api/backups/targets/{tid}")
 def delete_target(tid: str, request: Request):
     data_access(request)
-    _target_row(tid)
+    row = _target_row(tid)
+    log_event(request, "backup.target_delete", target_id=tid, target_name=row["name"], target_type=row["type"])
     store.conn().execute("DELETE FROM backup_targets WHERE id=?", (tid,))
     return {"ok": True}
 
@@ -2021,8 +2224,14 @@ def delete_target(tid: str, request: Request):
 @app.post("/api/backups/targets/{tid}/test")
 async def test_target(tid: str, request: Request):
     master = data_access(request)
-    tgt = _make_target(_target_row(tid), master)
-    msg = await asyncio.to_thread(tgt.test)
+    row = _target_row(tid)
+    tgt = _make_target(row, master)
+    try:
+        msg = await asyncio.to_thread(tgt.test)
+    except Exception as exc:
+        log_event(request, "backup.target_test", target_id=tid, target_name=row["name"], outcome="failed", message=_errmsg(exc))
+        raise
+    log_event(request, "backup.target_test", target_id=tid, target_name=row["name"], outcome="ok")
     return {"ok": True, "message": msg, "target": _target_out(_target_row(tid), master)}
 
 
@@ -2076,13 +2285,23 @@ def run_backup(tid: str | None, master: bytes, trigger: str = "manual") -> dict:
 async def run_target(tid: str, request: Request):
     master = data_access(request)
     _target_row(tid)
-    return await asyncio.to_thread(run_backup, tid, master)
+    res = await asyncio.to_thread(run_backup, tid, master)
+    _log_backup(request, res)
+    return res
 
 
 @app.post("/api/backups/run")
 async def run_all(request: Request):
     master = data_access(request)
-    return await asyncio.to_thread(run_backup, None, master)
+    res = await asyncio.to_thread(run_backup, None, master)
+    _log_backup(request, res)
+    return res
+
+
+def _log_backup(request: Request | None, res: dict) -> None:
+    for r in res.get("results", []):
+        log_event(request, "backup.run", trigger=res.get("trigger"), filename=res.get("filename"), target_id=r["target_id"],
+                  target_name=r["name"], outcome=r["status"], message=r["message"])
 
 
 @app.get("/api/backups/runs")
@@ -2123,6 +2342,8 @@ async def download_backup(request: Request):
         path.unlink(missing_ok=True)
         raise
     size = path.stat().st_size
+
+    log_event(request, "backup.download", filename=name, bytes=size)
 
     def done():
         path.unlink(missing_ok=True)
@@ -2171,6 +2392,8 @@ async def restore_existing(request: Request):
         header = await asyncio.to_thread(backup.restore_into_store, store, archive, master, True)
         await asyncio.to_thread(migrate_file_macs, master)
         _clear_caches()
+        log_event(request, "backup.restore", mode="replace current data", source="upload" if bf is not None else "destination",
+                  target_id=target_id, backup_created=header.get("created"), **_counts())
     finally:
         form.close()
         archive.unlink(missing_ok=True)
@@ -2477,6 +2700,11 @@ def sso_callback(request: Request, state: str = "", code: str = "", error: str =
 
     def fail(msg: str):
         log.info("SSO %s failed: %r", entry["mode"], msg)
+        prov = next((x for x in _sso_providers(True) if x["id"] == entry["pid"]), None)
+        uid = entry.get("user_id")
+        urow = store.conn().execute("SELECT id, username FROM users WHERE id=?", (uid,)).fetchone() if uid else None
+        log_event(request, "auth.sso_failed", user=dict(urow) if urow else None, provider=(prov or {}).get("name"),
+                  mode=entry["mode"], reason=msg[:300], app=bool(app_ctx) or None)
         resp = _app_redirect(app_ctx, error=msg) if app_ctx else _web_redirect(back, sso_error=msg)
         resp.delete_cookie(SSO_COOKIE, path=SSO_COOKIE_PATH)
         return resp
@@ -2515,6 +2743,8 @@ def sso_callback(request: Request, state: str = "", code: str = "", error: str =
                 "INSERT INTO user_identities(id,user_id,provider_id,issuer,subject,email,created_at) VALUES(?,?,?,?,?,?,?)",
                 (crypto.random_id(), entry["user_id"], p["id"], iss, sub, email, time.time()),
             )
+        urow = c.execute("SELECT id, username FROM users WHERE id=?", (entry["user_id"],)).fetchone()
+        log_event(request, "auth.sso_linked", user=dict(urow) if urow else None, provider=p["name"], email=email)
         resp = _web_redirect("settings", sso="linked")
         resp.delete_cookie(SSO_COOKIE, path=SSO_COOKIE_PATH)
         return resp
@@ -2601,6 +2831,12 @@ async def sso_exchange(request: Request):
     elif not _binding_ok(request, t["binding"]):
         raise ApiError(400, "This sign-in was started in a different browser. Try again.", "sso_binding")
     tok, exp = new_session(t["user_id"], t.get("identity_id"))
+    c = store.conn()
+    urow = c.execute("SELECT id, username FROM users WHERE id=?", (t["user_id"],)).fetchone()
+    irow = c.execute("SELECT provider_id, email FROM user_identities WHERE id=?", (t.get("identity_id"),)).fetchone()
+    prov = next((x for x in _sso_providers(True) if irow and x["id"] == irow["provider_id"]), None)
+    log_event(request, "auth.sso_login", user=dict(urow) if urow else None, method="sso", provider=(prov or {}).get("name"),
+              email=irow["email"] if irow else None, app=bool(t["challenge"]) or None)
     resp = session_response(request, {"expires_at": iso(exp), "unlocked": vault.unlocked}, tok, exp)
     resp.delete_cookie(SSO_COOKIE, path=SSO_COOKIE_PATH)
     return resp
@@ -2680,6 +2916,7 @@ async def sso_create_provider(request: Request):
     cfg = _sso_cfg()
     cfg["providers"].append(p)
     _sso_save(cfg)
+    log_event(request, "sso.provider_create", provider=p.get("name"), provider_id=p["id"])
     return _sso_admin_out(p)
 
 
@@ -2700,6 +2937,8 @@ async def sso_update_provider(pid: str, request: Request):
                 c.execute("DELETE FROM user_identities WHERE provider_id=?", (pid,))
             elif not p.get("enabled", True):
                 _revoke_identity_sessions("provider_id=?", (pid,))
+            log_event(request, "sso.provider_update", provider=p.get("name"), provider_id=pid,
+                      changed=sorted(k for k in set(old) | set(p) if old.get(k) != p.get(k) and "secret" not in k) or None)
             return _sso_admin_out(p)
     if pid == "env":
         raise ApiError(409, "This provider is configured with SCANVAULT_OIDC_* environment variables")
@@ -2712,8 +2951,11 @@ def sso_delete_provider(pid: str, request: Request):
     if pid == "env":
         raise ApiError(409, "This provider is configured with SCANVAULT_OIDC_* environment variables")
     cfg = _sso_cfg()
+    gone = next((p for p in cfg["providers"] if p["id"] == pid), None)
     cfg["providers"] = [p for p in cfg["providers"] if p["id"] != pid]
     _sso_save(cfg)
+    if gone:
+        log_event(request, "sso.provider_delete", provider=gone.get("name"), provider_id=pid)
     _revoke_identity_sessions("provider_id=?", (pid,))
     store.conn().execute("DELETE FROM user_identities WHERE provider_id=?", (pid,))
     return {"ok": True, "local_login": local_login_enabled()}
@@ -2744,6 +2986,8 @@ async def sso_settings(request: Request):
             mine = [r for r in store.conn().execute("SELECT provider_id FROM user_identities WHERE user_id=?", (u["id"],)) if r["provider_id"] in ids]
             if not mine:
                 raise ApiError(400, "Link an SSO or directory account to your login first, so you can still sign in.")
+        if want != cfg["local_login"]:
+            log_event(request, "sso.settings", setting="password sign-in", value="on" if want else "off")
         cfg["local_login"] = want
     _sso_save(cfg)
     return {"ok": True, "local_login": local_login_enabled()}
@@ -2752,6 +2996,10 @@ async def sso_settings(request: Request):
 @app.delete("/api/sso/identities/{iid}")
 def sso_unlink(iid: str, request: Request):
     u = require_user(request)
+    irow = store.conn().execute("SELECT provider_id, email FROM user_identities WHERE id=? AND user_id=?", (iid, u["id"])).fetchone()
+    if irow:
+        prov = next((x for x in _sso_providers(True) if x["id"] == irow["provider_id"]), None)
+        log_event(request, "auth.sso_unlinked", provider=(prov or {}).get("name"), email=irow["email"])
     _revoke_identity_sessions("id=? AND user_id=?", (iid, u["id"]))
     store.conn().execute("DELETE FROM user_identities WHERE id=? AND user_id=?", (iid, u["id"]))
     if _linked_identity_count() == 0 and not _sso_cfg()["local_login"]:
@@ -2759,6 +3007,173 @@ def sso_unlink(iid: str, request: Request):
         cfg["local_login"] = True  # never leave the vault without a way to sign in
         _sso_save(cfg)
     return {"ok": True, "local_login": local_login_enabled()}
+
+
+# =================================================================== activity log
+
+def _activity_access(request: Request) -> dict:
+    """Administrators see everyone's activity; other accounts see their own."""
+    data_access(request)
+    u = request.state.sv_user
+    if not activity.unlocked():
+        _unlock_activity(vault.master_key)
+        if not activity.unlocked():
+            raise ApiError(503, "The activity log could not be opened. See the server log.", "activity_unavailable")
+    return u
+
+
+def _when(v: str | None, end: bool = False) -> float | None:
+    if not v:
+        return None
+    v = v.strip()
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+            ts = datetime.strptime(v, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+            return ts + 86400 if end else ts  # a date in "until" includes that whole day
+        if re.fullmatch(r"\d+(\.\d+)?", v):
+            return float(v)
+        return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        raise ApiError(400, f"Not a date: {v[:40]}")
+
+
+def _activity_filters(request: Request, u: dict) -> dict:
+    qp = request.query_params
+    f = {
+        "user_id": qp.get("user_id") or None,
+        "patient_id": qp.get("patient_id") or None,
+        "study_id": qp.get("study_id") or None,
+        "action": qp.get("action") or None,
+        "q": (qp.get("q") or "")[:200] or None,
+        "since": _when(qp.get("since")),
+        "until": _when(qp.get("until"), end=True),
+    }
+    if u["role"] != "admin":
+        f["user_id"] = u["id"]
+    return f
+
+
+def _activity_out(e: dict, users: dict) -> dict:
+    d = dict(e["details"])
+    uid = e["user_id"]
+    out = {
+        "seq": e["seq"],
+        "at": iso(e["at"]),
+        "action": e["action"],
+        "label": e["label"],
+        "category": e["category"],
+        "outcome": d.pop("outcome", None) or ("failed" if e["action"].endswith("_failed") else "ok"),
+        "user_id": uid,
+        "username": users.get(uid) or d.get("username") or d.get("attempted_username") or (None if uid else "System"),
+        "patient_id": e["patient_id"],
+        "patient_name": d.pop("patient_name", None),
+        "study_id": e["study_id"],
+        "study_title": d.pop("study_title", None),
+        "ip": d.pop("ip", None),
+        "client": d.pop("client", None),
+        "user_agent": d.pop("agent", None),
+        "signed": e["signed"],
+        "readable": e["readable"],
+        "details": {k: v for k, v in d.items() if k != "username"},
+    }
+    return out
+
+
+def _user_names() -> dict:
+    return {r["id"]: r["username"] for r in store.conn().execute("SELECT id, username FROM users")}
+
+
+@app.get("/api/activity")
+def list_activity(request: Request, before: int | None = None, limit: int = 50):
+    """Newest first. Filters: user_id, patient_id, study_id, action (full name,
+    a prefix like "file.", or several separated by commas), q (text search in
+    the decrypted details), since and until (dates or ISO times). Page with
+    ``before`` = the ``next_before`` of the previous page."""
+    u = _activity_access(request)
+    f = _activity_filters(request, u)
+    entries, nxt = activity.query(before=before, limit=max(1, min(int(limit), 200)), **f)
+    users = _user_names()
+    return {"entries": [_activity_out(e, users) for e in entries], "next_before": nxt}
+
+
+@app.get("/api/activity/filters")
+def activity_filters(request: Request):
+    """What the filter menus can offer: people and actions that appear in the log."""
+    u = _activity_access(request)
+    users = _user_names()
+    ids = activity.users() if u["role"] == "admin" else [u["id"]]
+    people = [{"id": i, "username": users.get(i) or "Former user"} for i in ids]
+    for i, name in users.items():
+        if (u["role"] == "admin" or i == u["id"]) and i not in ids:
+            people.append({"id": i, "username": name})
+    people.sort(key=lambda x: x["username"].lower())
+    acts = activity.actions()
+    return {
+        "users": people,
+        "actions": [{"action": a, "label": audit.label(a), "category": a.split(".", 1)[0]} for a in acts],
+        "categories": [{"id": k, "label": v} for k, v in audit.CATEGORIES.items() if any(a.startswith(k + ".") for a in acts)],
+    }
+
+
+EXPORT_COLUMNS = ("seq", "at", "username", "user_id", "action", "label", "outcome", "patient_name", "patient_id", "study_title", "study_id", "client", "ip", "user_agent", "details", "signed", "hash")
+
+
+@app.get("/api/activity/export")
+def export_activity(request: Request, format: str = "csv"):
+    """Download the (filtered) log as CSV or JSON. JSON also carries each
+    entry's chain hash and the result of a full verification."""
+    import csv
+
+    u = _activity_access(request)
+    f = _activity_filters(request, u)
+    if format not in ("csv", "json"):
+        raise ApiError(400, "format must be csv or json")
+    log_event(request, "activity.export", format=format, filters={k: v for k, v in f.items() if v is not None} or None)
+    users = _user_names()
+    rows = []
+    for e in activity.iter_all(**f):
+        o = _activity_out(e, users)
+        o["hash"] = e["hash"]
+        rows.append(o)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    vid = (store.keystore() or {}).get("vault_id", "vault")
+    if format == "json":
+        body = json.dumps(
+            {"vault_id": vid, "exported_at": iso(time.time()), "filters": f, "verification": activity.verify() if u["role"] == "admin" else None, "entries": rows},
+            indent=2,
+        ).encode()
+        ctype, ext = "application/json", "json"
+    else:
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(EXPORT_COLUMNS)
+        for o in rows:
+            vals = []
+            for k in EXPORT_COLUMNS:
+                v = o.get(k)
+                if k == "details":
+                    v = json.dumps(v, separators=(",", ":")) if v else ""
+                v = "" if v is None else str(v)
+                if v[:1] in ("=", "+", "-", "@", "\t", "\r"):  # keep spreadsheets from running it as a formula
+                    v = "'" + v
+                vals.append(v)
+            w.writerow(vals)
+        body = buf.getvalue().encode("utf-8-sig")
+        ctype, ext = "text/csv; charset=utf-8", "csv"
+    name = f"scanvault-activity-{vid}-{stamp}.{ext}"
+    return Response(body, media_type=ctype, headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "private, no-store"})
+
+
+@app.get("/api/activity/verify")
+def verify_activity(request: Request):
+    """Check the hash chain and signatures of the whole log (administrators)."""
+    u = _activity_access(request)
+    if u["role"] != "admin":
+        raise ApiError(403, "Only an administrator can check the whole activity log")
+    res = activity.verify()
+    log_event(request, "activity.verify", outcome="ok" if res["ok"] else "failed", entries=res["entries"], problems=len(res["problems"]) or None)
+    res["checked_at"] = iso(res["checked_at"])
+    return res
 
 
 # =================================================================== directory sign-in (LDAPS)
@@ -2874,11 +3289,16 @@ async def ldap_save(request: Request):
             await asyncio.to_thread(ldapauth.test, cfg)
     except ldapauth.LdapError as exc:
         raise ApiError(400, str(exc), "ldap_config") from exc
+    dropped = False
     if old.get("url") and (ldapauth.issuer(old) != ldapauth.issuer(cfg) or (old.get("preset") or "") != preset):
         _drop_ldap_links()  # a different directory: old links no longer identify anyone
+        dropped = True
     elif not cfg["enabled"]:
         _revoke_identity_sessions("provider_id=?", (LDAP_ID,))
     store.set_config("ldap", cfg)
+    log_event(request, "ldap.settings", change="saved" if cfg["enabled"] else "disabled", provider=cfg.get("name") or _ldap_name(),
+              changed=sorted(k for k in set(old) | set(cfg) if old.get(k) != cfg.get(k) and k != "bind_password") or None,
+              bind_password_changed=bool(j.get("bind_password") or j.get("clear_bind_password")) or None, links_dropped=dropped or None)
     return _ldap_admin_out()
 
 
@@ -2887,6 +3307,7 @@ def ldap_delete(request: Request):
     _require_admin(request)
     if _ldap_cfg().get("managed"):
         raise ApiError(409, "Directory sign-in is configured with SCANVAULT_LDAP_* environment variables")
+    log_event(request, "ldap.settings", change="deleted", provider=_ldap_name(), links_dropped=True)
     store.set_config("ldap", {})
     _drop_ldap_links()
     if _linked_identity_count() == 0 and not _sso_cfg()["local_login"]:
@@ -2918,6 +3339,7 @@ async def ldap_link(request: Request):
     login_throttle.attempt(key)
     ident = await _ldap_auth(_ldap_cfg(), jstr(j, "directory_username").strip(), jstr(j, "directory_password"))
     if not ident:
+        log_event(request, "auth.sso_failed", provider="ldap", mode="link", reason="wrong directory credentials or not in an allowed group")
         raise ApiError(400, "Wrong directory username or password, or the account is not in an allowed group")
     login_throttle.success(key)
     c = store.conn()
@@ -2931,6 +3353,7 @@ async def ldap_link(request: Request):
             "INSERT INTO user_identities(id,user_id,provider_id,issuer,subject,email,created_at) VALUES(?,?,?,?,?,?,?)",
             (crypto.random_id(), u["id"], LDAP_ID, ident["issuer"], ident["subject"], ident["email"] or ident["name"], time.time()),
         )
+    log_event(request, "auth.sso_linked", provider="ldap", email=ident["email"] or ident["name"])
     return {"ok": True, "linked": ident["email"] or ident["name"]}
 
 
@@ -2958,14 +3381,16 @@ async def scheduler():
                 store.conn().execute("DELETE FROM sessions WHERE COALESCE(last_seen, created_at)<?", (now - SESSION_IDLE_DAYS * 86400,))
             if AUTO_LOCK_MINUTES > 0 and vault.unlocked and not backup_lock.locked() and now - _state["last_activity"] > AUTO_LOCK_MINUTES * 60:
                 log.info("Locking the vault after %d idle minutes", AUTO_LOCK_MINUTES)
+                log_event(None, "vault.auto_lock", idle_minutes=AUTO_LOCK_MINUTES)
                 vault.lock()
+                activity.forget()
                 _clear_caches()
             if not vault.unlocked or not setup_complete() or _state["maintenance"]:
                 continue
             due = [r["id"] for r in store.conn().execute("SELECT * FROM backup_targets WHERE enabled=1 AND schedule_hours>0") if _due(r, now)]
             for tid in due:
                 if vault.unlocked:
-                    await asyncio.to_thread(run_backup, tid, vault.master_key, "schedule")
+                    _log_backup(None, await asyncio.to_thread(run_backup, tid, vault.master_key, "schedule"))
         except Exception:
             log.exception("Scheduled backup failed")
 
@@ -2991,6 +3416,8 @@ def _auto_unlock() -> None:
             master = crypto.unwrap_master_key(store.keystore(), passphrase.strip())
         vault.master_key = master
         migrate_file_macs(master)
+        _unlock_activity(master)
+        log_event(None, "vault.auto_unlock", method="passphrase file")
         log.info("Vault auto-unlocked from SCANVAULT_PASSPHRASE_FILE")
     except crypto.CryptoError:
         log.error("SCANVAULT_PASSPHRASE_FILE does not unlock the vault")
