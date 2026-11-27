@@ -472,18 +472,19 @@ function takeSsoError() {
 }
 
 function viewLogin() {
-  const st = S.status, providers = st.sso || [], local = st.local_login !== false;
+  const st = S.status, providers = st.sso || [], local = st.local_login !== false, dir = st.ldap, form = local || dir;
   const ssoErr = S.ssoError || takeSsoError();
   S.ssoError = null;
   const ssoBtns = providers.map(p => `<a class="btn ${local ? "" : "primary"} ssobtn" href="/api/auth/sso/${encodeURIComponent(p.id)}/start">${I.key} Continue with ${esc(p.name)}</a>`).join("");
   authLayout(`<div><h1>Sign in</h1></div>
-    ${providers.length ? `<div class="stack ssobtns">${ssoBtns}</div>${local ? '<div class="ordiv"><span>or use your password</span></div>' : ""}` : ""}
-    ${local ? `<form class="form" id="f">
+    ${providers.length ? `<div class="stack ssobtns">${ssoBtns}</div>${form ? `<div class="ordiv"><span>or use your ${dir && !local ? esc(dir.name) + " " : ""}password</span></div>` : ""}` : ""}
+    ${form ? `<form class="form" id="f">
+      ${dir ? `<p class="small muted">${local ? `Use your ScanVault password or your ${esc(dir.name)} account.` : `Sign in with your ${esc(dir.name)} account.`}</p>` : ""}
       <label class="f">Username<input name="u" autocomplete="username" required autocapitalize="none"></label>
       <label class="f">Password<input name="p" type="password" autocomplete="current-password" required></label>
       <p class="err" id="err">${esc(ssoErr)}</p><button class="btn primary" id="go">Sign in</button></form>`
       : `<p class="err" id="err">${esc(ssoErr)}</p><p class="small muted">Password sign-in is turned off for this vault.</p>`}`, "Welcome back.");
-  if (!local) return;
+  if (!form) return;
   $("#f").onsubmit = async e => {
     e.preventDefault(); const f = e.target; $("#go").disabled = true;
     try { await API.req("POST", "/api/auth/login", { username: f.u.value, password: f.p.value }); S.status = await API.req("GET", "/api/status"); render(); }
@@ -1657,10 +1658,15 @@ async function ssoCard() {
     ${c.providers.length ? `<div class="ssolist">${c.providers.map(p => `<div class="ssorow"><div><b>${esc(p.name)}</b>${p.enabled ? "" : ' <span class="small muted">(off)</span>'}<div class="small muted mono">${esc(p.resolved_issuer)}</div>
         ${c.identities.filter(i => i.provider_id === p.id).map(i => `<div class="small">Linked: <b>${esc(i.email || "account")}</b>${i.last_login ? ` · last used ${esc(ago(i.last_login))}` : ""} <button class="btn ghost sm" data-unlink="${esc(i.id)}">Unlink</button></div>`).join("")}</div>
         <div class="row">${p.enabled && !linkedTo.has(p.id) ? `<button class="btn sm primary" data-link="${esc(p.id)}">Link my account</button>` : ""}${p.managed ? '<span class="small muted">Set by environment</span>' : `<button class="btn sm" data-edit="${esc(p.id)}">Edit</button>`}</div></div>`).join("")}</div>` : ""}
+    <div class="ssorow"><div><b>Directory sign-in (LDAPS)</b>${c.ldap ? ` <span class="small muted">${esc(c.ldap.name)}</span>` : ' <span class="small muted">Active Directory, Synology, FreeIPA or OpenLDAP</span>'}
+        ${c.identities.filter(i => i.provider_id === "ldap").map(i => `<div class="small">Linked: <b>${esc(i.email || "account")}</b>${i.last_login ? ` · last used ${esc(ago(i.last_login))}` : ""} <button class="btn ghost sm" data-unlink="${esc(i.id)}">Unlink</button></div>`).join("")}</div>
+      <div class="row">${c.ldap && !linkedTo.has("ldap") ? '<button class="btn sm primary" id="ldaplink">Link my account</button>' : ""}<button class="btn sm" id="ldapcfg">${c.ldap ? "Edit" : "Set up"}</button></div></div>
     <div class="row"><button class="btn" id="ssoadd">${I.plus} Add provider</button></div>
-    ${c.providers.length ? `<label class="row small" style="gap:8px"><input type="checkbox" id="ssolocal" ${c.local_login ? "checked" : ""} ${c.local_login_forced ? "disabled" : ""}> Allow password sign-in${c.local_login_forced ? " (forced on by SCANVAULT_FORCE_LOCAL_LOGIN)" : ""}</label>
+    ${c.providers.length || c.ldap ? `<label class="row small" style="gap:8px"><input type="checkbox" id="ssolocal" ${c.local_login ? "checked" : ""} ${c.local_login_forced ? "disabled" : ""}> Allow password sign-in${c.local_login_forced ? " (forced on by SCANVAULT_FORCE_LOCAL_LOGIN)" : ""}</label>
       <p class="small muted">Turn this off only after linking an account above. If your identity provider is ever unreachable, set <span class="mono">SCANVAULT_FORCE_LOCAL_LOGIN=1</span> and restart to get password sign-in back.</p>` : ""}`;
   $("#ssoadd", el).onclick = () => ssoProviderForm(c);
+  $("#ldapcfg", el).onclick = () => ldapForm(c).catch(handleErr);
+  const ll = $("#ldaplink", el); if (ll) ll.onclick = () => ldapLink(c);
   $$("[data-edit]", el).forEach(b => b.onclick = () => ssoProviderForm(c, c.providers.find(p => p.id === b.dataset.edit)));
   $$("[data-link]", el).forEach(b => b.onclick = async () => {
     if (API.demo) return toast("Single sign-on isn't available in this preview.");
@@ -1681,6 +1687,77 @@ async function ssoCard() {
     const password = cb.checked || c.reauth_fresh ? "" : await askPassword("Turn off password sign-in", "After this, only linked single sign-on accounts can sign in.");
     if (password === null) { cb.checked = !cb.checked; return; }
     try { await API.req("PUT", "/api/sso/settings", { local_login: cb.checked, password }); toast(cb.checked ? "Password sign-in on" : "Password sign-in off"); c.local_login = cb.checked; } catch (e) { cb.checked = !cb.checked; handleErr(e); }
+  };
+}
+
+async function ldapForm(c) {
+  const cfg = await API.req("GET", "/api/ldap/config"), presets = cfg.presets;
+  let preset = cfg.preset, verify = cfg.verify;
+  const ro = cfg.managed ? "disabled" : "";
+  const mm = modal(cfg.configured ? "Directory sign-in" : "Set up directory sign-in", `<form class="form" id="lf"></form>`, { wide: true,
+    footer: `${cfg.configured && !cfg.managed ? '<button class="btn danger" id="ldel" type="button">Remove</button><span class="spacer"></span>' : ""}<button class="btn" data-close>Cancel</button>${cfg.managed ? "" : '<button class="btn primary" form="lf" id="lsave">Save and test</button>'}` });
+  const f = $("#lf", mm.el), E = n => f.elements.namedItem(n);
+  const keep = () => { if (!E("url")) return; ["name", "url", "ca_pem", "pin_sha256", "bind_dn", "base_dn", "user_filter", "groups"].forEach(k => { cfg[k] = k === "groups" ? E(k).value.split("\n") : E(k).value; }); cfg.enabled = E("enabled").checked; };
+  const draw = () => {
+    const pr = presets[preset];
+    f.innerHTML = `${cfg.managed ? '<div class="note info">' + I.info + '<div class="small">Set by SCANVAULT_LDAP_* environment variables.</div></div>' : ""}
+      <label class="f">Directory<select name="preset" ${ro}>${Object.entries(presets).map(([k, v]) => `<option value="${k}" ${k === preset ? "selected" : ""}>${esc(v.name)}</option>`).join("")}</select></label>
+      <div class="note info">${I.info}<div class="small">${esc(pr.help)}</div></div>
+      <label class="f">Name on the sign-in page<input name="name" ${ro} maxlength="60" value="${esc(cfg.name || pr.name)}"></label>
+      <label class="f">Server <span class="hint">ldaps://host (port 636), or ldap://host to use StartTLS. Unencrypted LDAP is never used.</span><input name="url" ${ro} required placeholder="ldaps://dc.example.com" value="${esc(cfg.url)}"></label>
+      <div><p class="small" style="font-weight:600;margin-bottom:8px">Check the server's certificate with</p>
+        <div class="seg" id="lv" role="radiogroup"><button type="button" data-v="ca" class="${verify === "ca" ? "on" : ""}" ${ro}>Trusted CA</button><button type="button" data-v="pin" class="${verify === "pin" ? "on" : ""}" ${ro}>Pinned fingerprint</button></div></div>
+      ${verify === "ca" ? `<label class="f">CA certificate <span class="hint">PEM; leave empty to use the system's trusted CAs</span><textarea name="ca_pem" ${ro} rows="4" class="mono" placeholder="-----BEGIN CERTIFICATE-----">${esc(cfg.ca_pem)}</textarea></label><input type="hidden" name="pin_sha256" value="${esc(cfg.pin_sha256)}">`
+        : `<label class="f">SHA-256 fingerprint <span class="hint">for a self-signed certificate; sign-in stops if it changes</span><div class="row" style="flex-wrap:nowrap"><input name="pin_sha256" ${ro} required class="mono" style="flex:1" value="${esc(cfg.pin_sha256)}"><button type="button" class="btn sm" id="lfp" ${ro}>Read from server</button></div></label><input type="hidden" name="ca_pem" value="${esc(cfg.ca_pem)}">`}
+      <label class="f">Service account (bind DN) <span class="hint">leave empty for anonymous search</span><input name="bind_dn" ${ro} value="${esc(cfg.bind_dn)}" autocomplete="off"></label>
+      <label class="f">Service account password ${cfg.has_bind_password ? '<span class="hint">saved; leave blank to keep</span>' : ""}<input name="bind_password" ${ro} type="password" autocomplete="off"></label>
+      <label class="f">Base DN for users<input name="base_dn" ${ro} required placeholder="dc=example,dc=com" value="${esc(cfg.base_dn)}"></label>
+      <label class="f">User filter <span class="hint">{username} is what people type</span><input name="user_filter" ${ro} class="mono" value="${esc(cfg.user_filter || pr.user_filter)}"></label>
+      <label class="f">Allowed groups <span class="hint">one group DN per line; members of any may sign in. Empty allows every user found.</span><textarea name="groups" ${ro} rows="3" class="mono" placeholder="cn=scanvault,ou=groups,dc=example,dc=com">${esc((cfg.groups || []).join("\n"))}</textarea></label>
+      <label class="row small" style="gap:8px"><input type="checkbox" name="enabled" ${ro} ${!cfg.configured || cfg.enabled ? "checked" : ""}> Allow directory sign-in</label>
+      ${c.reauth_fresh || cfg.managed ? "" : `<label class="f">Your ScanVault password <span class="hint">confirms it's you</span><input name="reauth" type="password" required autocomplete="current-password"></label>`}
+      <p class="err" id="lerr"></p>`;
+    $("select", f).onchange = e => { keep(); preset = e.target.value; cfg.user_filter = presets[preset].user_filter; cfg.name = presets[preset].name; draw(); };
+    $$("#lv button", f).forEach(b => b.onclick = () => { keep(); verify = b.dataset.v; draw(); });
+    const fpb = $("#lfp", f);
+    if (fpb) fpb.onclick = async () => {
+      if (!E("url").value) return $("#lerr", f).textContent = "Enter the server first.";
+      fpb.disabled = true;
+      try { const r = await API.req("POST", "/api/ldap/fingerprint", { url: E("url").value }); E("pin_sha256").value = r.sha256; $("#lerr", f).textContent = ""; toast("Fingerprint read. Compare it with the one your directory shows before saving."); }
+      catch (er) { $("#lerr", f).textContent = er.message; }
+      fpb.disabled = false;
+    };
+  };
+  draw();
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const body = { preset, verify, name: E("name").value, url: E("url").value.trim(), ca_pem: E("ca_pem").value, pin_sha256: E("pin_sha256").value,
+      bind_dn: E("bind_dn").value.trim(), base_dn: E("base_dn").value.trim(), user_filter: E("user_filter").value.trim(),
+      groups: E("groups").value.split("\n").map(x => x.trim()).filter(Boolean), enabled: E("enabled").checked };
+    if (E("bind_password").value) body.bind_password = E("bind_password").value;
+    if (E("reauth")) body.password = E("reauth").value;
+    const btn = $("#lsave", mm.el); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Testing connection…';
+    try { await API.req("PUT", "/api/ldap/config", body); mm.close(); toast("Directory connected. Now link your account."); ssoCard(); }
+    catch (er) { $("#lerr", f).textContent = er.message; btn.disabled = false; btn.textContent = "Save and test"; }
+  };
+  const del = $("#ldel", mm.el);
+  if (del) del.onclick = async () => {
+    if (!await confirmBox("Remove directory sign-in", "Linked directory accounts will be unlinked and signed out.", "Remove")) return;
+    try { const r = await API.req("DELETE", "/api/ldap/config"); mm.close(); if (r.local_login && !c.local_login) toast("Password sign-in was turned back on"); ssoCard(); } catch (er) { handleErr(er); }
+  };
+}
+
+function ldapLink(c) {
+  const mm = modal("Link your directory account", `<form class="form" id="dl"><p class="small">Sign in with your ${esc(c.ldap.name)} account once. After that it works on the sign-in page and in the app.</p>
+    <label class="f">Directory username<input name="du" required autocomplete="off" autocapitalize="none"></label>
+    <label class="f">Directory password<input name="dp" type="password" required autocomplete="off"></label>
+    ${c.reauth_fresh ? "" : '<label class="f">Your ScanVault password <span class="hint">confirms it\'s you</span><input name="pw" type="password" required autocomplete="current-password"></label>'}
+    <p class="err" id="dlerr"></p></form>`, { footer: `<button class="btn" data-close>Cancel</button><button class="btn primary" form="dl" id="dlgo">Link</button>` });
+  const f = $("#dl", mm.el);
+  f.onsubmit = async e => {
+    e.preventDefault(); const b = $("#dlgo", mm.el); b.disabled = true;
+    try { const r = await API.req("POST", "/api/ldap/link", { directory_username: f.du.value, directory_password: f.dp.value, password: f.pw ? f.pw.value : "" }); mm.close(); toast("Linked " + r.linked); ssoCard(); }
+    catch (er) { $("#dlerr", f).textContent = er.message; b.disabled = false; }
   };
 }
 

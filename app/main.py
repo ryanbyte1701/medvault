@@ -31,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import audit, backup, crypto, media, similar, sso, targets
+from . import audit, backup, crypto, ldapauth, media, similar, sso, targets
 from .forms import Form as UploadForm, FormError, UploadPart, parse_form
 from .spool import Spool, SpoolFull
 from .store import fsync_dir, fsync_tree, write_durable, Store, seal, unseal
@@ -537,6 +537,7 @@ def status(request: Request):
         "maintenance": _state["maintenance"],
         "local_login": local_login_enabled(),
         "sso": [_sso_public(p) for p in _sso_providers()] if setup_complete() else [],
+        "ldap": _ldap_public() if setup_complete() else None,
         "version": VERSION if u else None,
     }
 
@@ -749,7 +750,9 @@ async def setup_restore(request: Request):
 async def login(request: Request):
     if not setup_complete():
         raise ApiError(409, "ScanVault has not been set up yet", "setup_required")
-    if not local_login_enabled():
+    local_ok = local_login_enabled()
+    ldap_on = _ldap_enabled()
+    if not local_ok and not ldap_on:
         raise ApiError(403, "Password sign-in is turned off. Use single sign-on.", "local_login_disabled")
     j = await body_json(request, 64 * 1024)
     username = jstr(j, "username").strip()
@@ -761,13 +764,39 @@ async def login(request: Request):
     # not let a stranger lock the owner out: a browser or app that has signed
     # in before carries its own random device token, and is limited per device
     # instead (so a stolen token still only buys a few guesses).
-    dev_id = _device_lookup(r, request.cookies.get("sv_device") or jstr(j, "device")) if r else None
+    dev_id = _device_lookup(r, request.cookies.get("sv_device") or jstr(j, "device")) if (r and local_ok) else None
     akey = ("dev:" + dev_id) if dev_id else ("user:" + username.lower())
     (device_throttle if dev_id else account_throttle).attempt(akey)
-    ok = await asyncio.to_thread(crypto.verify_password, password, r["password_hash"] if r else crypto.DUMMY_PASSWORD_HASH)
+    ok = local_ok and await asyncio.to_thread(crypto.verify_password, password, r["password_hash"] if r else crypto.DUMMY_PASSWORD_HASH)
     if not r or not ok:
+        # Not a ScanVault password: try the directory, for linked accounts only.
+        reason = ("wrong password" if r else "unknown username") if local_ok else "password sign-in off"
+        method = "password"
+        if ldap_on and password:
+            method = "ldaps"
+            try:
+                ident = await _ldap_auth(_ldap_cfg(), username, password)
+            except ApiError:
+                log_event(request, "auth.login_failed", user={"id": r["id"], "username": r["username"]} if r else None,
+                          attempted_username=username[:100], method="ldaps", reason="directory unavailable")
+                raise
+            row = _ldap_login_identity(ident) if ident else None
+            if row:
+                login_throttle.success(*keys)
+                (device_throttle if dev_id else account_throttle).reset(akey)
+                store.conn().execute("UPDATE user_identities SET last_login=? WHERE id=?", (time.time(), row["id"]))
+                tok, exp = new_session(row["uid"], row["id"])
+                urow = store.conn().execute("SELECT id, username FROM users WHERE id=?", (row["uid"],)).fetchone()
+                log_event(request, "auth.login", user=dict(urow) if urow else {"id": row["uid"]}, method="ldaps",
+                          provider=_ldap_name(), directory_username=username[:100])
+                return session_response(request, {"expires_at": iso(exp), "unlocked": vault.unlocked, "method": "ldap"}, tok, exp)
+            if ident:
+                log.info("Directory account %r signed in correctly but is not linked to a ScanVault login", ident["dn"])
+                reason = "directory account not linked"
+            else:
+                reason = "bad credentials"
         log_event(request, "auth.login_failed", user={"id": r["id"], "username": r["username"]} if r else None,
-                  attempted_username=username[:100], method="password", reason="wrong password" if r else "unknown username")
+                  attempted_username=username[:100], method=method, reason=reason)
         raise ApiError(401, "Wrong username or password")
     login_throttle.success(*keys)
     (device_throttle if dev_id else account_throttle).reset(akey)
@@ -2488,8 +2517,16 @@ def _sso_admin_out(p: dict) -> dict:
     }
 
 
-def _linked_identity_count() -> int:
+def _signin_provider_ids() -> set[str]:
+    """Providers an identity link can currently sign in through (OIDC + directory)."""
     ids = {p["id"] for p in _sso_providers()}
+    if _ldap_enabled():
+        ids.add(LDAP_ID)
+    return ids
+
+
+def _linked_identity_count() -> int:
+    ids = _signin_provider_ids()
     rows = store.conn().execute("SELECT provider_id FROM user_identities").fetchall()
     return sum(1 for r in rows if r["provider_id"] in ids)
 
@@ -2812,6 +2849,8 @@ def sso_config(request: Request):
     u = require_user(request)
     cfg = _sso_cfg()
     names = {p["id"]: p["name"] for p in _sso_providers(include_disabled=True)}
+    if _ldap_cfg().get("url"):
+        names[LDAP_ID] = _ldap_name()
     idents = [
         {"id": r["id"], "provider_id": r["provider_id"], "provider_name": names.get(r["provider_id"], "Removed provider"),
          "email": r["email"], "linked_at": iso(r["created_at"]), "last_login": iso(r["last_login"])}
@@ -2826,6 +2865,7 @@ def sso_config(request: Request):
         "redirect_uri": _sso_redirect_uri(request),
         "presets": sso.PRESETS,
         "identities": idents,
+        "ldap": _ldap_public(),
     }
 
 
@@ -2942,10 +2982,10 @@ async def sso_settings(request: Request):
         if not want and cfg["local_login"]:
             await _reauth(u, j)
         if not want:
-            ids = {p["id"] for p in _sso_providers()}
+            ids = _signin_provider_ids()
             mine = [r for r in store.conn().execute("SELECT provider_id FROM user_identities WHERE user_id=?", (u["id"],)) if r["provider_id"] in ids]
             if not mine:
-                raise ApiError(400, "Link an SSO account to your login first, so you can still sign in.")
+                raise ApiError(400, "Link an SSO or directory account to your login first, so you can still sign in.")
         if want != cfg["local_login"]:
             log_event(request, "sso.settings", setting="password sign-in", value="on" if want else "off")
         cfg["local_login"] = want
@@ -3134,6 +3174,187 @@ def verify_activity(request: Request):
     log_event(request, "activity.verify", outcome="ok" if res["ok"] else "failed", entries=res["entries"], problems=len(res["problems"]) or None)
     res["checked_at"] = iso(res["checked_at"])
     return res
+
+
+# =================================================================== directory sign-in (LDAPS)
+# A linked directory account signs in through the normal username/password
+# form (and POST /api/auth/login, so apps need nothing new). Like OIDC it only
+# replaces the sign-in password: the vault encryption key is unchanged.
+
+LDAP_ID = "ldap"
+
+
+def _ldap_cfg(include_secret: bool = True) -> dict:
+    cfg = ldapauth.env_overrides(store.get_config("ldap", {}) or {})
+    if not include_secret:
+        cfg.pop("bind_password", None)
+    return cfg
+
+
+def _ldap_enabled() -> bool:
+    cfg = _ldap_cfg()
+    return bool(cfg.get("enabled") and cfg.get("url") and cfg.get("base_dn"))
+
+
+def _ldap_name() -> str:
+    cfg = _ldap_cfg()
+    return cfg.get("name") or ldapauth.PRESETS.get(cfg.get("preset") or "openldap", ldapauth.PRESETS["openldap"])["name"]
+
+
+def _ldap_public() -> dict | None:
+    return {"name": _ldap_name()} if _ldap_enabled() else None
+
+
+def _ldap_admin_out() -> dict:
+    cfg = _ldap_cfg(include_secret=False)
+    return {
+        "configured": bool(cfg.get("url")), "enabled": bool(cfg.get("enabled")), "name": _ldap_name(),
+        "preset": cfg.get("preset") or "active_directory", "url": cfg.get("url", ""), "verify": cfg.get("verify") or "ca",
+        "ca_pem": cfg.get("ca_pem", ""), "pin_sha256": cfg.get("pin_sha256", ""), "bind_dn": cfg.get("bind_dn", ""),
+        "has_bind_password": bool(ldapauth.bind_password(_ldap_cfg())), "base_dn": cfg.get("base_dn", ""),
+        "user_filter": cfg.get("user_filter", ""), "groups": cfg.get("groups") or [], "managed": cfg.get("managed"),
+    }
+
+
+async def _ldap_auth(cfg: dict, username: str, password: str) -> dict | None:
+    """None for wrong credentials or a disallowed account; ApiError if the directory is unusable."""
+    try:
+        return await asyncio.to_thread(ldapauth.authenticate, cfg, username, password)
+    except ldapauth.BadCredentials:
+        return None
+    except ldapauth.LdapError as exc:
+        log.warning("Directory sign-in failed: %r", str(exc))
+        raise ApiError(502, f"The directory could not be reached: {exc}", "ldap_unavailable") from exc
+
+
+def _ldap_login_identity(ident: dict):
+    return store.conn().execute(
+        "SELECT i.*, u.id AS uid FROM user_identities i JOIN users u ON u.id=i.user_id WHERE i.provider_id=? AND i.issuer=? AND i.subject=?",
+        (LDAP_ID, ident["issuer"], ident["subject"]),
+    ).fetchone()
+
+
+def _drop_ldap_links() -> None:
+    _revoke_identity_sessions("provider_id=?", (LDAP_ID,))
+    store.conn().execute("DELETE FROM user_identities WHERE provider_id=?", (LDAP_ID,))
+
+
+@app.get("/api/ldap/config")
+def ldap_config(request: Request):
+    _require_admin(request)
+    return {**_ldap_admin_out(), "presets": ldapauth.PRESETS}
+
+
+@app.put("/api/ldap/config")
+async def ldap_save(request: Request):
+    u = _require_admin(request)
+    j = await body_json(request, 256 * 1024)
+    await _reauth(u, j)
+    stored = store.get_config("ldap", {}) or {}
+    if _ldap_cfg().get("managed"):
+        raise ApiError(409, "Directory sign-in is configured with SCANVAULT_LDAP_* environment variables")
+    old = dict(stored)
+    cfg = dict(stored)
+    preset = j.get("preset", cfg.get("preset") or "active_directory")
+    if preset not in ldapauth.PRESETS:
+        raise ApiError(400, "Unknown directory type")
+    cfg["preset"] = preset
+    for k, n in (("name", 60), ("url", 300), ("bind_dn", 500), ("base_dn", 500), ("user_filter", 1000), ("pin_sha256", 200)):
+        if k in j:
+            cfg[k] = _str(j[k], n) or ""
+    if "ca_pem" in j:
+        cfg["ca_pem"] = (str(j["ca_pem"] or "").strip())[:64 * 1024]
+    if "verify" in j:
+        cfg["verify"] = "pin" if j["verify"] == "pin" else "ca"
+    if cfg.get("verify") == "pin" and cfg.get("pin_sha256"):
+        try:
+            cfg["pin_sha256"] = ldapauth.normalize_pin(cfg["pin_sha256"])
+        except ldapauth.LdapError as exc:
+            raise ApiError(400, str(exc)) from exc
+    if "groups" in j:
+        gs = j["groups"] if isinstance(j["groups"], list) else str(j["groups"] or "").splitlines()
+        cfg["groups"] = [g.strip()[:500] for g in gs if str(g).strip()][:20]
+    if j.get("bind_password"):
+        cfg["bind_password"] = str(j["bind_password"])[:1000]
+    if j.get("clear_bind_password") or not cfg.get("bind_dn"):
+        cfg.pop("bind_password", None)
+    if "enabled" in j:
+        cfg["enabled"] = bool(j["enabled"])
+    cfg.setdefault("enabled", True)
+    if not cfg.get("user_filter"):
+        cfg["user_filter"] = ldapauth.PRESETS[preset]["user_filter"]
+    try:
+        ldapauth.check_config(cfg)
+        if cfg["enabled"]:
+            await asyncio.to_thread(ldapauth.test, cfg)
+    except ldapauth.LdapError as exc:
+        raise ApiError(400, str(exc), "ldap_config") from exc
+    dropped = False
+    if old.get("url") and (ldapauth.issuer(old) != ldapauth.issuer(cfg) or (old.get("preset") or "") != preset):
+        _drop_ldap_links()  # a different directory: old links no longer identify anyone
+        dropped = True
+    elif not cfg["enabled"]:
+        _revoke_identity_sessions("provider_id=?", (LDAP_ID,))
+    store.set_config("ldap", cfg)
+    log_event(request, "ldap.settings", change="saved" if cfg["enabled"] else "disabled", provider=cfg.get("name") or _ldap_name(),
+              changed=sorted(k for k in set(old) | set(cfg) if old.get(k) != cfg.get(k) and k != "bind_password") or None,
+              bind_password_changed=bool(j.get("bind_password") or j.get("clear_bind_password")) or None, links_dropped=dropped or None)
+    return _ldap_admin_out()
+
+
+@app.delete("/api/ldap/config")
+def ldap_delete(request: Request):
+    _require_admin(request)
+    if _ldap_cfg().get("managed"):
+        raise ApiError(409, "Directory sign-in is configured with SCANVAULT_LDAP_* environment variables")
+    log_event(request, "ldap.settings", change="deleted", provider=_ldap_name(), links_dropped=True)
+    store.set_config("ldap", {})
+    _drop_ldap_links()
+    if _linked_identity_count() == 0 and not _sso_cfg()["local_login"]:
+        _sso_save({**_sso_cfg(), "local_login": True})
+    return {"ok": True, "local_login": local_login_enabled()}
+
+
+@app.post("/api/ldap/fingerprint")
+async def ldap_fingerprint(request: Request):
+    """Show the certificate fingerprint a directory presents, to pin a self-signed certificate."""
+    _require_admin(request)
+    j = await body_json(request)
+    try:
+        return {"sha256": await asyncio.to_thread(ldapauth.fetch_fingerprint, jstr(j, "url"))}
+    except ldapauth.LdapError as exc:
+        raise ApiError(400, str(exc)) from exc
+
+
+@app.post("/api/ldap/link")
+async def ldap_link(request: Request):
+    """Link the caller's directory account. Body: {directory_username,
+    directory_password, password (ScanVault, unless recently signed in with SSO)}."""
+    u = require_user(request)
+    j = await body_json(request, 64 * 1024)
+    await _reauth(u, j)
+    if not _ldap_enabled():
+        raise ApiError(400, "Directory sign-in is not set up")
+    key = "ldaplink:" + u["id"]
+    login_throttle.attempt(key)
+    ident = await _ldap_auth(_ldap_cfg(), jstr(j, "directory_username").strip(), jstr(j, "directory_password"))
+    if not ident:
+        log_event(request, "auth.sso_failed", provider="ldap", mode="link", reason="wrong directory credentials or not in an allowed group")
+        raise ApiError(400, "Wrong directory username or password, or the account is not in an allowed group")
+    login_throttle.success(key)
+    c = store.conn()
+    row = c.execute("SELECT * FROM user_identities WHERE issuer=? AND subject=?", (ident["issuer"], ident["subject"])).fetchone()
+    if row and row["user_id"] != u["id"]:
+        raise ApiError(409, "That directory account is already linked to another ScanVault login")
+    if row:
+        c.execute("UPDATE user_identities SET provider_id=?, email=? WHERE id=?", (LDAP_ID, ident["email"] or ident["name"], row["id"]))
+    else:
+        c.execute(
+            "INSERT INTO user_identities(id,user_id,provider_id,issuer,subject,email,created_at) VALUES(?,?,?,?,?,?,?)",
+            (crypto.random_id(), u["id"], LDAP_ID, ident["issuer"], ident["subject"], ident["email"] or ident["name"], time.time()),
+        )
+    log_event(request, "auth.sso_linked", provider="ldap", email=ident["email"] or ident["name"])
+    return {"ok": True, "linked": ident["email"] or ident["name"]}
 
 
 # =================================================================== scheduler
