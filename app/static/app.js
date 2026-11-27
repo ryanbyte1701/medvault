@@ -93,6 +93,9 @@ const I = {
   sun: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
   moon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
   auto: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg>',
+  home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 10.5 9-7 9 7V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  chev: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>',
   x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
   dl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5M12 15V3"/></svg>',
 };
@@ -140,13 +143,13 @@ function cycleTheme() { const next = { system: "light", light: "dark", dark: "sy
 document.body.insertAdjacentHTML("beforeend", `<svg width="0" height="0" style="position:absolute" aria-hidden="true"><filter id="svwl" color-interpolation-filters="sRGB"><feComponentTransfer><feFuncR type="linear" slope="1" intercept="0"/><feFuncG type="linear" slope="1" intercept="0"/><feFuncB type="linear" slope="1" intercept="0"/></feComponentTransfer></filter></svg>`);
 
 // ------------------------------------------------------------------ state + router
-const S = { status: null, patients: null, route: { name: "patients" } };
+const S = { status: null, patients: null, route: { name: "home" } };
 
 function parseHash() {
   if (API.demo) return S.route;
   const h = location.hash.replace(/^#\/?/, "").split("?")[0];
   const [name, id] = h.split("/");
-  return { name: name || "patients", id };
+  return { name: name || "home", id };
 }
 function go(name, id) {
   S.route = { name, id };
@@ -196,18 +199,18 @@ function render() {
   if (!st.unlocked) return viewUnlock();
   if (!S.themeSynced) { S.themeSynced = true; syncTheme(); }
   const r = S.route;
-  const view = { patients: viewPatients, patient: viewPatient, study: viewStudy, backups: viewBackups, settings: viewSettings, upload: viewUploadPage }[r.name] || viewPatients;
+  const view = { home: viewHome, patients: viewPatients, patient: viewPatient, study: viewStudy, backups: viewBackups, settings: viewSettings, upload: viewUploadPage }[r.name] || viewHome;
   shell(r.name);
   view(r.id).catch(handleErr);
 }
 
 function shell(active) {
-  const nav = [["patients", "Patients", I.users], ["upload", "Upload", I.upload], ["backups", "Backups", I.cloud], ["settings", "Settings", I.gear]];
+  const nav = [["home", "Home", I.home], ["patients", "Patients", I.users], ["upload", "Upload", I.upload], ["backups", "Backups", I.cloud], ["settings", "Settings", I.gear]];
   const on = n => (n === active || (n === "patients" && (active === "patient" || active === "study"))) ? "on" : "";
   app.innerHTML = `${API.demo ? '<div class="demo-banner">Interactive preview with sample patients. Nothing leaves your browser and nothing is stored.</div>' : ""}
   <div class="shell">
     <nav class="side" aria-label="Main">
-      <div class="brand">${I.logo}<span>ScanVault</span></div>
+      <a class="brand" href="#/home" data-go="home">${I.logo}<span>ScanVault</span></a>
       <div class="nav">${nav.map(([n, l, ic]) => `<a href="#/${n}" data-go="${n}" class="${on(n)}">${ic}${l}</a>`).join("")}</div>
       <div class="foot"><span class="lockchip">${I.shield} Vault unlocked</span><span>Signed in as ${esc(S.status.username)}</span><button class="btn ghost sm themebtn" data-theme-btn title="${themeLabel()}" aria-label="${themeLabel()}">${themeIcon()}</button></div>
     </nav>
@@ -276,7 +279,7 @@ function viewSetup() {
         <button id="rest">${I.restore}<b>Restore from a backup</b><span>Use a .svb backup plus your recovery key file or encryption key.</span></button>
         ${window.SV_DEMO_SKIP ? `<button id="skip">${I.users}<b>Skip to the sample vault</b><span>Preview only: open three sample patients with scans, reports and backups.</span></button>` : ""}
       </div>`);
-    const sk = $("#skip"); if (sk) sk.onclick = async () => { window.SV_DEMO_SKIP(); S.status = await API.req("GET", "/api/status"); go("patients"); };
+    const sk = $("#skip"); if (sk) sk.onclick = async () => { window.SV_DEMO_SKIP(); S.status = await API.req("GET", "/api/status"); go("home"); };
     $("#new").onclick = () => { setup.step = 1; viewSetup(); };
     $("#rest").onclick = viewRestoreSetup;
     return;
@@ -350,7 +353,7 @@ function viewSetup() {
       if (f.kf.files[0]) await API.req("POST", "/api/vault/recovery-key/confirm", { recovery_key: await f.kf.files[0].text() });
       else if (f.skip.checked) await API.req("POST", "/api/vault/recovery-key/confirm", { skip: true });
       else return $("#err").textContent = "Choose the key file to confirm, or tick the box to skip.";
-      setup.recovery = ""; S.status = await API.req("GET", "/api/status"); go("patients");
+      setup.recovery = ""; S.status = await API.req("GET", "/api/status"); go("home");
     } catch (er) { $("#err").textContent = er.message; }
   };
 }
@@ -375,7 +378,7 @@ function viewRestoreSetup() {
     if (mode === "file") { if (!f.kf.files[0]) return $("#err").textContent = "Choose your recovery key file."; fd.append("recovery_key", await f.kf.files[0].text()); }
     else fd.append("passphrase", f.k.value);
     $("#go").disabled = true; $("#go").innerHTML = '<span class="spin"></span> Restoring…';
-    try { const r = await API.upload("/api/setup/restore", fd); toast(`Restored ${r.patients} patients, ${r.files} files`); S.status = await API.req("GET", "/api/status"); go("patients"); }
+    try { const r = await API.upload("/api/setup/restore", fd); toast(`Restored ${r.patients} patients, ${r.files} files`); S.status = await API.req("GET", "/api/status"); go("home"); }
     catch (er) { $("#err").textContent = er.message; $("#go").disabled = false; $("#go").textContent = "Restore"; }
   };
 }
@@ -416,6 +419,107 @@ function viewUnlock() {
   };
   $("#kf").onchange = async e => { try { await API.req("POST", "/api/vault/unlock", { recovery_key: await e.target.files[0].text() }); await done(); } catch (er) { $("#err").textContent = er.message; } };
   $("#out").onclick = async () => { await API.req("POST", "/api/auth/logout"); S.status.authenticated = false; render(); };
+}
+
+// ------------------------------------------------------------------ home
+const greeting = () => { const h = new Date().getHours(); return h < 5 ? "Good evening" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"; };
+const until = t => { const s = (t - Date.now()) / 1000; if (s <= 60) return "due now"; if (s < 3600) return "in " + Math.round(s / 60) + " min"; if (s < 86400 * 2) return "in " + Math.round(s / 3600) + " h"; return "in " + Math.round(s / 86400) + " days"; };
+
+function backupHealth(tg, stats) {
+  const on = tg.filter(t => t.enabled);
+  const bad = on.filter(t => !t.connected || t.last_status === "error");
+  const due = on.filter(t => t.connected && t.schedule_hours).map(t => (t.last_run ? Date.parse(t.last_run) : Date.now()) + t.schedule_hours * 3600e3);
+  const next = due.length ? Math.min(...due) : null;
+  if (!tg.length) return { tone: "warn", title: "No backups yet", text: "Add a destination so a lost disk doesn't mean lost scans.", next };
+  if (bad.length) return { tone: "warn", title: `${bad.length} of ${on.length} destination${on.length === 1 ? "" : "s"} need${bad.length === 1 ? "s" : ""} attention`, text: bad.map(t => `${t.name}: ${t.connected ? "last run failed" : "not connected"}`).join(" · "), next };
+  if (!stats.last_backup_at) return { tone: "warn", title: "No backup has finished yet", text: `${on.length} destination${on.length === 1 ? "" : "s"} set up. Run one now to be safe.`, next };
+  return { tone: "ok", title: `Backed up ${ago(stats.last_backup_at)}`, text: `${on.length} destination${on.length === 1 ? "" : "s"}, encrypted before upload`, next };
+}
+
+async function viewHome() {
+  const [list, stats, recent, tg] = await Promise.all([
+    API.req("GET", "/api/patients"), API.req("GET", "/api/stats"), API.req("GET", "/api/studies/recent?limit=6"), API.req("GET", "/api/backups/targets")]);
+  S.patients = list;
+  const st = S.status, m = main(), bh = backupHealth(tg, stats);
+  const keyOk = st.recovery_key_saved !== false;
+  const steps = [
+    [list.length > 0, "Add a patient", "One record per person: you, a child, a parent.", "addp"],
+    [stats.files > 0, "Upload a scan or report", "DICOM, a CD/zip export, photos of films, PDFs.", "upl"],
+    [tg.length > 0, "Add a backup destination", "Cloud drives, S3, a NAS or a USB disk.", "backups"]];
+  const todo = steps.filter(x => !x[0]).length;
+  const tone = t => `<i class="dot ${t}" aria-hidden="true"></i>`;
+  const thumb = (id, big) => `<div class="t${big ? " big" : ""}"><img alt="" loading="lazy" src="${esc(API.thumbUrl(id))}"></div>`;
+  const studyRow = s => `<a class="rstudy" href="#/study/${esc(s.id)}" data-go="study/${esc(s.id)}">
+      <div class="film">${s.thumbnail_ids.length ? s.thumbnail_ids.map((id, i) => thumb(id, i === 0)).join("") : `<div class="t big">${s.report_count ? I.pdf : I.scan}</div>`}</div>
+      <div class="rs-body"><div class="rs-top">${s.modality ? `<span class="badge">${esc(s.modality)}</span>` : ""}${s.report_count ? `<span class="badge gray">${I.pdf}Report</span>` : ""}<span class="muted small nowrap">${esc(s.study_date ? fmtDate(s.study_date) : "No date")}</span></div>
+        <h3>${esc(s.title)}</h3>
+        <div class="small muted rs-meta"><span class="who"><span class="avatar xs">${esc(initials(s.patient_name))}</span>${esc(s.patient_name || "Unknown")}</span>${s.facility ? `<span>${esc(s.facility)}</span>` : ""}<span>${s.file_count} file${s.file_count === 1 ? "" : "s"}</span></div></div>
+      <span class="chev" aria-hidden="true">${I.chev}</span></a>`;
+  const personRow = p => `<a class="prow" href="#/patient/${esc(p.id)}" data-go="patient/${esc(p.id)}"><span class="avatar">${esc(initials(p.name))}</span>
+      <span class="pr-body"><b>${esc(p.name)}</b><span class="small muted">${[p.date_of_birth && `${age(p.date_of_birth)} yrs`, `${p.study_count} ${p.study_count === 1 ? "study" : "studies"}`, p.last_study_date && "last " + fmtDate(p.last_study_date)].filter(Boolean).map(esc).join(" · ")}</span></span>
+      <span class="chev" aria-hidden="true">${I.chev}</span></a>`;
+
+  m.innerHTML = `${mobileHead()}
+  <div class="home">
+  <header class="hhead"><div><p class="eyebrow">${esc(new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" }))}</p><h1>${greeting()}${st.username ? ", " + esc(st.username) : ""}</h1>
+    <p class="sub">${stats.patients} ${stats.patients === 1 ? "person" : "people"} · ${stats.studies} ${stats.studies === 1 ? "study" : "studies"} · ${fmtBytes(stats.bytes)} encrypted on this server</p></div>
+    <div class="row hactions"><button class="btn" id="addp">${I.plus} Add patient</button><button class="btn primary" id="upl">${I.upload} Upload</button></div></header>
+
+  <section class="health" aria-label="Vault status">
+    <div class="card hcard ok hc-vault">${tone("ok")}<div class="hc-body"><span class="hc-l">Vault</span><b>Unlocked</b><span class="small muted">AES-256-GCM${st.fingerprint ? ` · key <span class="mono">${esc(String(st.fingerprint).slice(0, 9))}</span>` : ""}</span></div>
+      <button class="btn sm ghost" id="lock">${I.lock}<span>Lock</span></button></div>
+    <div class="card hcard ${bh.tone}">${tone(bh.tone)}<div class="hc-body"><span class="hc-l">Backups</span><b>${esc(bh.title)}</b><span class="small muted">${esc(bh.text)}${bh.next ? ` · next ${esc(until(bh.next))}` : ""}</span></div>
+      ${tg.length ? `<button class="btn sm" id="bnow">Back up now</button>` : `<a class="btn sm" href="#/backups" data-go="backups">Set up</a>`}</div>
+    <div class="card hcard ${keyOk ? "ok" : "warn"}">${tone(keyOk ? "ok" : "warn")}<div class="hc-body"><span class="hc-l">Recovery key</span><b>${keyOk ? "Saved and confirmed" : "Not confirmed yet"}</b><span class="small muted">${keyOk ? "Keep the file offline or printed." : "Without it, a forgotten key locks your backups."}</span></div>
+      ${keyOk ? "" : `<a class="btn sm" href="#/settings" data-go="settings">Fix</a>`}</div>
+  </section>
+
+  ${todo ? `<section class="card pad onboard"><div class="section-h" style="margin:0 0 12px"><h2>Get set up</h2><span class="muted small">${steps.length - todo} of ${steps.length} done</span></div>
+    <ol class="steps2">${steps.map(([done, t, d, act]) => `<li class="${done ? "done" : ""}"><span class="tick">${done ? I.check : ""}</span><span><b>${t}</b><span class="small muted">${d}</span></span>${done ? "" : `<button class="btn sm" data-step="${act}">Start</button>`}</li>`).join("")}</ol></section>` : ""}
+
+  <div class="hgrid">
+    <div class="hmain">
+      ${list.length ? `<section class="card qup" aria-labelledby="qh">
+        <div class="qup-head"><h2 id="qh">Quick upload</h2>
+          <label class="qup-who"><span class="sr">Patient</span><select id="qpt">${list.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label></div>
+        <div class="drop" id="drop">${I.upload}<div><b>Drop scans or reports</b><div class="small muted">DICOM, CD/zip exports, film photos, PDFs. Encrypted as they arrive.</div></div></div>
+        <div class="qup-btns"><label class="btn b-files">${I.upload} Choose files<input type="file" id="fi" multiple hidden></label>
+          <label class="btn b-cam">${I.camera} Take photo<input type="file" id="cam" accept="image/*" capture="environment" hidden></label></div>
+        <div class="queue" id="queue"></div></section>` : ""}
+
+      <section aria-labelledby="rh"><div class="section-h"><h2 id="rh">Recently added</h2>${list.length ? `<a class="small" href="#/patients" data-go="patients">All patients</a>` : ""}</div>
+        ${recent.length ? `<div class="card rlist">${recent.map(studyRow).join("")}</div>`
+          : `<div class="card empty">${I.scan}<h2>No studies yet</h2><p>Studies you upload show up here, newest first.</p></div>`}</section>
+    </div>
+
+    <aside class="hside">
+      <section class="card" aria-labelledby="ph"><div class="side-h"><h2 id="ph">People</h2><button class="btn sm ghost" id="addp2" aria-label="Add patient">${I.plus}</button></div>
+        ${list.length ? `<div class="plist2">${list.slice(0, 6).map(personRow).join("")}</div>${list.length > 6 ? `<a class="more" href="#/patients" data-go="patients">See all ${list.length}</a>` : ""}`
+          : `<p class="pad small muted">No patients yet.</p>`}</section>
+      <section class="card storage" aria-label="Storage"><div><b>${stats.files}</b><span>files</span></div><div><b>${stats.studies}</b><span>studies</span></div><div><b>${fmtBytes(stats.bytes)}</b><span>encrypted</span></div></section>
+      ${tg.length ? `<section class="card" aria-labelledby="bh"><div class="side-h"><h2 id="bh">Destinations</h2><a class="small" href="#/backups" data-go="backups">Manage</a></div>
+        <ul class="dests">${tg.map(t => `<li>${tone(!t.enabled ? "gray" : !t.connected || t.last_status === "error" ? "warn" : t.last_status === "ok" ? "ok" : "gray")}<span><b>${esc(t.name)}</b><span class="small muted">${!t.enabled ? "Paused" : !t.connected ? "Not connected" : t.last_status === "error" ? "Last run failed " + esc(ago(t.last_run)) : t.last_run ? "Last run " + esc(ago(t.last_run)) : "Not run yet"}</span></span></li>`).join("")}</ul></section>` : ""}
+    </aside>
+  </div></div>`;
+
+  const addP = () => patientForm();
+  $("#addp").onclick = addP; $("#addp2").onclick = addP;
+  $("#upl").onclick = () => list.length ? ($("#fi") ? $("#fi").click() : go("upload")) : patientForm();
+  $("#lock").onclick = async () => { await API.req("POST", "/api/vault/lock"); S.status.unlocked = false; render(); };
+  const bn = $("#bnow");
+  if (bn) bn.onclick = async () => {
+    bn.disabled = true; bn.innerHTML = `<span class="spin"></span> Backing up`;
+    try { const r = await API.req("POST", "/api/backups/run"); const bad = (r.results || []).filter(x => x.status !== "ok").length; toast(bad ? `${bad} destination${bad === 1 ? "" : "s"} failed. See Backups.` : "Backup finished"); }
+    catch (e) { if (handleErr(e)) return; }
+    viewHome().catch(handleErr);
+  };
+  $$("[data-step]", m).forEach(b => b.onclick = () => { const a = b.dataset.step; a === "addp" ? addP() : a === "upl" ? $("#upl").click() : go(a); });
+  if (list.length) {
+    const send = fl => uploadFiles(`/api/patients/${$("#qpt").value}/import`, fl, () => viewHome().catch(handleErr));
+    wireDrop($("#drop"), send);
+    $("#fi").onchange = e => send([...e.target.files]);
+    $("#cam").onchange = e => send([...e.target.files]);
+  }
 }
 
 // ------------------------------------------------------------------ patients

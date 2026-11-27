@@ -552,6 +552,32 @@ async def create_study(pid: str, request: Request):
     return _get_study(sid, master)
 
 
+@app.get("/api/studies/recent")
+def recent_studies(request: Request, limit: int = 8):
+    """Studies across all patients, most recently added or updated first, for the home page."""
+    master = data_access(request)
+    limit = max(1, min(int(limit), 50))
+    c = store.conn()
+    activity = {r["study_id"]: (r["n"], r["last"]) for r in c.execute("SELECT study_id, COUNT(*) n, MAX(created_at) last FROM files GROUP BY study_id")}
+    rows = c.execute("SELECT * FROM studies").fetchall()
+    rows.sort(key=lambda r: max(r["created_at"], (activity.get(r["id"]) or (0, 0))[1] or 0), reverse=True)
+    names: dict = {}
+    out = []
+    for r in rows[:limit]:
+        s = _study_out(r, master, (activity.get(r["id"]) or (0, 0))[0])
+        pid = r["patient_id"]
+        if pid not in names:
+            p = c.execute("SELECT blob FROM patients WHERE id=?", (pid,)).fetchone()
+            names[pid] = unseal(master, p["blob"], f"patient:{pid}").get("name") if p else None
+        s["patient_name"] = names[pid]
+        s["last_activity"] = iso(max(r["created_at"], (activity.get(r["id"]) or (0, 0))[1] or 0))
+        files = c.execute("SELECT id, kind, has_preview FROM files WHERE study_id=? ORDER BY created_at", (r["id"],)).fetchall()
+        s["thumbnail_ids"] = [f["id"] for f in files if f["has_preview"]][:3]
+        s["report_count"] = sum(1 for f in files if f["kind"] == "report")
+        out.append(s)
+    return out
+
+
 def _study_row(sid: str):
     r = store.conn().execute("SELECT * FROM studies WHERE id=?", (sid,)).fetchone()
     if not r:

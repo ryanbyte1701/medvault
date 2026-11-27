@@ -86,11 +86,12 @@ function reportPage(title, center, date, lines) {
 const db = { patients: [], studies: [], files: [], targets: [], runs: [], users: { ryan: "x" } };
 const P = (name, dob, sex, mrn, notes) => { const p = { id: id(), name, date_of_birth: dob, sex, mrn, notes, created_at: iso(200) }; db.patients.push(p); return p; };
 function S(p, title, mod, date, facility, nImg, report, extra = {}) {
-  const s = { id: id(), patient_id: p.id, title, modality: mod, study_date: date, facility, description: extra.description || null, accession: extra.accession || null, referring_physician: extra.ref || null, body_part: extra.body || null, study_uid: mod === "OT" ? null : "1.2.840." + seq, created_at: iso(30) };
+  const ag = Math.max(0.6, Math.min(400, (now - Date.parse(date + "T12:00:00")) / 86400000 + 1.5));
+  const s = { id: id(), patient_id: p.id, title, modality: mod, study_date: date, facility, description: extra.description || null, accession: extra.accession || null, referring_physician: extra.ref || null, body_part: extra.body || null, study_uid: mod === "OT" ? null : "1.2.840." + seq, created_at: iso(ag) };
   db.studies.push(s);
-  if (report) db.files.push({ id: id(), study_id: s.id, patient_id: p.id, filename: report.name, content_type: "application/pdf", size_bytes: 180000 + seq * 931, kind: "report", has_thumbnail: false, uploaded_at: iso(29), _report: report });
+  if (report) db.files.push({ id: id(), study_id: s.id, patient_id: p.id, filename: report.name, content_type: "application/pdf", size_bytes: 180000 + seq * 931, kind: "report", has_thumbnail: false, uploaded_at: iso(ag - 0.01), _report: report });
   const imod = mod === "CR" ? "DX" : mod;
-  for (let i = 0; i < nImg; i++) db.files.push({ id: id(), study_id: s.id, patient_id: p.id, filename: `IM${String(i + 1).padStart(6, "0")}.dcm`, content_type: "application/dicom", size_bytes: imod === "DX" || imod === "MG" ? 9800000 + i * 1000 : 530000 + i * 777, kind: "dicom", has_thumbnail: true, uploaded_at: iso(29), _img: [imod, i],
+  for (let i = 0; i < nImg; i++) db.files.push({ id: id(), study_id: s.id, patient_id: p.id, filename: `IM${String(i + 1).padStart(6, "0")}.dcm`, content_type: "application/dicom", size_bytes: imod === "DX" || imod === "MG" ? 9800000 + i * 1000 : 530000 + i * 777, kind: "dicom", has_thumbnail: true, uploaded_at: iso(ag - 0.01), _img: [imod, i],
     dicom: { modality: mod, study_date: date, series_description: extra.series || title.toUpperCase(), institution: facility, instance_number: String(i + 1), rows: imod === "DX" ? "2500" : "512", columns: imod === "DX" ? "2048" : "512", frames: "1", body_part: extra.body, patient_name: p.name.toUpperCase() } });
   return s;
 }
@@ -179,6 +180,14 @@ async function req(method, path, body) {
     findP(m[1]);
     if (method === "POST") { const s = { id: id(), patient_id: m[1], title: body.title || "Imaging study", modality: body.modality || null, study_date: body.study_date || null, facility: body.facility || null, description: body.description || null, created_at: new Date().toISOString() }; db.studies.push(s); return studyOut(s); }
     return db.studies.filter(s => s.patient_id === m[1]).map(studyOut).sort((a, b) => (b.study_date || "").localeCompare(a.study_date || ""));
+  }
+  if (url === "/api/studies/recent") {
+    const lim = +(new URLSearchParams(path.split("?")[1] || "").get("limit") || 8);
+    const act = s => Math.max(Date.parse(s.created_at) || 0, ...db.files.filter(f => f.study_id === s.id).map(f => Date.parse(f.uploaded_at) || 0));
+    return db.studies.map(s => ({ s, a: act(s) })).sort((x, y) => y.a - x.a || (y.s.study_date || "").localeCompare(x.s.study_date || "")).slice(0, lim).map(({ s, a }) => {
+      const fs = db.files.filter(f => f.study_id === s.id);
+      return { ...studyOut(s), patient_name: db.patients.find(p => p.id === s.patient_id)?.name || null, last_activity: new Date(a).toISOString(), thumbnail_ids: fs.filter(f => f.has_thumbnail).slice(0, 3).map(f => f.id), report_count: fs.filter(f => f.kind === "report").length };
+    });
   }
   if ((m = url.match(/^\/api\/studies\/([^/]+)$/))) {
     const s = findS(m[1]);
