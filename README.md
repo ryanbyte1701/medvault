@@ -2,8 +2,10 @@
 
 Self-hosted, encrypted vault for medical imaging. Upload the DICOM studies,
 film photos and PDF reports that imaging centers hand you, keep organized
-local copies per patient, and back them up **encrypted** to Google Drive, Box
-and SFTP/SCP servers.
+local copies per patient, and back them up **encrypted** to Google Drive,
+OneDrive, Dropbox, Box, S3-compatible storage (AWS, Backblaze B2, Wasabi,
+Cloudflare R2, Synology C2, MinIO), SFTP/SCP, SMB shares, WebDAV/Nextcloud or
+a USB disk.
 
 - **Multi-patient**: one record per person (you, kids, parents), each with a
   timeline of studies.
@@ -84,7 +86,13 @@ schedule (hours, `0` = manual) and retention (keep last N).
 |---|---|---|
 | **Google Drive** | Google account (OAuth, `drive.file` scope) or service account JSON | For OAuth create a *Web application* client in Google Cloud Console, enable the Drive API, add the redirect URI shown in the form, then click *Connect*. Service accounts need a Shared Drive folder shared with them. Uploads are resumable in 8 MiB chunks. |
 | **Box** | Box account (OAuth 2.0) or Custom App with Client Credentials Grant | Rotating refresh tokens are persisted after each use. Files over 50 MB use chunked upload sessions with SHA-1 digests. |
+| **OneDrive** | Microsoft account or work/school (Entra ID app, delegated `Files.ReadWrite offline_access`) | Register an app, add the redirect URI shown in the form as a *Web* platform, create a client secret, then click *Connect*. Upload sessions in 10 MiB chunks. Rotated refresh tokens are saved. |
+| **Dropbox** | Dropbox app (scoped, App folder or Full Dropbox), offline refresh token | Permissions: `files.content.write`, `files.content.read`, `files.metadata.read`. Files over 150 MB use upload sessions. |
+| **S3 / object storage** | Access key + secret | Presets for Amazon S3, Backblaze B2, Wasabi, Cloudflare R2, Synology C2 and MinIO, or any endpoint URL. Multipart uploads, optional storage class and prefix. Bucket versioning or object lock is recommended. |
 | **SFTP / SCP** | Password and/or private key (Ed25519, ECDSA, RSA) | The host key is pinned on the first successful *Test*. A changed key blocks the connection. SFTP uploads to `.part` and then renames atomically. |
+| **SMB share** | Username + password (`DOMAIN\user` supported) | SMB 2/3 to Windows, Synology, QNAP, TrueNAS or Samba, with optional required SMB3 encryption. Writes `.part` then renames. |
+| **WebDAV / Nextcloud** | Username + password or app password | Nextcloud/ownCloud (`…/remote.php/dav/files/USER`), Synology WebDAV Server, Koofr, pCloud and others. Creates folders and uploads `.part` then MOVE. |
+| **USB / local disk** | None | Any folder mounted into the container under `/backups` (USB drive, second disk, NFS mount). It can refuse to run if the disk isn't mounted. |
 
 You can also click **Download backup** to save an encrypted `.svb` locally.
 
@@ -170,6 +178,6 @@ Files: `{id, study_id, patient_id, filename, content_type, size_bytes, kind: ima
 ```bash
 pip install -r requirements-dev.txt
 SCANVAULT_DATA=./data uvicorn app.main:app --reload --port 8080
-pytest -q                     # crypto, API flow, restore tool, SFTP+SCP, Drive/Box (mocked)
+pytest -q                     # crypto, API, restore tool, every backup destination
 python3 tools/build_demo.py preview/index.html   # self-contained clickable demo, sample data only
 ```

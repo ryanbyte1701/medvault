@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import posixpath
+import shutil
 import time
 from pathlib import Path
 from typing import Callable
@@ -560,7 +561,598 @@ def _load_pkey(text: str, passphrase: str | None):
     raise TargetError("Could not load private key (" + "; ".join(errors) + ")")
 
 
-TYPES: dict[str, type[Target]] = {"gdrive": GoogleDrive, "box": Box, "sftp": SSHTarget}
+# ============================================================ S3 and S3-compatible
+S3_PRESETS = {
+    # provider -> endpoint template ({region} filled in); "" = AWS default
+    "aws": "",
+    "b2": "https://s3.{region}.backblazeb2.com",
+    "wasabi": "https://s3.{region}.wasabisys.com",
+    "r2": "https://{account_id}.r2.cloudflarestorage.com",
+    "c2": "https://{region}.s3.synologyc2.net",
+    "minio": "",
+    "other": "",
+}
+
+
+class S3(Target):
+    """Amazon S3 and anything speaking its API: Backblaze B2, Wasabi,
+    Cloudflare R2, Synology C2 Object Storage, MinIO, Ceph, Garage..."""
+
+    type = "s3"
+    secret_fields = ("secret_access_key",)
+
+    def _client(self):
+        import boto3
+        from botocore.config import Config
+
+        c = self.config
+        prov = c.get("provider") or "aws"
+        endpoint = (c.get("endpoint_url") or "").strip()
+        region = (c.get("region") or "").strip() or ("auto" if prov == "r2" else "us-east-1")
+        if not endpoint and S3_PRESETS.get(prov):
+            endpoint = S3_PRESETS[prov].format(region=region, account_id=c.get("account_id", ""))
+        if not c.get("bucket"):
+            raise TargetError("Bucket name is required")
+        return boto3.client(
+            "s3",
+            aws_access_key_id=c.get("access_key_id") or None,
+            aws_secret_access_key=c.get("secret_access_key") or None,
+            region_name=region,
+            endpoint_url=endpoint or None,
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "path" if c.get("path_style") or prov == "minio" else "auto"},
+                retries={"max_attempts": 5, "mode": "standard"},
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
+        )
+
+    def _key(self, name: str) -> str:
+        pre = (self.config.get("prefix") or "").strip("/")
+        return f"{pre}/{name}" if pre else name
+
+    def _wrap(self, what, fn):
+        try:
+            return fn()
+        except TargetError:
+            raise
+        except Exception as exc:
+            raise TargetError(f"S3 {what} failed: {exc}") from exc
+
+    def test(self) -> str:
+        cl = self._client()
+        b = self.config["bucket"]
+        self._wrap("bucket check", lambda: cl.head_bucket(Bucket=b))
+        k = self._key(".scanvault-write-test")
+        self._wrap("write test", lambda: cl.put_object(Bucket=b, Key=k, Body=b"ok"))
+        self._wrap("delete test", lambda: cl.delete_object(Bucket=b, Key=k))
+        return f"Connected. Backups go to s3://{b}/{self._key('')}"
+
+    def upload(self, path: Path, name: str) -> None:
+        from boto3.s3.transfer import TransferConfig
+
+        cl = self._client()
+        extra = {"ContentType": "application/octet-stream"}
+        if self.config.get("storage_class"):
+            extra["StorageClass"] = self.config["storage_class"]
+        cfg = TransferConfig(multipart_threshold=64 * 1024 * 1024, multipart_chunksize=64 * 1024 * 1024, max_concurrency=4)
+        self._wrap("upload", lambda: cl.upload_file(str(path), self.config["bucket"], self._key(name), ExtraArgs=extra, Config=cfg))
+
+    def list_backups(self):
+        cl = self._client()
+        out = []
+        pag = cl.get_paginator("list_objects_v2")
+
+        def run():
+            for page in pag.paginate(Bucket=self.config["bucket"], Prefix=self._key(PREFIX)):
+                for o in page.get("Contents", []):
+                    out.append((o["Key"].rsplit("/", 1)[-1], o["Key"]))
+
+        self._wrap("list", run)
+        return sorted(out)
+
+    def delete(self, handle: str) -> None:
+        cl = self._client()
+        self._wrap("delete", lambda: cl.delete_object(Bucket=self.config["bucket"], Key=handle))
+
+    def download(self, handle: str, dest: Path) -> None:
+        cl = self._client()
+        self._wrap("download", lambda: cl.download_file(self.config["bucket"], handle, str(dest)))
+
+
+# ============================================================ Dropbox
+class Dropbox(Target):
+    """Dropbox app (scoped access, App folder or Full Dropbox) with OAuth
+    offline refresh token."""
+
+    type = "dropbox"
+    secret_fields = ("app_secret", "refresh_token")
+    API = "https://api.dropboxapi.com/2"
+    CONTENT = "https://content.dropboxapi.com/2"
+    TOKEN = "https://api.dropboxapi.com/oauth2/token"
+    CHUNK = 64 * 1024 * 1024
+
+    def _token(self) -> str:
+        c = self.config
+        if not c.get("refresh_token"):
+            raise TargetError("Dropbox is not connected yet: click 'Connect Dropbox account'")
+        r = requests.post(self.TOKEN, data={"grant_type": "refresh_token", "refresh_token": c["refresh_token"]}, auth=(c.get("app_key", ""), c.get("app_secret", "")), timeout=TIMEOUT)
+        _raise(r, "Dropbox token refresh")
+        return r.json()["access_token"]
+
+    def _folder(self) -> str:
+        f = "/" + (self.config.get("folder") or "ScanVault").strip("/")
+        return "" if f == "/" else f
+
+    def _rpc(self, tok, ep, body, ok404=False):
+        r = requests.post(f"{self.API}/{ep}", headers={"Authorization": f"Bearer {tok}"}, json=body, timeout=TIMEOUT)
+        if ok404 and r.status_code == 409:
+            return None
+        _raise(r, f"Dropbox {ep}")
+        return r.json()
+
+    def test(self) -> str:
+        tok = self._token()
+        acct = self._rpc(tok, "users/get_current_account", None)
+        if self._folder():
+            r = requests.post(f"{self.API}/files/create_folder_v2", headers={"Authorization": f"Bearer {tok}"}, json={"path": self._folder()}, timeout=TIMEOUT)
+            if r.status_code not in (200, 409):  # 409 = already exists
+                _raise(r, "Dropbox create folder")
+        return f"Connected as {acct.get('email') or acct.get('name', {}).get('display_name', 'Dropbox user')}. Backups go to {self._folder() or '/'}"
+
+    def upload(self, path: Path, name: str) -> None:
+        tok = self._token()
+        h = {"Authorization": f"Bearer {tok}", "Content-Type": "application/octet-stream"}
+        dest = f"{self._folder()}/{name}"
+        size = path.stat().st_size
+        commit = {"path": dest, "mode": "add", "autorename": False, "mute": True}
+        with open(path, "rb") as f:
+            if size <= 150 * 1024 * 1024:
+                r = requests.post(f"{self.CONTENT}/files/upload", headers={**h, "Dropbox-API-Arg": json.dumps(commit)}, data=f, timeout=600)
+                _raise(r, "Dropbox upload")
+                return
+            r = requests.post(f"{self.CONTENT}/files/upload_session/start", headers={**h, "Dropbox-API-Arg": json.dumps({"close": False})}, data=f.read(self.CHUNK), timeout=600)
+            _raise(r, "Dropbox upload start")
+            sid, offset = r.json()["session_id"], f.tell()
+            while True:
+                data = f.read(self.CHUNK)
+                cursor = {"session_id": sid, "offset": offset}
+                if f.tell() >= size:
+                    r = requests.post(f"{self.CONTENT}/files/upload_session/finish", headers={**h, "Dropbox-API-Arg": json.dumps({"cursor": cursor, "commit": commit})}, data=data, timeout=600)
+                    _raise(r, "Dropbox upload finish")
+                    return
+                r = requests.post(f"{self.CONTENT}/files/upload_session/append_v2", headers={**h, "Dropbox-API-Arg": json.dumps({"cursor": cursor, "close": False})}, data=data, timeout=600)
+                _raise(r, "Dropbox upload append")
+                offset += len(data)
+
+    def list_backups(self):
+        tok = self._token()
+        j = self._rpc(tok, "files/list_folder", {"path": self._folder(), "limit": 2000}, ok404=True)
+        out = []
+        while j:
+            out += [(e["name"], e["path_lower"]) for e in j.get("entries", []) if e.get(".tag") == "file" and e["name"].startswith(PREFIX)]
+            j = self._rpc(tok, "files/list_folder/continue", {"cursor": j["cursor"]}) if j.get("has_more") else None
+        return sorted(out)
+
+    def delete(self, handle: str) -> None:
+        self._rpc(self._token(), "files/delete_v2", {"path": handle}, ok404=True)
+
+    def download(self, handle: str, dest: Path) -> None:
+        tok = self._token()
+        with requests.post(f"{self.CONTENT}/files/download", headers={"Authorization": f"Bearer {tok}", "Dropbox-API-Arg": json.dumps({"path": handle})}, stream=True, timeout=600) as r:
+            _raise(r, "Dropbox download")
+            with open(dest, "wb") as f:
+                for b in r.iter_content(1 << 20):
+                    f.write(b)
+
+    @staticmethod
+    def auth_url(client_id: str, redirect_uri: str, state: str) -> str:
+        from urllib.parse import urlencode
+
+        return "https://www.dropbox.com/oauth2/authorize?" + urlencode(
+            {"client_id": client_id, "redirect_uri": redirect_uri, "response_type": "code", "token_access_type": "offline", "state": state}
+        )
+
+    def exchange_code(self, code: str, redirect_uri: str) -> None:
+        r = requests.post(self.TOKEN, data={"grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri}, auth=(self.config.get("app_key", ""), self.config.get("app_secret", "")), timeout=TIMEOUT)
+        _raise(r, "Dropbox code exchange")
+        self.config["refresh_token"] = r.json()["refresh_token"]
+        self._save(self.config)
+
+
+# ============================================================ OneDrive
+class OneDrive(Target):
+    """OneDrive personal or OneDrive for Business / SharePoint through Microsoft
+    Graph, with an Entra ID (Azure AD) app registration."""
+
+    type = "onedrive"
+    secret_fields = ("client_secret", "refresh_token")
+    GRAPH = "https://graph.microsoft.com/v1.0"
+    SCOPE = "offline_access Files.ReadWrite"
+    CHUNK = 320 * 1024 * 32  # 10 MiB, must be a multiple of 320 KiB
+
+    def _tenant(self) -> str:
+        return (self.config.get("tenant") or "common").strip()
+
+    def _token(self) -> str:
+        c = self.config
+        if not c.get("refresh_token"):
+            raise TargetError("OneDrive is not connected yet: click 'Connect OneDrive account'")
+        r = requests.post(
+            f"https://login.microsoftonline.com/{self._tenant()}/oauth2/v2.0/token",
+            data={"client_id": c.get("client_id", ""), "client_secret": c.get("client_secret", ""), "grant_type": "refresh_token", "refresh_token": c["refresh_token"], "scope": self.SCOPE},
+            timeout=TIMEOUT,
+        )
+        _raise(r, "OneDrive token refresh")
+        j = r.json()
+        if j.get("refresh_token") and j["refresh_token"] != c["refresh_token"]:
+            c["refresh_token"] = j["refresh_token"]
+            self._save(c)
+        return j["access_token"]
+
+    def _folder(self) -> str:
+        return (self.config.get("folder") or "ScanVault").strip("/")
+
+    def _item(self, name: str = "") -> str:
+        p = "/".join(x for x in (self._folder(), name) if x)
+        from urllib.parse import quote
+
+        return f"{self.GRAPH}/me/drive/root:/{quote(p)}:" if p else f"{self.GRAPH}/me/drive/root"
+
+    def test(self) -> str:
+        h = {"Authorization": f"Bearer {self._token()}"}
+        d = requests.get(f"{self.GRAPH}/me/drive", headers=h, timeout=TIMEOUT)
+        _raise(d, "OneDrive drive lookup")
+        r = requests.get(self._item(), headers=h, timeout=TIMEOUT)
+        if r.status_code == 404:
+            parent, _, leaf = self._folder().rpartition("/")
+            base = f"{self.GRAPH}/me/drive/root" + (f":/{parent}:" if parent else "")
+            r = requests.post(f"{base}/children", headers=h, json={"name": leaf, "folder": {}, "@microsoft.graph.conflictBehavior": "replace"}, timeout=TIMEOUT)
+        _raise(r, "OneDrive folder")
+        owner = (d.json().get("owner") or {}).get("user", {}).get("displayName", "")
+        return f"Connected{(' as ' + owner) if owner else ''}. Backups go to /{self._folder()}"
+
+    def upload(self, path: Path, name: str) -> None:
+        h = {"Authorization": f"Bearer {self._token()}"}
+        r = requests.post(f"{self._item(name)}/createUploadSession", headers=h, json={"item": {"@microsoft.graph.conflictBehavior": "fail"}}, timeout=TIMEOUT)
+        _raise(r, "OneDrive upload session")
+        url = r.json()["uploadUrl"]
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            offset = 0
+            while offset < size:
+                data = f.read(self.CHUNK)
+                rr = requests.put(url, headers={"Content-Range": f"bytes {offset}-{offset + len(data) - 1}/{size}", "Content-Length": str(len(data))}, data=data, timeout=600)
+                if rr.status_code not in (200, 201, 202):
+                    _raise(rr, "OneDrive upload")
+                offset += len(data)
+        if size == 0:
+            raise TargetError("Refusing to upload an empty backup")
+
+    def list_backups(self):
+        h = {"Authorization": f"Bearer {self._token()}"}
+        url, out = f"{self._item()}/children?$select=id,name,file&$top=999", []
+        while url:
+            r = requests.get(url, headers=h, timeout=TIMEOUT)
+            if r.status_code == 404:
+                return []
+            _raise(r, "OneDrive list")
+            j = r.json()
+            out += [(i["name"], i["id"]) for i in j.get("value", []) if "file" in i and i["name"].startswith(PREFIX)]
+            url = j.get("@odata.nextLink")
+        return sorted(out)
+
+    def delete(self, handle: str) -> None:
+        r = requests.delete(f"{self.GRAPH}/me/drive/items/{handle}", headers={"Authorization": f"Bearer {self._token()}"}, timeout=TIMEOUT)
+        if r.status_code not in (204, 404):
+            _raise(r, "OneDrive delete")
+
+    def download(self, handle: str, dest: Path) -> None:
+        with requests.get(f"{self.GRAPH}/me/drive/items/{handle}/content", headers={"Authorization": f"Bearer {self._token()}"}, stream=True, timeout=600) as r:
+            _raise(r, "OneDrive download")
+            with open(dest, "wb") as f:
+                for b in r.iter_content(1 << 20):
+                    f.write(b)
+
+    def auth_url_for(self, redirect_uri: str, state: str) -> str:
+        from urllib.parse import urlencode
+
+        return f"https://login.microsoftonline.com/{self._tenant()}/oauth2/v2.0/authorize?" + urlencode(
+            {"client_id": self.config.get("client_id", ""), "redirect_uri": redirect_uri, "response_type": "code", "scope": self.SCOPE, "state": state, "prompt": "select_account"}
+        )
+
+    def exchange_code(self, code: str, redirect_uri: str) -> None:
+        r = requests.post(
+            f"https://login.microsoftonline.com/{self._tenant()}/oauth2/v2.0/token",
+            data={"client_id": self.config.get("client_id", ""), "client_secret": self.config.get("client_secret", ""), "grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri, "scope": self.SCOPE},
+            timeout=TIMEOUT,
+        )
+        _raise(r, "OneDrive code exchange")
+        self.config["refresh_token"] = r.json()["refresh_token"]
+        self._save(self.config)
+
+
+# ============================================================ WebDAV / Nextcloud
+class WebDAV(Target):
+    """Any WebDAV server: Nextcloud, ownCloud, Synology WebDAV Server, QNAP,
+    Apache/nginx, Koofr, pCloud, Seafile, 4shared..."""
+
+    type = "webdav"
+    secret_fields = ("password",)
+
+    def _base(self) -> str:
+        url = (self.config.get("url") or "").rstrip("/")
+        if not url.startswith(("https://", "http://")):
+            raise TargetError("WebDAV URL must start with https://")
+        folder = (self.config.get("folder") or "").strip("/")
+        return f"{url}/{folder}" if folder else url
+
+    def _auth(self):
+        return (self.config.get("username", ""), self.config.get("password", ""))
+
+    def _verify(self):
+        return not self.config.get("insecure_tls")
+
+    def _req(self, method, url, **kw):
+        try:
+            return requests.request(method, url, auth=self._auth(), verify=self._verify(), timeout=kw.pop("timeout", TIMEOUT), **kw)
+        except requests.RequestException as exc:
+            raise TargetError(f"WebDAV {method} failed: {exc}") from exc
+
+    def _mkdirs(self) -> None:
+        url = (self.config.get("url") or "").rstrip("/")
+        for part in [p for p in (self.config.get("folder") or "").strip("/").split("/") if p]:
+            url += "/" + requests.utils.quote(part)
+            r = self._req("MKCOL", url + "/")
+            if r.status_code not in (201, 405, 301, 302):  # 405 = exists
+                _raise(r, "WebDAV create folder")
+
+    def test(self) -> str:
+        self._mkdirs()
+        r = self._req("PROPFIND", self._base() + "/", headers={"Depth": "0"})
+        if r.status_code not in (207, 200):
+            _raise(r, "WebDAV folder check")
+        probe = self._base() + "/.scanvault-write-test"
+        _raise(self._req("PUT", probe, data=b"ok"), "WebDAV write test")
+        self._req("DELETE", probe)
+        return f"Connected. Backups go to {self._base()}/"
+
+    def upload(self, path: Path, name: str) -> None:
+        self._mkdirs()
+        tmp = f"{self._base()}/{name}.part"
+        with open(path, "rb") as f:
+            r = self._req("PUT", tmp, data=f, headers={"Content-Type": "application/octet-stream", "Content-Length": str(path.stat().st_size)}, timeout=3600)
+        if r.status_code not in (200, 201, 204):
+            _raise(r, "WebDAV upload")
+        r = self._req("MOVE", tmp, headers={"Destination": f"{self._base()}/{name}", "Overwrite": "F"})
+        if r.status_code not in (201, 204):
+            _raise(r, "WebDAV rename")
+
+    def list_backups(self):
+        import xml.etree.ElementTree as ET
+        from urllib.parse import unquote, urlparse
+
+        r = self._req("PROPFIND", self._base() + "/", headers={"Depth": "1", "Content-Type": "application/xml"},
+                      data=b'<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>')
+        if r.status_code == 404:
+            return []
+        if r.status_code != 207:
+            _raise(r, "WebDAV list")
+        out = []
+        for resp in ET.fromstring(r.content).iter("{DAV:}response"):
+            href = resp.findtext("{DAV:}href") or ""
+            name = unquote(urlparse(href).path.rstrip("/").rsplit("/", 1)[-1])
+            if name.startswith(PREFIX) and name.endswith(SUFFIX):
+                out.append((name, name))
+        return sorted(out)
+
+    def delete(self, handle: str) -> None:
+        if "/" in handle:
+            raise TargetError("bad name")
+        r = self._req("DELETE", f"{self._base()}/{handle}")
+        if r.status_code not in (200, 204, 404):
+            _raise(r, "WebDAV delete")
+
+    def download(self, handle: str, dest: Path) -> None:
+        r = self._req("GET", f"{self._base()}/{handle}", stream=True, timeout=3600)
+        _raise(r, "WebDAV download")
+        with open(dest, "wb") as f:
+            for b in r.iter_content(1 << 20):
+                f.write(b)
+
+
+# ============================================================ SMB / Windows share
+class SMB(Target):
+    """SMB2/3 share: Windows, Synology/QNAP/TrueNAS shares, Samba. Uses SMB3
+    encryption when the server supports it."""
+
+    type = "smb"
+    secret_fields = ("password",)
+
+    def _root(self) -> str:
+        c = self.config
+        host, share = (c.get("host") or "").strip(), (c.get("share") or "").strip("\\/ ")
+        if not host or not share:
+            raise TargetError("Server and share name are required")
+        folder = (c.get("folder") or "").strip("\\/").replace("/", "\\")
+        return f"\\\\{host}\\{share}" + (f"\\{folder}" if folder else "")
+
+    def _session(self):
+        import smbclient
+
+        c = self.config
+        try:
+            smbclient.register_session(
+                c["host"].strip(), username=c.get("username") or None, password=c.get("password") or None,
+                port=int(c.get("port") or 445), encrypt=bool(c.get("require_encryption")), connection_timeout=20,
+            )
+        except Exception as exc:
+            raise TargetError(f"SMB connection failed: {exc}") from exc
+        return smbclient
+
+    def _wrap(self, what, fn):
+        try:
+            return fn()
+        except TargetError:
+            raise
+        except Exception as exc:
+            raise TargetError(f"SMB {what} failed: {exc}") from exc
+
+    def test(self) -> str:
+        sc = self._session()
+        root = self._root()
+        self._wrap("create folder", lambda: sc.makedirs(root, exist_ok=True))
+        probe = root + "\\.scanvault-write-test"
+
+        def w():
+            with sc.open_file(probe, mode="wb") as f:
+                f.write(b"ok")
+            sc.remove(probe)
+
+        self._wrap("write test", w)
+        return f"Connected. Backups go to {root}"
+
+    def upload(self, path: Path, name: str) -> None:
+        sc = self._session()
+        root = self._root()
+
+        def up():
+            sc.makedirs(root, exist_ok=True)
+            tmp, dst = f"{root}\\{name}.part", f"{root}\\{name}"
+            with open(path, "rb") as src, sc.open_file(tmp, mode="wb") as out:
+                shutil.copyfileobj(src, out, 4 * 1024 * 1024)
+            sc.rename(tmp, dst)
+
+        self._wrap("upload", up)
+
+    def list_backups(self):
+        sc = self._session()
+        try:
+            names = sc.listdir(self._root())
+        except FileNotFoundError:
+            return []
+        except Exception as exc:
+            raise TargetError(f"SMB list failed: {exc}") from exc
+        return sorted((n, n) for n in names if n.startswith(PREFIX) and n.endswith(SUFFIX))
+
+    def delete(self, handle: str) -> None:
+        if "\\" in handle or "/" in handle:
+            raise TargetError("bad name")
+        sc = self._session()
+        self._wrap("delete", lambda: sc.remove(f"{self._root()}\\{handle}"))
+
+    def download(self, handle: str, dest: Path) -> None:
+        sc = self._session()
+
+        def dl():
+            with sc.open_file(f"{self._root()}\\{handle}", mode="rb") as src, open(dest, "wb") as out:
+                shutil.copyfileobj(src, out, 4 * 1024 * 1024)
+
+        self._wrap("download", dl)
+
+
+# ============================================================ Local folder (USB / NFS / mounted disk)
+class LocalFolder(Target):
+    """A folder inside the container: mount a USB disk, a second internal
+    drive or an NFS/CIFS mount from the host to /backups (see docker-compose)."""
+
+    type = "local"
+    secret_fields = ()
+    ROOT = Path(os.environ.get("SCANVAULT_LOCAL_BACKUP_ROOT", "/backups"))
+
+    def _dir(self) -> Path:
+        p = Path(self.config.get("path") or str(self.ROOT)).expanduser()
+        if not p.is_absolute():
+            p = self.ROOT / p
+        p = p.resolve()
+        data = Path(os.environ.get("SCANVAULT_DATA", "/data")).resolve()
+        if p == data or data in p.parents:
+            raise TargetError("Pick a folder outside the vault's own data folder")
+        return p
+
+    def test(self) -> str:
+        d = self._dir()
+        if self.config.get("require_mount") and _mount_root(d) == Path("/"):
+            raise TargetError(f"{d} is not on a mounted disk. Is the USB drive plugged in and mounted into the container?")
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            probe = d / ".scanvault-write-test"
+            probe.write_bytes(b"ok")
+            probe.unlink()
+        except OSError as exc:
+            raise TargetError(f"Can't write to {d}: {exc.strerror or exc}") from exc
+        free = shutil.disk_usage(d).free
+        return f"Writable. {free / 1e9:,.1f} GB free in {d}"
+
+    def upload(self, path: Path, name: str) -> None:
+        self.test()
+        d = self._dir()
+        tmp = d / f"{name}.part"
+        try:
+            shutil.copyfile(path, tmp)
+            with open(tmp, "rb") as f:
+                os.fsync(f.fileno())
+            tmp.replace(d / name)
+        except OSError as exc:
+            tmp.unlink(missing_ok=True)
+            raise TargetError(f"Copy to {d} failed: {exc.strerror or exc}") from exc
+
+    def list_backups(self):
+        d = self._dir()
+        if not d.exists():
+            return []
+        return sorted((p.name, p.name) for p in d.iterdir() if p.is_file() and p.name.startswith(PREFIX) and p.name.endswith(SUFFIX))
+
+    def delete(self, handle: str) -> None:
+        if "/" in handle or handle.startswith("."):
+            raise TargetError("bad name")
+        (self._dir() / handle).unlink(missing_ok=True)
+
+    def download(self, handle: str, dest: Path) -> None:
+        if "/" in handle:
+            raise TargetError("bad name")
+        shutil.copyfile(self._dir() / handle, dest)
+
+
+def _mount_root(p: Path) -> Path:
+    p = p if p.exists() else p.parent
+    while not os.path.ismount(p) and p != p.parent:
+        p = p.parent
+    return p
+
+
+TYPES: dict[str, type[Target]] = {
+    "gdrive": GoogleDrive,
+    "box": Box,
+    "dropbox": Dropbox,
+    "onedrive": OneDrive,
+    "s3": S3,
+    "webdav": WebDAV,
+    "sftp": SSHTarget,
+    "smb": SMB,
+    "local": LocalFolder,
+}
+
+OAUTH_TYPES = {"gdrive", "box", "dropbox", "onedrive"}
+
+
+def oauth_client_id(type_: str, cfg: dict) -> str:
+    return cfg.get("app_key" if type_ == "dropbox" else "client_id", "")
+
+
+def oauth_auth_url(type_: str, cfg: dict, redirect_uri: str, state: str) -> str:
+    if type_ == "onedrive":
+        return OneDrive(cfg).auth_url_for(redirect_uri, state)
+    return TYPES[type_].auth_url(oauth_client_id(type_, cfg), redirect_uri, state)  # type: ignore[attr-defined]
+
+
+def needs_connect(type_: str, cfg: dict) -> bool:
+    if type_ not in OAUTH_TYPES:
+        return False
+    mode = cfg.get("auth_mode", "oauth")
+    return mode == "oauth" and not cfg.get("refresh_token")
+
 
 
 def make(type_: str, config: dict, save: Callable[[dict], None] | None = None) -> Target:
