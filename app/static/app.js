@@ -99,6 +99,7 @@ const I = {
   chev: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>',
   flask: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6M10 3v6l-5.5 9.5A1.7 1.7 0 0 0 6 21h12a1.7 1.7 0 0 0 1.5-2.5L14 9V3"/><path d="M7.5 15h9"/></svg>',
   x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+  spark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>',
   dl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5M12 15V3"/></svg>',
 };
 const HERO = `<svg class="hero" viewBox="0 0 520 300" aria-hidden="true">
@@ -765,13 +766,14 @@ async function viewStudy(id) {
   m.innerHTML = `${mobileHead()}<div class="crumbs"><a href="#/patients" data-go="patients">Patients</a><span>/</span><a href="#/patient/${esc(p.id)}" data-go="patient/${esc(p.id)}">${esc(p.name)}</a><span>/</span><span>${esc(s.title)}</span></div>
   <div class="top"><div><h1>${esc(s.title)}</h1><p class="sub">${[s.study_date && fmtDate(s.study_date), s.modality, s.facility, s.referring_physician && "Ref. " + s.referring_physician, s.accession && "Acc. " + s.accession].filter(Boolean).map(esc).join(" · ")}</p>
     ${s.description ? `<p class="small" style="margin-top:8px;max-width:70ch">${esc(s.description)}</p>` : ""}</div>
-    <div class="row"><a class="btn" href="#/activity/study:${esc(s.id)}" data-go="activity/study:${esc(s.id)}">${I.activity} Activity</a><button class="btn" id="edit">Edit</button>${imgs.length ? `<button class="btn" id="cmp" title="Show next to another study of this patient">Compare</button>` : ""}<label tabindex="0" role="button" class="btn primary">${I.upload} Add files<input type="file" id="fi" multiple hidden></label></div></div>
+    <div class="row"><a class="btn" href="#/activity/study:${esc(s.id)}" data-go="activity/study:${esc(s.id)}">${I.activity} Activity</a><button class="btn" id="aibtn" style="display:none">${I.spark} Explain or translate</button><button class="btn" id="edit">Edit</button>${imgs.length ? `<button class="btn" id="cmp" title="Show next to another study of this patient">Compare</button>` : ""}<label tabindex="0" role="button" class="btn primary">${I.upload} Add files<input type="file" id="fi" multiple hidden></label></div></div>
   <div class="drop" id="drop" style="padding:16px">${I.upload}<div class="small"><b>Drop more files for this study</b></div></div>
   <div class="queue" id="queue"></div>
   ${reports.length ? `<div class="section-h"><h2>Reports</h2></div><div class="lightbox">${reports.map(tile).join("")}</div>` : ""}
   <div class="section-h"><h2>Images</h2><span class="muted small">${imgs.length} file${imgs.length === 1 ? "" : "s"}</span></div>
   ${imgs.length ? `<div class="lightbox">${imgs.map(tile).join("")}</div>` : `<div class="card empty">${I.scan}<p>No images in this study yet.</p></div>`}`;
   $("#edit").onclick = () => studyForm(p.id, s);
+  aiButton($("#aibtn"), s, files);
   if ($("#cmp")) $("#cmp").onclick = () => pickCompare(id).catch(handleErr);
   const up = fl => uploadFiles(`/api/studies/${id}/files?format=full`, fl, () => viewStudy(id));
   wireDrop($("#drop"), up);
@@ -1598,6 +1600,7 @@ async function viewSettings() {
     <div class="card pad stack"><h2>Account</h2><p class="small">Signed in as <b>${esc(st.username)}</b>.</p>
       <div class="row"><button class="btn" id="pw">Change password</button><button class="btn" id="others">Sign out other devices</button><button class="btn ghost" id="out">Sign out</button></div></div>
     <div class="card pad stack" id="ssocard"><h2>Single sign-on</h2><div class="empty" style="padding:10px"><span class="spin"></span></div></div>
+    ${st.ai_available === false ? "" : `<div class="card pad stack" id="aicard"><h2>AI explanations</h2><div class="empty" style="padding:10px"><span class="spin"></span></div></div>`}
     <div class="card pad stack"><h2>Install on your phone</h2>
       <p class="small">Open this address in Safari (iPhone) or Chrome (Android) and choose <b>Add to Home Screen</b>. ScanVault opens full screen and can take photos of films and paper reports. Use HTTPS when you reach it from outside your home network.</p></div>
     <div class="card pad stack"><h2>Privacy and HIPAA</h2>
@@ -1605,7 +1608,8 @@ async function viewSettings() {
         <li>For personal and family records, HIPAA generally doesn't apply to you. If a practice uses ScanVault for patients, it is responsible for HIPAA safeguards, including business associate agreements with Google or Box.</li>
         <li>Backups are encrypted before upload, so cloud providers hold only ciphertext, but file sizes and backup times are visible to them.</li>
         <li>Reach ScanVault only over HTTPS (your NAS's reverse proxy, Caddy or Traefik). Over plain http:// your password and keys cross the network in clear.</li>
-        <li>Losing both the encryption key and the recovery key file makes the data unrecoverable. That is by design.</li></ul></div>
+        <li>Losing both the encryption key and the recovery key file makes the data unrecoverable. That is by design.</li>
+        <li>AI explanations are off unless an administrator turns them on. Each request shows what will be sent and needs your OK. Sending a patient's records to an AI provider is a disclosure: a practice needs a business associate agreement with that provider first.</li></ul></div>
     <p class="small muted">ScanVault ${esc(st.version)}</p>
   </div>`;
   $$("#thm button").forEach(b => b.onclick = () => { saveTheme({ theme: b.dataset.t }); viewSettings(); });
@@ -1646,6 +1650,7 @@ async function viewSettings() {
   $("#lock").onclick = async () => { await API.req("POST", "/api/vault/lock"); S.status.unlocked = false; render(); };
   $("#out").onclick = async () => { await API.req("POST", "/api/auth/logout"); S.status.authenticated = false; render(); };
   ssoCard().catch(handleErr);
+  aiCard().catch(handleErr);
 }
 
 // ------------------------------------------------------------------ single sign-on settings
@@ -1813,6 +1818,163 @@ function ssoProviderForm(c, p) {
   };
 }
 
+// ------------------------------------------------------------------ AI explanations (optional)
+const AI_LANGS = ["English", "Spanish", "French", "German", "Italian", "Portuguese", "Chinese (Simplified)", "Chinese (Traditional)", "Japanese", "Korean", "Vietnamese", "Tagalog", "Arabic", "Hindi", "Russian", "Polish", "Ukrainian", "Turkish", "Farsi", "Haitian Creole"];
+const aiLangList = () => `<datalist id="ailangs">${AI_LANGS.map(l => `<option value="${esc(l)}">`).join("")}</datalist>`;
+const REMOVED_LABEL = { name: "name", dob: "birth date", id: "ID number", clinician: "clinician name", facility: "facility name", date: "date", phone: "phone number", email: "e-mail address", url: "link", address: "address", "labeled field": "labeled field" };
+
+async function aiButton(btn, study, files) {
+  if (!btn || API.demo || S.status.ai_available === false) return;
+  let cfg;
+  try { cfg = await API.req("GET", "/api/ai/settings"); } catch { return; }
+  if (!cfg.enabled || !btn.isConnected) return;
+  btn.style.display = "";
+  btn.onclick = () => aiDialog(study, files, cfg);
+}
+
+function aiDialog(study, files, cfg) {
+  const usable = files.filter(f => f.kind === "report" || f.kind === "dicom" || (f.content_type || "").startsWith("image/"));
+  const st = { task: "explain", language: cfg.default_language || "English", strip: true, question: "", picked: new Set(usable.filter(f => f.kind === "report").map(f => f.id)) };
+  if (!st.picked.size) usable.filter(f => f.kind !== "report").slice(0, 1).forEach(f => st.picked.add(f.id));
+  const mm = modal("Explain or translate with AI", `<div id="aib"></div>`, { wide: true, footer: `<div id="aif" class="row" style="width:100%;justify-content:flex-end"></div>` });
+  const body = $("#aib", mm.el), foot = $("#aif", mm.el);
+  const label = f => f.kind === "report" ? `Report: ${f.filename}` : f.kind === "dicom" ? `Image: ${f.dicom?.series_description || "DICOM"}${f.dicom?.instance_number ? " #" + f.dicom.instance_number : ""}` : `Photo: ${f.filename}`;
+
+  const choose = () => {
+    body.innerHTML = `<div class="stack">
+      <div class="note info">${I.info}<div class="small">${esc(cfg.disclaimer)} Nothing is sent until you review it on the next screen.</div></div>
+      <div class="seg" role="radiogroup" aria-label="Task">${[["explain", "Explain in plain language"], ["translate", "Translate"]].map(([k, l]) => `<button type="button" role="radio" data-k="${k}" class="${st.task === k ? "on" : ""}" aria-checked="${st.task === k}">${l}</button>`).join("")}</div>
+      <label class="f">${st.task === "explain" ? "Answer in" : "Translate into"}<input id="ail" list="ailangs" maxlength="40" value="${esc(st.language)}">${aiLangList()}</label>
+      <div><p class="small" style="font-weight:600;margin-bottom:6px">What to include <span class="hint">up to ${cfg.max_images} images</span></p>
+        <div class="stack" style="gap:4px;max-height:240px;overflow:auto">${usable.length ? usable.map(f => `<label class="row small" style="gap:8px;flex-wrap:nowrap"><input type="checkbox" data-f="${esc(f.id)}" ${st.picked.has(f.id) ? "checked" : ""}> <span>${esc(label(f))}</span></label>`).join("") : `<p class="small muted">This study has no reports or images yet.</p>`}</div></div>
+      <label class="check"><input type="checkbox" id="ais" ${st.strip ? "checked" : ""}> <span>Remove names, ID numbers and dates first (recommended) <span class="hint">Best effort: you'll see the exact text before it's sent, and can edit it. Words printed inside images can't be removed.</span></span></label>
+      ${st.task === "explain" ? `<label class="f">Your question <span class="hint">optional</span><textarea id="aiq" rows="2" maxlength="2000" placeholder="For example: what does &quot;meniscus tear&quot; mean?">${esc(st.question)}</textarea></label>` : ""}
+      <p class="err" id="aie"></p></div>`;
+    foot.innerHTML = `<button class="btn" data-close>Cancel</button><button class="btn primary" id="aip">Review what will be sent</button>`;
+    $$(".seg button", body).forEach(b => b.onclick = () => { keep(); st.task = b.dataset.k; choose(); });
+    const keep = () => { st.language = $("#ail", body).value.trim() || "English"; st.strip = $("#ais", body).checked; if ($("#aiq", body)) st.question = $("#aiq", body).value; st.picked = new Set($$("input[data-f]", body).filter(x => x.checked).map(x => x.dataset.f)); };
+    $("#aip", foot).onclick = async () => {
+      keep();
+      if (!st.picked.size) return $("#aie", body).textContent = "Choose at least one report or image.";
+      const b = $("#aip", foot); b.disabled = true; b.innerHTML = '<span class="spin"></span> Preparing…';
+      try {
+        const pv = await API.req("POST", "/api/ai/prepare", { study_id: study.id, file_ids: [...st.picked], task: st.task, language: st.language, remove_identifiers: st.strip, question: st.task === "explain" ? st.question : "" });
+        review(pv);
+      } catch (er) { $("#aie", body).textContent = er.message; b.disabled = false; b.textContent = "Review what will be sent"; }
+    };
+  };
+
+  const review = pv => {
+    const removed = Object.entries(pv.removed || {}).map(([k, n]) => `${n} ${REMOVED_LABEL[k] || k}${n === 1 ? "" : "s"}`).join(", ");
+    body.innerHTML = `<div class="stack">
+      <div class="note warn">${I.warn}<div class="small"><b>This will be sent to ${esc(pv.provider)} at ${esc(pv.endpoint)}</b> (model ${esc(pv.model)}). Only what's shown below leaves ScanVault. Check it for anything you don't want to share.</div></div>
+      ${pv.remove_identifiers ? `<p class="small">${removed ? `Removed: ${esc(removed)}.` : "No names, IDs or dates were found to remove."} Placeholders like [NAME] show where.</p>` : `<p class="small"><b>Identifiers were not removed.</b></p>`}
+      ${(pv.warnings || []).map(w => `<div class="note">${I.info}<div class="small">${esc(w)}</div></div>`).join("")}
+      ${pv.context ? `<p class="small"><b>Study:</b> ${esc(pv.context)}</p>` : ""}
+      ${pv.text ? `<label class="f">Report text <span class="hint">you can edit it</span><textarea id="ait" rows="10" class="mono" style="font-size:12px">${esc(pv.text)}</textarea></label>` : ""}
+      ${pv.question ? `<p class="small"><b>Your question:</b> ${esc(pv.question)}</p>` : ""}
+      ${pv.images.length ? `<div><p class="small" style="font-weight:600;margin-bottom:6px">Images (${pv.images.length})</p><div class="lightbox">${pv.images.map(im => `<div class="tile" style="cursor:default"><div class="img"><img alt="${esc(im.label)}" src="${esc(im.data_url)}"></div><div class="cap"><b>${esc(im.label)}</b><span>${im.width}×${im.height}</span></div></div>`).join("")}</div></div>` : ""}
+      ${pv.pdfs.length ? `<p class="small"><b>Whole PDFs:</b> ${pv.pdfs.map(x => esc(x.label) + " (" + fmtBytes(x.size_bytes) + ")").join(", ")}</p>` : ""}
+      <details class="small"><summary>Instructions sent to the model</summary><pre class="mono" style="white-space:pre-wrap;font-size:12px">${esc(pv.instructions)}</pre></details>
+      <label class="check"><input type="checkbox" id="aic"> <span>Send this to ${esc(pv.endpoint)}. I understand the answer is not medical advice.</span></label>
+      <p class="err" id="aie"></p></div>`;
+    foot.innerHTML = `<button class="btn" id="aibk">Back</button><button class="btn primary" id="aisend" disabled>${I.spark} Send</button>`;
+    $("#aic", body).onchange = e => $("#aisend", foot).disabled = !e.target.checked;
+    $("#aibk", foot).onclick = choose;
+    $("#aisend", foot).onclick = async () => {
+      const b = $("#aisend", foot); b.disabled = true; b.innerHTML = '<span class="spin"></span> Waiting for the answer…';
+      const req = { token: pv.token, confirm: true };
+      if ($("#ait", body)) req.text = $("#ait", body).value;
+      try { result(await API.req("POST", "/api/ai/send", req)); }
+      catch (er) { $("#aie", body).textContent = er.message; if (er.code === "ai_expired") { b.textContent = "Prepare again"; b.disabled = false; b.onclick = choose; } else { b.disabled = false; b.innerHTML = `${I.spark} Send`; } }
+    };
+  };
+
+  const result = r => {
+    body.innerHTML = `<div class="stack">
+      <div class="note warn">${I.warn}<div class="small">${esc(r.disclaimer)}</div></div>
+      <div id="aiout" class="card pad" style="white-space:pre-wrap;line-height:1.55;max-height:55vh;overflow:auto"></div>
+      ${r.truncated ? `<p class="small muted">The answer was cut off because it reached the length limit.</p>` : ""}
+      <p class="small muted">Answered by ${esc(r.model)}. Not saved in ScanVault; the request is in the AI activity log.</p></div>`;
+    $("#aiout", body).textContent = r.text;
+    const full = `${r.text}\n\n---\n${r.disclaimer}`;
+    foot.innerHTML = `<button class="btn" id="aicp">Copy</button><button class="btn" id="aisv">${I.dl} Save as text</button><button class="btn primary" data-close>Done</button>`;
+    $("#aicp", foot).onclick = () => copyText(full);
+    $("#aisv", foot).onclick = () => saveText(`${r.task === "translate" ? "translation" : "explanation"}.txt`, full);
+  };
+  choose();
+}
+
+async function aiCard() {
+  const el = $("#aicard"); if (!el) return;
+  if (API.demo) { el.innerHTML = `<h2>AI explanations</h2><p class="small muted">On your server you can connect Claude or another AI model with your own API key to get plain-language explanations and translations of reports. It's off by default, and each request shows what will be sent first. It isn't available in this preview.</p>`; return; }
+  const c = await API.req("GET", "/api/ai/settings");
+  const prov = c.providers[c.provider] || c.provider;
+  el.innerHTML = `<h2>AI explanations</h2>
+    <p class="small">Plain-language explanations and translations of reports and images, using your own API key. ${c.enabled ? `<b>On</b>: ${esc(prov)}, model <span class="mono">${esc(c.model)}</span> at ${esc(c.endpoint)}.` : "<b>Off.</b>"}</p>
+    <ul class="small muted" style="margin:0;padding-left:18px;display:grid;gap:4px">
+      <li>Nothing is sent automatically. Each request shows exactly what will be sent and needs a click to confirm.</li>
+      <li>Names, ID numbers and dates are removed from report text by default (best effort; you review it). Images are sent as plain pictures, without DICOM headers or photo metadata.</li>
+      <li>The API key is encrypted with your vault key and never shown again. Every request is recorded in the activity log.</li>
+      <li>Results are general information, not medical advice. A practice using this for patients needs a business associate agreement (BAA) with the AI provider.</li></ul>
+    <div class="row">${c.can_edit ? `<button class="btn" id="aiedit">${c.enabled || c.key_set ? "Change settings" : "Set up"}</button>${c.key_set || c.provider === "openai" ? `<button class="btn" id="aitest">Test connection</button>` : ""}` : `<span class="small muted">An administrator can change these settings.</span>`}<button class="btn ghost" id="ailog">Activity log</button></div>`;
+  if ($("#aiedit", el)) $("#aiedit", el).onclick = () => aiSettingsForm(c);
+  if ($("#aitest", el)) $("#aitest", el).onclick = async e => {
+    const b = e.currentTarget; b.disabled = true; b.innerHTML = '<span class="spin"></span> Testing…';
+    try { const r = await API.req("POST", "/api/ai/test"); toast(`Connected: ${r.model} replied`); } catch (er) { handleErr(er); }
+    b.disabled = false; b.textContent = "Test connection";
+  };
+  $("#ailog", el).onclick = aiAuditLog;
+}
+
+function aiSettingsForm(c) {
+  let provider = c.provider;
+  const mm = modal("AI explanations", `<form class="form" id="af"></form>`, { wide: true, footer: `<button class="btn" data-close>Cancel</button><button class="btn primary" form="af" id="asave">Save</button>` });
+  const f = $("#af", mm.el), E = n => f.elements.namedItem(n);
+  const draw = () => {
+    const same = provider === c.provider;
+    f.innerHTML = `<label class="check"><input type="checkbox" name="enabled" ${c.enabled ? "checked" : ""}> <span>Turn on AI explanations and translations <span class="hint">Shows an "Explain or translate" button on each study. Nothing is sent until someone reviews and confirms a request.</span></span></label>
+      <label class="f">Provider <span class="hint">OpenAI-compatible covers OpenAI, Azure, OpenRouter, Ollama, LM Studio and vLLM</span><select name="provider">${Object.entries(c.providers).map(([k, v]) => `<option value="${k}" ${k === provider ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></label>
+      ${provider === "anthropic" ? `<div class="note info">${I.info}<div class="small">Create a key at console.anthropic.com. API requests aren't used to train models by default. For patient records of a practice, ask Anthropic for a BAA and zero data retention first.</div></div>`
+        : `<div class="note info">${I.info}<div class="small">Any server with an OpenAI-style <span class="mono">/chat/completions</span> API: OpenAI, Azure, OpenRouter, or a model on your own network such as Ollama (<span class="mono">http://ollama:11434/v1</span>) or LM Studio. A local model keeps everything on your network. Plain http:// works only for local addresses.</div></div>`}
+      <label class="f">${provider === "anthropic" ? `Endpoint <span class="hint">leave blank for api.anthropic.com</span>` : "Endpoint URL"}<input name="base_url" ${provider === "openai" ? "required" : ""} placeholder="${provider === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com/v1"}" value="${esc(same ? c.base_url : "")}" autocomplete="off"></label>
+      <label class="f">Model<input name="model" required value="${esc(same ? c.model : provider === "anthropic" ? "claude-opus-5-5" : "")}" placeholder="${provider === "anthropic" ? "claude-opus-5-5" : "for example gpt-5 or llama3.2-vision"}" class="mono" autocomplete="off"></label>
+      <label class="f">API key ${same && c.key_set ? '<span class="hint">saved; leave blank to keep</span>' : provider === "openai" ? '<span class="hint">optional for local servers</span>' : ""}<input name="api_key" type="password" autocomplete="off" spellcheck="false"></label>
+      ${same && c.key_set ? `<label class="row small" style="gap:8px"><input type="checkbox" name="clear_key"> Remove the saved key</label>` : ""}
+      <p class="small muted">Changing the provider or endpoint removes the saved key, so a new endpoint never receives the old one.</p>
+      <label class="f">Default language<input name="default_language" list="ailangs" maxlength="40" value="${esc(c.default_language)}">${aiLangList()}</label>
+      ${c.reauth_fresh ? "" : `<label class="f">Your ScanVault password <span class="hint">confirms it's you</span><input name="password" type="password" required autocomplete="current-password"></label>`}
+      <p class="err" id="aerr"></p>`;
+    E("provider").onchange = e => {
+      // keep what was typed in the fields that don't depend on the provider
+      const keep = { enabled: E("enabled").checked, lang: E("default_language").value, pw: E("password") ? E("password").value : "" };
+      provider = e.target.value; draw();
+      E("enabled").checked = keep.enabled; E("default_language").value = keep.lang; if (E("password")) E("password").value = keep.pw;
+    };
+  };
+  draw();
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const body = { enabled: E("enabled").checked, provider, base_url: E("base_url").value.trim(), model: E("model").value.trim(), default_language: E("default_language").value.trim() };
+    if (E("api_key").value) body.api_key = E("api_key").value.trim();
+    if (E("clear_key") && E("clear_key").checked) body.clear_key = true;
+    if (E("password")) body.password = E("password").value;
+    const b = $("#asave", mm.el); b.disabled = true;
+    try { await API.req("PUT", "/api/ai/settings", body); mm.close(); toast(body.enabled ? "AI explanations are on" : "AI settings saved"); aiCard(); }
+    catch (er) { $("#aerr", f).textContent = er.message; b.disabled = false; }
+  };
+}
+
+async function aiAuditLog() {
+  const mm = modal("AI activity log", `<div class="empty" style="padding:10px"><span class="spin"></span></div>`, { wide: true, footer: `<button class="btn primary" data-close>Close</button>` });
+  const body = $(".body", mm.el);
+  try {
+    const rows = await API.req("GET", "/api/ai/audit?limit=200");
+    const what = r => r.event === "send" ? `${r.task === "translate" ? `Translate into ${esc(r.language)}` : "Explain"}: ${esc(r.study_title || "study")} · ${r.chars || 0} characters, ${r.images || 0} image${r.images === 1 ? "" : "s"}${r.pdfs ? `, ${r.pdfs} PDF` : ""}${r.removed_identifiers ? "" : " · <b>identifiers not removed</b>"}${r.edited ? " · text edited" : ""}`
+      : r.event === "test" ? "Connection test (no record data)" : `Settings: ${r.enabled ? "on" : "off"}, key ${esc(r.key)}`;
+    body.innerHTML = rows.length ? `<div class="stack" style="gap:8px">${rows.map(r => `<div class="small" style="border-bottom:1px solid var(--line);padding-bottom:8px"><b>${esc(fmtDT(r.at))}</b> · ${esc(r.user || "")} · ${esc(r.endpoint || "")} ${r.model ? `<span class="mono">${esc(r.model)}</span>` : ""}<br>${what(r)} · <span class="${r.status === "ok" ? "" : "err"}">${esc(r.status)}${r.error ? ": " + esc(r.error) : ""}</span></div>`).join("")}</div>` : `<p class="small muted">Nothing has been sent yet.</p>`;
+  } catch (er) { body.innerHTML = `<p class="err">${esc(er.message)}</p>`; }
+}
 // Feature modules (static/labs.js) build on these.
 window.SV = { API, S, render, $, $$, esc, fmtDate, toast, modal, confirmBox, main, mobileHead, handleErr, go, wireDrop, I, initials, age };
 

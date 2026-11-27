@@ -17,4 +17,6 @@ paramiko==5.1.0
 scp==0.16.2
 boto3==1.44.12
 smbprotocol==1.17.0
+anthropic==2.14.0
+pypdf==7.2.0
 pdfplumber==0.11.11

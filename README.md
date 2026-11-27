@@ -41,6 +41,11 @@ a USB disk.
   cloud credential is encrypted with AES-256-GCM.
 - **Encrypted backups**: one archive per run, encrypted before it leaves the
   box, with schedule and retention per destination.
+- **Optional AI explanations**: with your own API key (Claude by default, or
+  any OpenAI-compatible server including a local Ollama), get a plain-language,
+  non-medical explanation or a translation of a report and its images. Off by
+  default; every request shows exactly what will be sent and waits for your OK.
+  See [AI explanations](#ai-explanations-optional).
 - **Your key**: you set the encryption key at first run and download a
   **recovery key file** for emergency restore. `tools/restore.py` decrypts
   any backup into plain folders without ScanVault running at all.
@@ -260,6 +265,74 @@ How it is protected:
 - Directory sign-in never unlocks the vault. After a restart you still enter
   the encryption key.
 
+## AI explanations (optional)
+
+Off until an administrator turns it on in **Settings > AI explanations**. Then
+each study has an **Explain or translate** button that can:
+
+- **Explain** a report (and, if you pick them, some of its images) in plain,
+  everyday language: what the terms and measurements mean, what the report
+  itself flags for follow-up, and questions to ask your doctor. The model is
+  told not to diagnose, judge severity or suggest treatment, and every answer
+  carries a "not medical advice" notice.
+- **Translate** a report into another language (machine translation; the
+  original stays authoritative).
+
+**Providers.** Anthropic Claude (default model `claude-opus-5-5`, with
+Anthropic's server-side fallback if the model declines) or any server with an
+OpenAI-style `/chat/completions` API: OpenAI, Azure, OpenRouter, or a model on
+your own network such as Ollama (`http://ollama:11434/v1`), LM Studio or vLLM.
+A local model keeps records on your network. Plain `http://` is accepted only
+for local and private addresses.
+
+**What protects the records.**
+
+- **Nothing is sent automatically.** A request has two steps. *Prepare* builds
+  the exact payload on the server and shows it to you: the report text (which
+  you can edit), every image as it will be sent, and the instructions to the
+  model. *Send* sends that payload and nothing else, only after you tick the
+  confirmation. A preview is single-use, expires after 15 minutes, is tied to
+  your session, and is discarded if the vault locks or the AI settings change.
+- **Identifiers are removed first** (on by default). From report text:
+  the patient's name, birth date and MRN, accession and study numbers, the
+  referring clinician and facility (taken from the vault's own records and
+  DICOM tags), plus labeled fields such as `MRN:`, `DOB:` or `Patient:`,
+  clinician names (`Dr. …`, `… MD`, `signed by …`), phone numbers, e-mail
+  addresses, street addresses, ZIP codes and every full date (the year is kept,
+  as in `[DATE 2024]`). This is best-effort pattern matching, which is why you
+  review the text before it goes. File names are never sent.
+- **Images are re-rendered from pixels.** DICOM images go out as JPEGs made
+  from the pixel data only, so the DICOM header (name, ID, dates, institution)
+  never leaves. Text that a scanner burned into the pixels does; images flagged
+  `BurnedInAnnotation=YES` get a warning. Photos are re-encoded without their
+  EXIF data (location, camera, time). Scanned PDFs without a text layer can't
+  be cleaned, so they are left out unless you turn off identifier removal.
+- **The API key** is sealed with the vault's master key like backup
+  credentials, is write-only through the API, and is re-encrypted when the
+  master key is replaced. Changing the provider or endpoint drops the saved
+  key, so a new endpoint can't receive the old one. Changing AI settings needs
+  an administrator and their password (or a fresh SSO sign-in).
+- **Audit log.** Every settings change, connection test and request is
+  recorded (who, when, endpoint, model, which study and files, how many
+  characters and images, whether identifiers were removed or the text edited,
+  a SHA-256 of the payload, and the outcome), encrypted like other records.
+  The report text and the answer are not stored. See **Settings > AI
+  explanations > Activity log** or `GET /api/ai/audit`.
+- Report text is wrapped as data and the model is told to ignore instructions
+  inside it. Answers are shown as plain text, never as HTML.
+- `SCANVAULT_AI=off` removes the feature entirely, for deployments where
+  policy forbids sending records to any outside service.
+
+**HIPAA and BAAs.** Sending a patient's records to an AI provider is a
+disclosure to that provider. For your own or your family's records that is
+your choice. A covered entity (a practice, clinic or billing service) must not
+send PHI to a provider without a **business associate agreement**, even with
+identifiers removed, because removal here is best-effort and doesn't meet
+HIPAA's de-identification standard on its own. Anthropic and OpenAI offer BAAs
+(and zero data retention) to eligible API customers; check your provider's
+data use and retention terms first. A model that runs on your own network
+avoids the question.
+
 ## LabsVault: lab results
 
 Open **Labs** (or **Lab results** on a patient) and drop in a lab report PDF.
@@ -412,6 +485,9 @@ restore turned on.
 - Cloud providers see backup sizes, times and file names (which contain no PHI).
 - There is no key escrow. If you lose both the encryption key and the recovery
   key file, the data cannot be recovered.
+- The optional AI explanations send what you approve to the AI provider you
+  configure. A covered entity needs a BAA with that provider first; see
+  [AI explanations](#ai-explanations-optional).
 
 ### Activity log
 
@@ -519,6 +595,11 @@ https entries match scheme, host and port exactly.
 | GET/POST/PUT/DELETE | `/api/backups/targets[/{id}]` | destinations (secrets are write-only) |
 | POST | `/api/backups/run`, `/api/backups/targets/{id}/run`, `/test` | |
 | GET | `/api/backups/runs`, `/api/backups/download` | history; encrypted `.svb` download |
+| GET/PUT | `/api/ai/settings` | `{enabled, provider: anthropic\|openai, base_url?, model, api_key? (write-only), clear_key?, default_language, password}`; GET returns `key_set`, never the key. PUT is admin-only and needs `password` |
+| POST | `/api/ai/test` | admin: one-word test request, no record data |
+| POST | `/api/ai/prepare` | `{study_id, file_ids, task: explain\|translate, language?, remove_identifiers? (default true), question?}` → the exact payload for review: `{token, provider, endpoint, model, text, context, question, images: [{label, data_url}], pdfs, removed, warnings, instructions, disclaimer}`. Sends nothing |
+| POST | `/api/ai/send` | `{token, confirm: true, text?}` (text: the reviewed, possibly edited report text) → `{text, model, disclaimer, truncated}`. The token is single-use and expires in 15 minutes |
+| GET | `/api/ai/audit?limit=` | AI activity log, newest first |
 
 Files: `{id, study_id, patient_id, filename, content_type, size_bytes, kind: image|report|dicom|other, has_thumbnail, sha256, uploaded_at, dicom?}`.
 

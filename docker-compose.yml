@@ -41,6 +41,8 @@ services:
       # SCANVAULT_LDAP_BIND_PASSWORD_FILE: /run/secrets/scanvault_ldap_password
       # SCANVAULT_LDAP_BASE_DN: DC=example,DC=com
       # SCANVAULT_LDAP_GROUPS: CN=ScanVault,CN=Users,DC=example,DC=com
+      # Remove the optional AI explanations entirely (they are off by default):
+      # SCANVAULT_AI: "off"
       # Optional unattended unlock after restarts (see README trade-offs):
       # SCANVAULT_PASSPHRASE_FILE: /run/secrets/scanvault_passphrase
     # secrets:

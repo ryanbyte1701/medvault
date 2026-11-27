@@ -303,6 +303,7 @@ def dicom_pixels(fp: BinaryIO, frame: int | None = None):
         min=mn,
         max=mx,
         modality=str(ds.get("Modality", "")),
+        burned_in=str(ds.get("BurnedInAnnotation", "")).strip().upper(),
     )
     return arr, info
 
