@@ -70,7 +70,7 @@ def env(monkeypatch, directory):
     d = Path(tempfile.mkdtemp(prefix="sv-ldap-"))
     monkeypatch.setattr(main, "store", Store(d))
     monkeypatch.setattr(main, "vault", crypto.Vault())
-    for t in (main.login_throttle, main.account_throttle):
+    for t in (main.login_throttle, main.account_throttle, main.device_throttle):
         t._fails.clear()
     with TestClient(main.app, base_url="https://sv.example.com") as c:
         st = c.get("/api/status").json()
