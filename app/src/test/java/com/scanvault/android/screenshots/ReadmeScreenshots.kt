@@ -91,7 +91,6 @@ class ReadmeScreenshots {
         c.theme.update { it.copy(mode = ThemeMode.DARK, darkColor = "#0d1416") }
         c.onSignedIn(url, "ryan", "sample-token", unlocked = true)
         c.appLock.unlock()
-        org.robolectric.shadows.ShadowLog.stream = System.out
         // Robolectric can't draw hardware bitmaps, and its paused clock would hold a crossfade at frame 0.
         coil.Coil.setImageLoader(c.imageLoader.newBuilder().allowHardware(false).crossfade(false).build())
         scenario = ActivityScenario.launch(MainActivity::class.java)
