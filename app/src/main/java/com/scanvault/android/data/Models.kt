@@ -15,6 +15,16 @@ data class LoginResponse(
     val unlocked: Boolean? = null,
 )
 
+/** An identity provider the server offers for single sign-on. */
+@Serializable
+data class SsoProvider(val id: String, val name: String, val preset: String? = null)
+
+@Serializable
+data class SsoExchangeRequest(
+    val ticket: String,
+    @SerialName("code_verifier") val codeVerifier: String,
+)
+
 @Serializable
 data class ServerStatus(
     @SerialName("setup_complete") val setupComplete: Boolean = true,
@@ -24,6 +34,9 @@ data class ServerStatus(
     @SerialName("vault_id") val vaultId: String? = null,
     val fingerprint: String? = null,
     val version: String? = null,
+    /** False when the server only allows SSO, so the password form is hidden. */
+    @SerialName("local_login") val localLogin: Boolean = true,
+    val sso: List<SsoProvider> = emptyList(),
 )
 
 @Serializable

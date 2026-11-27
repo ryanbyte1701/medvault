@@ -11,11 +11,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Login
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -23,6 +25,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Switch
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -31,6 +34,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -39,7 +44,9 @@ import com.scanvault.android.data.ApiClient
 import com.scanvault.android.data.AppContainer
 import com.scanvault.android.data.net.HttpClients
 import com.scanvault.android.data.net.UntrustedCertificateException
+import com.scanvault.android.data.SsoProvider
 import com.scanvault.android.ui.components.userMessage
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
@@ -55,6 +62,31 @@ fun LoginScreen(container: AppContainer, onOpenSettings: () -> Unit, onSignedIn:
     var allowLanHttp by remember { mutableStateOf(container.store.allowLanHttp) }
     // A self-signed certificate the user is being asked to approve (trust on first use).
     var untrusted by remember { mutableStateOf<UntrustedCertificateException?>(null) }
+    val context = LocalContext.current
+    val ssoError by container.ssoError.collectAsStateWithLifecycle()
+
+    // Ask the server which sign-in methods it offers, shortly after the address stops changing.
+    var providers by remember { mutableStateOf<List<SsoProvider>>(emptyList()) }
+    var localLogin by remember { mutableStateOf(true) }
+    // Bumped after the user approves a certificate, so the probe runs again.
+    var probeKey by remember { mutableStateOf(0) }
+    LaunchedEffect(server, probeKey) {
+        providers = emptyList(); localLogin = true
+        // SSO only over https: the ticket and session token must not cross the network in the clear.
+        if (server.isBlank() || insecure) return@LaunchedEffect
+        delay(600)
+        runCatching { container.clientFor(server).status() }.onSuccess {
+            providers = it.sso
+            localLogin = it.localLogin || it.sso.isEmpty()
+        }
+    }
+
+    fun startSso(provider: SsoProvider) {
+        error = null
+        container.ssoError.value = null
+        runCatching { container.startSso(context, server, provider) }
+            .onFailure { error = it.userMessage() }
+    }
 
     fun signIn() {
         if (busy) return
@@ -101,7 +133,8 @@ fun LoginScreen(container: AppContainer, onOpenSettings: () -> Unit, onSignedIn:
                 TextButton(onClick = {
                     container.store.addPin(cert.fingerprint)
                     untrusted = null
-                    signIn()
+                    probeKey++
+                    if (localLogin && password.isNotEmpty()) signIn()
                 }) { Text("Trust and sign in") }
             },
             dismissButton = { TextButton(onClick = { untrusted = null }) { Text("Cancel") } },
@@ -154,6 +187,23 @@ fun LoginScreen(container: AppContainer, onOpenSettings: () -> Unit, onSignedIn:
                     })
                 }
             }
+            providers.forEach { provider ->
+                OutlinedButton(
+                    onClick = { startSso(provider) },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.Login, contentDescription = null)
+                    Text("  Continue with ${provider.name}")
+                }
+            }
+            ssoError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            if (!localLogin) error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            if (providers.isNotEmpty() && localLogin) {
+                Text("or sign in with a password", style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (localLogin) {
             OutlinedTextField(
                 value = username,
                 onValueChange = { username = it },
@@ -177,6 +227,7 @@ fun LoginScreen(container: AppContainer, onOpenSettings: () -> Unit, onSignedIn:
                 enabled = !busy && server.isNotBlank() && username.isNotBlank() && password.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(if (busy) "Signing in…" else "Sign in") }
+            }
             TextButton(onClick = onOpenSettings) {
                 Icon(Icons.Default.Palette, contentDescription = null)
                 Text("  Appearance")

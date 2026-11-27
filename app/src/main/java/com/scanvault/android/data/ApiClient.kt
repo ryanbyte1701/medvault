@@ -82,6 +82,20 @@ class ApiClient(
         send("POST", "api/auth/login", jsonBody(LoginRequest(username, password), LoginRequest.serializer()),
             LoginResponse.serializer(), authenticated = false)
 
+    /** URL to open in a Custom Tab to start SSO with provider [providerId]. */
+    fun ssoStartUrl(providerId: String, appRedirect: String, appState: String, codeChallenge: String): String =
+        url("api/auth/sso/${seg(providerId)}/start").newBuilder()
+            .addQueryParameter("app_redirect", appRedirect)
+            .addQueryParameter("app_state", appState)
+            .addQueryParameter("code_challenge", codeChallenge)
+            .build().toString()
+
+    /** Trades the one-time SSO ticket (plus the PKCE verifier) for a normal bearer token. */
+    suspend fun ssoExchange(ticket: String, codeVerifier: String): LoginResponse =
+        send("POST", "api/auth/sso/exchange",
+            jsonBody(SsoExchangeRequest(ticket, codeVerifier), SsoExchangeRequest.serializer()),
+            LoginResponse.serializer(), authenticated = false)
+
     suspend fun logout() {
         sendNoContent("POST", "api/auth/logout", "{}".toRequestBody(JSON))
     }
@@ -277,6 +291,10 @@ class ApiClient(
             response.code == 401 -> UnauthorizedException(message)
             parsed?.code == "setup_required" ->
                 ApiException(response.code, "Finish setting up ScanVault in its web interface first.", parsed.code)
+            parsed?.code == "sso_expired" ->
+                ApiException(response.code, "Single sign-on took too long. Please try again.", parsed.code)
+            parsed?.code == "sso_pkce" ->
+                ApiException(response.code, "Single sign-on couldn't be verified. Please try again.", parsed.code)
             response.code == 413 -> ApiException(413, "File is larger than the server's upload limit.", parsed?.code)
             else -> ApiException(response.code, message, parsed?.code)
         }

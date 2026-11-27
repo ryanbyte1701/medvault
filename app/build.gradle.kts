@@ -67,6 +67,7 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.androidx.biometric)
     implementation(libs.androidx.fragment)
+    implementation(libs.androidx.browser)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     testImplementation(libs.junit)

@@ -2,6 +2,7 @@ package com.scanvault.android
 
 import android.content.Intent
 import android.graphics.Color
+import com.scanvault.android.data.SsoResult
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.SystemBarStyle
@@ -27,6 +28,7 @@ class MainActivity : FragmentActivity() {
         enableEdgeToEdge()
         // Ignore taps that pass through an overlay drawn by another app (tapjacking).
         window.decorView.filterTouchesWhenObscured = true
+        handleSsoIntent(intent)
         setContent {
             val settings by container.theme.settings.collectAsStateWithLifecycle()
             val dark = isAppInDarkTheme(settings)
@@ -46,6 +48,18 @@ class MainActivity : FragmentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         stripUntrustedExtras(intent)
+        handleSsoIntent(intent)
+    }
+
+    /**
+     * Hands a scanvault://sso redirect from the browser to the container, which ignores it
+     * unless it answers the sign-in this app started.
+     */
+    private fun handleSsoIntent(intent: Intent?) {
+        val data = intent?.data ?: return
+        val result = SsoResult.parse(data) ?: return
+        container.offerSsoCallback(result)
+        intent.data = null // don't replay it after rotation
     }
 
     override fun onStart() {
