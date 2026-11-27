@@ -92,8 +92,8 @@ class ReadmeScreenshots {
         c.onSignedIn(url, "ryan", "sample-token", unlocked = true)
         c.appLock.unlock()
         org.robolectric.shadows.ShadowLog.stream = System.out
-        // Robolectric can't draw hardware bitmaps, so thumbnails need software ones.
-        coil.Coil.setImageLoader(c.imageLoader.newBuilder().allowHardware(false).logger(coil.util.DebugLogger()).build())
+        // Robolectric can't draw hardware bitmaps, and its paused clock would hold a crossfade at frame 0.
+        coil.Coil.setImageLoader(c.imageLoader.newBuilder().allowHardware(false).crossfade(false).build())
         scenario = ActivityScenario.launch(MainActivity::class.java)
         settle()
     }
