@@ -5,7 +5,10 @@ services:
     container_name: scanvault
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      # Only reachable from this machine. Put an HTTPS reverse proxy (Caddy,
+      # Traefik, nginx) in front of it for other devices; over plain http://
+      # passwords and keys would cross the network in clear.
+      - "127.0.0.1:8080:8080"
     volumes:
       - scanvault-data:/data
       # Optional "USB / local disk" backup destination: map a mounted disk or an
@@ -16,12 +19,24 @@ services:
       # when you are not on http://localhost:8080 (e.g. https://scans.example.com)
       SCANVAULT_PUBLIC_URL: ${SCANVAULT_PUBLIC_URL:-}
       SCANVAULT_MAX_UPLOAD_MB: ${SCANVAULT_MAX_UPLOAD_MB:-2048}
+      # Trust X-Forwarded-Proto/For only from your reverse proxy
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
+      # Lock the vault after this many idle minutes (0 = stay unlocked)
+      SCANVAULT_AUTO_LOCK_MINUTES: ${SCANVAULT_AUTO_LOCK_MINUTES:-0}
       PUID: ${PUID:-10001}
       PGID: ${PGID:-10001}
       # Optional unattended unlock after restarts (see README trade-offs):
       # SCANVAULT_PASSPHRASE_FILE: /run/secrets/scanvault_passphrase
     # secrets:
     #   - scanvault_passphrase
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    # only for the entrypoint: fix /data ownership, then drop to PUID:PGID
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   scanvault-data:

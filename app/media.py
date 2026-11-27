@@ -1,24 +1,48 @@
-"""File type detection, DICOM metadata and preview rendering."""
+"""File type detection, DICOM metadata and preview rendering.
+
+Every function takes a seekable binary file object (usually an encrypted
+``Spool``), never a plaintext path, and refuses images whose decoded size
+would be unreasonable (decompression bombs).
+"""
 from __future__ import annotations
 
 import io
 import logging
+import math
 import mimetypes
-from pathlib import Path
+import os
+import zlib
+from typing import BinaryIO
 
 log = logging.getLogger("scanvault.media")
 
 PREVIEW_MAX = 1024
+# Largest decoded frame we will hold in memory (bytes). 256 MiB covers a
+# 16-bit 8k x 8k digital radiograph or mammogram with room to spare.
+MAX_FRAME_BYTES = int(os.environ.get("SCANVAULT_MAX_FRAME_MB", "256")) * 1024 * 1024
+MAX_IMAGE_PIXELS = 120_000_000
+MAX_INFLATED = 512 * 1024 * 1024
+DEFLATED_TS = "1.2.840.10008.1.2.1.99"
 
 
-def sniff(path: Path, filename: str) -> tuple[str, str]:
-    """Return (kind, mime). kind in dicom|image|pdf|zip|other."""
-    with open(path, "rb") as f:
-        head = f.read(136)
-    name = filename.lower()
+class MediaError(Exception):
+    pass
+
+
+def _head(fp: BinaryIO, n: int) -> bytes:
+    fp.seek(0)
+    b = fp.read(n)
+    fp.seek(0)
+    return b
+
+
+def sniff(fp: BinaryIO, filename: str) -> tuple[str, str]:
+    """Return (kind, mime). kind in dicom|image|pdf|zip|other|empty."""
+    head = _head(fp, 136)
+    name = (filename or "").lower()
+    if not head:
+        return "empty", "application/octet-stream"
     if len(head) >= 132 and head[128:132] == b"DICM":
-        return "dicom", "application/dicom"
-    if name.endswith((".dcm", ".dicom")):
         return "dicom", "application/dicom"
     if head.startswith(b"%PDF"):
         return "pdf", "application/pdf"
@@ -36,22 +60,79 @@ def sniff(path: Path, filename: str) -> tuple[str, str]:
         return "image", "image/tiff"
     if head[4:12] in (b"ftypheic", b"ftypheix", b"ftypmif1"):
         return "image", "image/heic"
-    if name == "dicomdir":
+    if name.endswith((".dcm", ".dicom")) or _looks_like_raw_dicom(fp, head):
+        return "dicom", "application/dicom"
+    if os.path.basename(name) == "dicomdir":
         return "other", "application/octet-stream"
-    mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    mime = mimetypes.guess_type(filename or "")[0] or "application/octet-stream"
     return "other", mime
+
+
+def _looks_like_raw_dicom(fp: BinaryIO, head: bytes) -> bool:
+    """Older CDs store DICOM data sets without the 128-byte preamble and
+    without an extension (e.g. IM000003). They start with a group 0002 or
+    0008 element; confirm by parsing a few identifying tags."""
+    if head[:2] not in (b"\x02\x00", b"\x08\x00"):
+        return False
+    try:
+        import pydicom
+
+        fp.seek(0)
+        ds = pydicom.dcmread(fp, force=True, stop_before_pixels=True, specific_tags=["SOPClassUID", "StudyInstanceUID", "Modality"])
+        return bool(ds.get("SOPClassUID") or ds.get("StudyInstanceUID"))
+    except Exception:
+        return False
+    finally:
+        fp.seek(0)
 
 
 def _s(v) -> str:
     return str(v).strip() if v not in (None, "") else ""
 
 
-def dicom_meta(path: Path) -> dict:
-    try:
-        import pydicom
+def _check_deflated(fp: BinaryIO) -> None:
+    """A deflated transfer syntax inflates the whole data set in memory.
+    Measure the inflated size first, with a hard ceiling."""
+    import pydicom
 
-        ds = pydicom.dcmread(str(path), stop_before_pixels=True, force=True)
-    except Exception as exc:  # pragma: no cover
+    fp.seek(0)
+    try:
+        meta = pydicom.filereader.read_preamble(fp, True)  # noqa: F841
+        fm = pydicom.filereader._read_file_meta_info(fp)
+    except Exception:
+        fp.seek(0)
+        return
+    ts = str(fm.get("TransferSyntaxUID", ""))
+    if ts != DEFLATED_TS:
+        fp.seek(0)
+        return
+    d = zlib.decompressobj(-zlib.MAX_WBITS)
+    total = 0
+    while chunk := fp.read(1 << 20):
+        while chunk:
+            out = d.decompress(chunk, 1 << 22)
+            total += len(out)
+            if total > MAX_INFLATED:
+                fp.seek(0)
+                raise MediaError("Deflated DICOM expands to more than 512 MB")
+            chunk = d.unconsumed_tail
+    fp.seek(0)
+
+
+def _dataset(fp: BinaryIO):
+    import pydicom
+
+    _check_deflated(fp)
+    fp.seek(0)
+    ds = pydicom.dcmread(fp, stop_before_pixels=True, force=True)
+    fp.seek(0)
+    return ds
+
+
+def dicom_meta(fp: BinaryIO) -> dict:
+    try:
+        ds = _dataset(fp)
+    except Exception as exc:
         log.warning("DICOM parse failed: %s", exc)
         return {}
     pn = ds.get("PatientName")
@@ -65,6 +146,7 @@ def dicom_meta(path: Path) -> dict:
         "study_date": _fmt_date(_s(ds.get("StudyDate"))),
         "study_description": _s(ds.get("StudyDescription")),
         "series_description": _s(ds.get("SeriesDescription")),
+        "series_number": _s(ds.get("SeriesNumber")),
         "modality": _s(ds.get("Modality")),
         "body_part": _s(ds.get("BodyPartExamined")),
         "institution": _s(ds.get("InstitutionName")),
@@ -84,56 +166,47 @@ def _fmt_date(d: str) -> str:
     return d
 
 
-def render_preview(path: Path, kind: str) -> bytes | None:
+def render_preview(fp: BinaryIO, kind: str) -> bytes | None:
     """Return a JPEG preview (or None if not renderable)."""
     try:
-        from PIL import Image, ImageOps
-
         if kind == "image":
-            im = Image.open(path)
+            from PIL import Image, ImageOps
+
+            Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+            fp.seek(0)
+            im = Image.open(fp)
+            if im.width * im.height > MAX_IMAGE_PIXELS:
+                raise MediaError("Image is too large to preview")
+            im.draft("RGB", (PREVIEW_MAX * 2, PREVIEW_MAX * 2))
             im = ImageOps.exif_transpose(im)
             im.thumbnail((PREVIEW_MAX, PREVIEW_MAX))
             return _jpeg(im)
         if kind == "dicom":
-            return _render_dicom(path)
+            arr, info = dicom_pixels(fp, None)
+            return _preview_from_pixels(arr, info)
     except Exception as exc:
-        log.info("No preview for %s: %s", path.name, exc)
+        log.info("No preview: %s", exc)
     return None
 
 
-def _render_dicom(path: Path) -> bytes | None:
+def _preview_from_pixels(arr, info: dict) -> bytes:
     import numpy as np
-    import pydicom
     from PIL import Image
 
-    ds = pydicom.dcmread(str(path), force=True)
-    arr = ds.pixel_array
-    nframes = int(ds.get("NumberOfFrames", 1) or 1)
-    photometric = str(ds.get("PhotometricInterpretation", "MONOCHROME2"))
-    if nframes > 1:
-        arr = arr[nframes // 2]
-    if photometric in ("RGB", "YBR_FULL", "YBR_FULL_422") or (arr.ndim == 3 and arr.shape[-1] == 3):
-        if photometric.startswith("YBR"):
-            from pydicom.pixels import convert_color_space
-
-            arr = convert_color_space(arr, photometric, "RGB")
-        im = Image.fromarray(arr.astype("uint8"), "RGB")
+    if info.get("rgb"):
+        im = Image.fromarray(arr, "RGB")
     else:
-        try:
-            from pydicom.pixels import apply_modality_lut, apply_voi_lut
-
-            arr = apply_modality_lut(arr, ds)
-            arr = apply_voi_lut(arr, ds)
-        except Exception:
-            pass
-        arr = arr.astype("float64")
-        lo, hi = np.percentile(arr, (0.5, 99.5))
+        a = arr.astype("float64")
+        lo, hi = (float(x) for x in np.percentile(a, (0.5, 99.5)))
         if hi <= lo:
-            lo, hi = float(arr.min()), float(arr.max()) or 1.0
-        arr = np.clip((arr - lo) / (hi - lo), 0, 1) * 255
-        if photometric == "MONOCHROME1":
-            arr = 255 - arr
-        im = Image.fromarray(arr.astype("uint8"), "L")
+            lo, hi = float(a.min()), float(a.max())
+        if hi <= lo:
+            out = np.full(a.shape, 128 if hi else 0, dtype="float64")
+        else:
+            out = np.clip((a - lo) / (hi - lo), 0, 1) * 255
+        if info.get("photometric") == "MONOCHROME1":
+            out = 255 - out
+        im = Image.fromarray(out.astype("uint8"), "L")
     im.thumbnail((PREVIEW_MAX, PREVIEW_MAX))
     return _jpeg(im)
 
@@ -148,27 +221,59 @@ def _jpeg(im) -> bytes:
 
 # ------------------------------------------------------------------ window/level rendering
 
-def dicom_pixels(path: Path, frame: int | None = None):
-    """Decode a DICOM to (array in modality units, info). For RGB returns uint8 HxWx3."""
+def _frame_bytes(ds) -> int:
+    rows, cols = int(ds.get("Rows", 0) or 0), int(ds.get("Columns", 0) or 0)
+    spp = int(ds.get("SamplesPerPixel", 1) or 1)
+    bits = int(ds.get("BitsAllocated", 16) or 16)
+    if rows <= 0 or cols <= 0:
+        raise MediaError("DICOM has no image size")
+    # Decoding works in at least float32 for grayscale and uint8x3 for colour.
+    return rows * cols * spp * max(4 if spp == 1 else 1, math.ceil(bits / 8))
+
+
+def dicom_pixels(fp: BinaryIO, frame: int | None = None):
+    """Decode ONE frame of a DICOM to (array in modality units, info).
+    For colour images returns uint8 HxWx3 RGB."""
     import numpy as np
     import pydicom
+    from pydicom.pixels import pixel_array
 
-    ds = pydicom.dcmread(str(path), force=True)
-    arr = ds.pixel_array
+    ds = _dataset(fp)
+    if "PixelData" not in ds and "FloatPixelData" not in ds and "DoubleFloatPixelData" not in ds:
+        # stop_before_pixels hides the element; check the size tags instead
+        pass
+    if _frame_bytes(ds) > MAX_FRAME_BYTES:
+        raise MediaError("DICOM frame is too large to decode")
     nframes = int(ds.get("NumberOfFrames", 1) or 1)
+    if nframes < 1 or nframes > 100_000:
+        raise MediaError("Implausible number of frames")
     photometric = str(ds.get("PhotometricInterpretation", "MONOCHROME2"))
-    info = {"frames": nframes, "photometric": photometric, "rgb": False}
-    if nframes > 1:
-        f = nframes // 2 if frame is None else max(0, min(nframes - 1, frame))
-        arr = arr[f]
-        info["frame"] = f
-    if photometric in ("RGB", "YBR_FULL", "YBR_FULL_422") or (arr.ndim == 3 and arr.shape[-1] == 3):
-        if photometric.startswith("YBR"):
-            from pydicom.pixels import convert_color_space
-
-            arr = convert_color_space(arr, photometric, "RGB")
+    f = nframes // 2 if frame is None else max(0, min(nframes - 1, int(frame)))
+    fp.seek(0)
+    # pixel_array(index=...) decodes only the requested frame, and converts
+    # YBR colour data to RGB itself (as_rgb=True), so we must not convert again.
+    arr = pixel_array(fp, index=f if nframes > 1 else None)
+    if nframes == 1 and arr.ndim == 4:
+        arr = arr[0]
+    info = {"frames": nframes, "frame": f, "photometric": photometric, "rgb": False}
+    spp = int(ds.get("SamplesPerPixel", 1) or 1)
+    if spp == 3 or (arr.ndim == 3 and arr.shape[-1] == 3):
+        if arr.dtype != np.uint8:
+            mx = float(arr.max()) or 1.0
+            arr = np.clip(arr.astype("float32") / mx * 255, 0, 255)
         info["rgb"] = True
         return arr.astype("uint8"), info
+    if photometric == "PALETTE COLOR":
+        try:
+            from pydicom.pixels import apply_color_lut
+
+            rgb = apply_color_lut(arr, ds)
+            if rgb.dtype != np.uint8:
+                rgb = (rgb.astype("float32") / 257).astype("uint8")
+            info["rgb"] = True
+            return rgb, info
+        except Exception:
+            pass
     try:
         from pydicom.pixels import apply_modality_lut
 
@@ -180,27 +285,34 @@ def dicom_pixels(path: Path, frame: int | None = None):
     try:
         wc = float(wc[0] if isinstance(wc, (list, pydicom.multival.MultiValue)) else wc)
         ww = float(ww[0] if isinstance(ww, (list, pydicom.multival.MultiValue)) else ww)
+        if not (math.isfinite(wc) and math.isfinite(ww)):
+            raise ValueError
     except Exception:
         wc = ww = None
+    mn, mx = float(arr.min()), float(arr.max())
     if not ww or ww <= 1:
         lo, hi = (float(x) for x in np.percentile(arr, (0.5, 99.5)))
         if hi <= lo:
-            lo, hi = float(arr.min()), float(arr.max()) + 1
+            lo, hi = mn, mx
+        if hi <= lo:  # uniform frame: centre the window on its value
+            lo, hi = lo - 1, hi + 1
         wc, ww = (lo + hi) / 2, hi - lo
     info.update(
         default_center=round(wc, 2),
         default_width=round(ww, 2),
-        min=float(arr.min()),
-        max=float(arr.max()),
+        min=mn,
+        max=mx,
         modality=str(ds.get("Modality", "")),
     )
     return arr, info
 
 
-def render_window(arr, info: dict, center: float | None, width: float | None, invert: bool = False, max_size: int = 2048) -> bytes:
+def render_window(arr, info: dict, center: float | None, width: float | None, invert: bool = False, max_size: int = 2048) -> tuple[bytes, float | None, float | None]:
+    """Returns (jpeg, center used, width used)."""
     import numpy as np
     from PIL import Image
 
+    c = w = None
     if info.get("rgb"):
         im = Image.fromarray(arr, "RGB")
         if invert:
@@ -209,11 +321,15 @@ def render_window(arr, info: dict, center: float | None, width: float | None, in
             im = ImageOps.invert(im)
     else:
         c = info["default_center"] if center is None else center
-        w = max(1.0, info["default_width"] if width is None else width)
-        # DICOM PS3.3 C.11.2.1.2 linear VOI function
-        out = np.clip(((arr - (c - 0.5)) / (w - 1) + 0.5), 0, 1) * 255
+        w = info["default_width"] if width is None else width
+        w = max(1.0, w)
+        if w <= 1.0:
+            # DICOM PS3.3 C.11.2.1.2: width 1 is a threshold at the centre
+            out = np.where(arr < c - 0.5, 0.0, 255.0)
+        else:
+            out = np.clip(((arr - (c - 0.5)) / (w - 1) + 0.5), 0, 1) * 255
         if (info.get("photometric") == "MONOCHROME1") != bool(invert):
             out = 255 - out
         im = Image.fromarray(out.astype("uint8"), "L")
     im.thumbnail((max_size, max_size))
-    return _jpeg(im)
+    return _jpeg(im), c, w

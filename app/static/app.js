@@ -5,8 +5,8 @@
 // ------------------------------------------------------------------ API layer
 // A demo build replaces window.SV_API before this script runs.
 const API = window.SV_API || {
-  async req(method, path, body) {
-    const opt = { method, headers: { "X-ScanVault": "1" }, credentials: "same-origin" };
+  async req(method, path, body, headers) {
+    const opt = { method, headers: { "X-ScanVault": "1", ...(headers || {}) }, credentials: "same-origin" };
     if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
     const r = await fetch(path, opt);
     const ct = r.headers.get("content-type") || "";
@@ -14,11 +14,12 @@ const API = window.SV_API || {
     if (!r.ok) { const e = new Error((data && data.error) || r.statusText); e.status = r.status; e.code = data && data.code; throw e; }
     return data;
   },
-  upload(path, form, onProgress) {
+  upload(path, form, onProgress, headers) {
     return new Promise((resolve, reject) => {
       const x = new XMLHttpRequest();
       x.open("POST", path);
       x.setRequestHeader("X-ScanVault", "1");
+      for (const [k, v] of Object.entries(headers || {})) x.setRequestHeader(k, v);
       x.upload.onprogress = e => e.lengthComputable && onProgress && onProgress(e.loaded / e.total);
       x.onload = () => {
         let d; try { d = JSON.parse(x.responseText); } catch { d = {}; }
@@ -162,16 +163,18 @@ document.addEventListener("click", e => {
 
 async function boot() {
   try { S.status = await API.req("GET", "/api/status"); }
-  catch (e) { app.innerHTML = `<div class="empty"><h2>Can't reach ScanVault</h2><p>${esc(e.message)}</p><button class="btn" onclick="location.reload()">Retry</button></div>`; return; }
+  catch (e) { app.innerHTML = `<div class="empty"><h2>Can't reach ScanVault</h2><p>${esc(e.message)}</p><button class="btn" id="retry">Retry</button></div>`; $("#retry").onclick = () => location.reload(); return; }
   S.route = parseHash();
   render();
   const q = new URLSearchParams(location.hash.split("?")[1] || "");
   if (q.get("oauth") === "ok") toast("Account connected");
-  if (q.get("oauth") === "error") toast("Connecting the account failed: " + (q.get("msg") || "unknown error"));
+  const OAUTH_ERR = { denied: "the sign-in was cancelled or refused", expired: "the sign-in took too long, please try again", locked: "the vault is locked", exchange: "the provider did not accept the sign-in" };
+  if (q.get("oauth") === "error") toast("Connecting the account failed: " + (OAUTH_ERR[q.get("msg")] || "unknown error"));
 }
 
 function handleErr(e) {
   if (e.code === "unauthenticated") { S.status.authenticated = false; render(); return true; }
+  if (e.code === "maintenance") { toast(e.message); return true; }
   if (e.code === "locked") { S.status.unlocked = false; render(); return true; }
   toast(e.message || String(e));
   return false;
@@ -183,6 +186,7 @@ function render() {
   if (!st.authenticated) return viewLogin();
   if (!st.unlocked) return viewUnlock();
   if (!S.themeSynced) { S.themeSynced = true; syncTheme(); }
+  if (st.recovery_key_saved === false && !sessionStorage.getItem("sv-rk-later")) return viewRecoveryNag();
   const r = S.route;
   const view = { patients: viewPatients, patient: viewPatient, study: viewStudy, backups: viewBackups, settings: viewSettings, upload: viewUploadPage }[r.name] || viewPatients;
   shell(r.name);
@@ -206,6 +210,13 @@ function shell(active) {
 const main = () => $("#main");
 const mobileHead = () => `<div class="mobilehead"><div class="brand">${I.logo}<span>ScanVault</span></div><div class="row" style="gap:4px"><span class="lockchip">${I.shield} Unlocked</span><button class="btn ghost sm themebtn" data-theme-btn title="${themeLabel()}" aria-label="${themeLabel()}">${themeIcon()}</button></div></div>`;
 document.addEventListener("click", e => { if (e.target.closest("[data-theme-btn]")) cycleTheme(); });
+// File pickers are <label class="btn"> wrapping a hidden input: make them work from the keyboard.
+document.addEventListener("keydown", e => {
+  if (e.key !== "Enter" && e.key !== " ") return;
+  const l = e.target.closest && e.target.closest("label.btn");
+  const i = l && l.querySelector("input[type=file]");
+  if (i) { e.preventDefault(); i.click(); }
+});
 
 // ------------------------------------------------------------------ modal
 function modal(title, body, { wide = false, footer = "" } = {}) {
@@ -214,8 +225,17 @@ function modal(title, body, { wide = false, footer = "" } = {}) {
   el.innerHTML = `<div class="modal ${wide ? "wide" : ""}" role="dialog" aria-modal="true" aria-label="${esc(title)}">
     <header><h2>${esc(title)}</h2><button class="btn ghost sm" data-close aria-label="Close">${I.x}</button></header>
     <div class="body">${body}</div>${footer ? `<footer>${footer}</footer>` : ""}</div>`;
-  const close = () => { el.remove(); document.removeEventListener("keydown", onKey); };
-  const onKey = e => { if (e.key === "Escape") close(); };
+  const opener = document.activeElement;
+  const close = () => { el.remove(); document.removeEventListener("keydown", onKey); if (opener && opener.isConnected && opener.focus) opener.focus(); };
+  const onKey = e => {
+    if (e.key === "Escape") return close();
+    if (e.key !== "Tab") return;
+    const f = $$('button,[href],input:not([type=hidden]),select,textarea,label[tabindex],[tabindex]:not([tabindex="-1"])', el).filter(x => !x.disabled && x.offsetParent !== null);
+    if (!f.length) return;
+    if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[f.length - 1].focus(); }
+    else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
+    else if (!el.contains(document.activeElement)) { e.preventDefault(); f[0].focus(); }
+  };
   el.addEventListener("click", e => { if (e.target === el || e.target.closest("[data-close]")) close(); });
   document.addEventListener("keydown", onKey);
   document.body.appendChild(el);
@@ -242,11 +262,34 @@ function strength(p) {
   s = Math.min(100, s);
   return [s, s < 40 ? "Too weak" : s < 70 ? "OK" : s < 90 ? "Strong" : "Very strong"];
 }
-const WORDS = "amber anchor apple arrow atlas autumn badge bamboo beacon birch bison blossom breeze bronze cactus candle canyon cedar cherry cinder clover cobalt comet copper coral cosmos cotton crystal daisy delta desert dolphin dune eagle ember falcon fern fjord forest fossil galaxy garnet geyser ginger glacier granite harbor hazel heron honey horizon iris island ivory jasper juniper kayak kettle lagoon lantern lava lemon lilac linen lotus lunar maple marble meadow mesa mint mosaic nectar nickel nova oasis ocean olive onyx orbit orchid otter pebble pepper pine planet plume prairie quartz quill raven reef ridge river robin saffron sage salmon sierra silver sparrow spruce summit tango thistle tidal timber topaz tulip tundra velvet violet walnut willow zephyr".split(" ");
-function genPassphrase() {
-  const a = new Uint32Array(6); crypto.getRandomValues(a);
-  return [...a].map(x => WORDS[x % WORDS.length]).join("-");
+// 6 words from the EFF large list (7,776 words) = 77.5 bits. The list is
+// loaded on demand; if it can't be, fall back to 20 random base-32 characters
+// (100 bits). Uses rejection sampling, so every word is equally likely.
+let WORDS = null;
+async function loadWords() {
+  if (WORDS) return WORDS;
+  try {
+    const r = await fetch("/static/wordlist.txt", { credentials: "same-origin" });
+    if (!r.ok) throw new Error();
+    const w = (await r.text()).split("\n").map(x => x.trim()).filter(x => x && !x.startsWith("#"));
+    if (w.length < 7000) throw new Error();
+    WORDS = w;
+  } catch { WORDS = []; }
+  return WORDS;
 }
+function randBelow(n) {
+  const lim = Math.floor(0x100000000 / n) * n, a = new Uint32Array(1);
+  do { crypto.getRandomValues(a); } while (a[0] >= lim);
+  return a[0] % n;
+}
+async function genPassphrase() {
+  const w = await loadWords();
+  if (w.length >= 7000) return Array.from({ length: 6 }, () => w[randBelow(w.length)]).join("-");
+  const abc = "abcdefghijkmnpqrstuvwxyz23456789";
+  return Array.from({ length: 4 }, () => Array.from({ length: 5 }, () => abc[randBelow(abc.length)]).join("")).join("-");
+}
+const plainHttp = () => !S.status.secure && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname) && !API.demo;
+const httpWarn = () => plainHttp() ? `<div class="note warn">${I.warn}<div><b>This connection is not encrypted (http://).</b> Your password, encryption key and recovery key would cross the network in clear. Set ScanVault up over HTTPS (for example through your NAS's reverse proxy) or from the server itself.</div></div>` : "";
 
 function authLayout(inner, title = "Your scans. Your key. Your copies.", sub = "ScanVault keeps encrypted local copies of imaging studies and reports from every center you visit, and backs them up encrypted to the places you choose.") {
   app.innerHTML = `<div class="auth"><section class="art"><div class="brand" style="color:#e6eeee">${I.logo}<span>ScanVault</span></div>
@@ -259,6 +302,7 @@ function viewSetup() {
   const steps = n => `<div class="steps" aria-hidden="true">${[0, 1, 2, 3].map(i => `<i class="${i <= n ? "on" : ""}"></i>`).join("")}</div>`;
   if (setup.step === 0) {
     authLayout(`${steps(0)}<div><h1>Welcome</h1><p class="muted" style="margin-top:8px">Set up this ScanVault server. It takes about two minutes.</p></div>
+      ${httpWarn()}
       <div class="choice">
         <button id="new">${I.shield}<b>Create a new vault</b><span>Pick a sign-in and the encryption key that protects every file.</span></button>
         <button id="rest">${I.restore}<b>Restore from a backup</b><span>Use a .svb backup plus your recovery key file or encryption key.</span></button>
@@ -272,6 +316,7 @@ function viewSetup() {
   if (setup.step === 1) {
     authLayout(`${steps(1)}<div><h1>Create your sign-in</h1><p class="muted" style="margin-top:8px">This is how you open ScanVault on the web and on your phone.</p></div>
       <form class="form" id="f">
+        ${API.demo ? "" : `<label class="f">Setup code <span class="hint">Printed in the server log when ScanVault starts (on a Synology: Container Manager, scanvault, Log). It proves you own this server.</span><input name="code" required autocomplete="off" autocapitalize="characters" spellcheck="false" value="${esc(setup.code || "")}" placeholder="XXXX-XXXX-XXXX"></label>`}
         <label class="f">Username<input name="u" autocomplete="username" required value="${esc(setup.username)}" autocapitalize="none"></label>
         <label class="f">Password <span class="hint">At least 10 characters</span><input name="p" type="password" autocomplete="new-password" required minlength="10"></label>
         <label class="f">Confirm password<input name="p2" type="password" autocomplete="new-password" required></label>
@@ -283,7 +328,7 @@ function viewSetup() {
       e.preventDefault(); const f = e.target;
       if (f.p.value.length < 10) return $("#err").textContent = "Password must be at least 10 characters.";
       if (f.p.value !== f.p2.value) return $("#err").textContent = "Passwords don't match.";
-      setup.username = f.u.value.trim(); setup.password = f.p.value; setup.step = 2; viewSetup();
+      setup.username = f.u.value.trim(); setup.password = f.p.value; if (f.code) setup.code = f.code.value.trim(); setup.step = 2; viewSetup();
     };
     return;
   }
@@ -303,7 +348,7 @@ function viewSetup() {
     const upd = () => { const [s, l] = strength(k.value); $("#m").style.width = s + "%"; $("#m").style.background = s < 40 ? "var(--red)" : s < 70 ? "var(--amber)" : "var(--green)"; $("#ml").textContent = l; };
     k.oninput = upd;
     $("#show").onclick = () => { const t = k.type === "password" ? "text" : "password"; k.type = t; $("[name=k2]").type = t; $("#show").textContent = t === "text" ? "Hide" : "Show"; };
-    $("#gen").onclick = () => { const p = genPassphrase(); k.value = p; $("[name=k2]").value = p; k.type = "text"; $("[name=k2]").type = "text"; $("#show").textContent = "Hide"; upd(); };
+    $("#gen").onclick = async () => { const p = await genPassphrase(); k.value = p; $("[name=k2]").value = p; k.type = "text"; $("[name=k2]").type = "text"; $("#show").textContent = "Hide"; upd(); };
     $("#back").onclick = () => { setup.step = 1; viewSetup(); };
     $("#f").onsubmit = async e => {
       e.preventDefault(); const f = e.target;
@@ -312,9 +357,12 @@ function viewSetup() {
       if (f.k.value === setup.password) return $("#err").textContent = "Use something different from your sign-in password.";
       $("#go").disabled = true; $("#go").innerHTML = '<span class="spin"></span> Creating…';
       try {
-        const r = await API.req("POST", "/api/setup", { username: setup.username, password: setup.password, passphrase: f.k.value });
+        const r = await API.req("POST", "/api/setup", { username: setup.username, password: setup.password, passphrase: f.k.value }, { "X-Setup-Code": setup.code || "" });
         setup.recovery = r.recovery_key; setup.fingerprint = r.fingerprint; setup.vault_id = r.vault_id; setup.password = ""; setup.step = 3; viewSetup();
-      } catch (er) { $("#err").textContent = er.message; $("#go").disabled = false; $("#go").textContent = "Create vault"; }
+      } catch (er) {
+        if (er.code === "setup_code") { setup.step = 1; viewSetup(); $("#err").textContent = er.message; return; }
+        $("#err").textContent = er.message; $("#go").disabled = false; $("#go").textContent = "Create vault";
+      }
     };
     return;
   }
@@ -346,10 +394,12 @@ function viewSetup() {
 function viewRestoreSetup() {
   authLayout(`<div><h1>Restore a vault</h1><p class="muted" style="margin-top:8px">Upload a ScanVault backup (.svb) from Google Drive, Box, your SFTP server or your computer.</p></div>
     <form class="form" id="f">
+      ${httpWarn()}
+      ${API.demo ? "" : `<label class="f">Setup code <span class="hint">Printed in the server log when ScanVault starts</span><input name="code" required autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-XXXX"></label>`}
       <label class="f">Backup file (.svb)<input type="file" name="b" accept=".svb" required></label>
       <div class="seg" role="tablist"><button type="button" class="on" data-m="file">Recovery key file</button><button type="button" data-m="pass">Encryption key</button></div>
       <label class="f" id="mf">Recovery key file<input type="file" name="kf" accept=".txt,text/plain"></label>
-      <label class="f" id="mp" hidden>Encryption key<input type="password" name="k" autocomplete="off"></label>
+      <label class="f" id="mp" hidden>Encryption key <span class="hint">Only works if "passphrase restore" was turned on in that vault's Settings</span><input type="password" name="k" autocomplete="off"></label>
       <div class="grid2"><label class="f">New username<input name="u" required autocapitalize="none"></label><label class="f">New password<input name="p" type="password" minlength="10" required autocomplete="new-password"></label></div>
       <p class="err" id="err"></p>
       <div class="row"><button type="button" class="btn" id="back">Back</button><span class="spacer"></span><button class="btn primary" id="go">Restore</button></div>
@@ -363,9 +413,36 @@ function viewRestoreSetup() {
     if (mode === "file") { if (!f.kf.files[0]) return $("#err").textContent = "Choose your recovery key file."; fd.append("recovery_key", await f.kf.files[0].text()); }
     else fd.append("passphrase", f.k.value);
     $("#go").disabled = true; $("#go").innerHTML = '<span class="spin"></span> Restoring…';
-    try { const r = await API.upload("/api/setup/restore", fd); toast(`Restored ${r.patients} patients, ${r.files} files`); S.status = await API.req("GET", "/api/status"); go("patients"); }
+    try { const r = await API.upload("/api/setup/restore", fd, null, { "X-Setup-Code": f.code ? f.code.value.trim() : "" }); toast(`Restored ${r.patients} patients, ${r.files} files. Backup destinations are paused until you turn them back on.`); S.status = await API.req("GET", "/api/status"); go("patients"); }
     catch (er) { $("#err").textContent = er.message; $("#go").disabled = false; $("#go").textContent = "Restore"; }
   };
+}
+
+function viewRecoveryNag() {
+  authLayout(`<div><h1>Save your recovery key</h1><p class="muted" style="margin-top:8px">You haven't confirmed that you saved this vault's recovery key file. Without it, a forgotten encryption key means your data and backups can't be opened. Enter your encryption key to download it again.</p></div>
+    <form class="form" id="f">
+      <label class="f">Encryption key<input name="k" type="password" autocomplete="off" required></label>
+      <p class="err" id="err"></p>
+      <div class="row"><button class="btn primary" id="go">${I.dl} Download key file</button></div>
+    </form>
+    <form class="form" id="f2" hidden>
+      <label class="f">Confirm you saved it <span class="hint">Choose the file you just downloaded</span><input type="file" name="kf" accept=".txt,text/plain"></label>
+      <p class="err" id="err2"></p>
+      <div class="row end"><button class="btn primary">Confirm</button></div>
+    </form>
+    <button class="btn ghost sm" id="later" style="justify-self:start">Remind me later</button>`, "Your key, on paper.");
+  $("#f").onsubmit = async e => {
+    e.preventDefault();
+    try { const t = await API.req("POST", "/api/vault/recovery-key", { passphrase: e.target.k.value }); saveText("scanvault-recovery-key.txt", t); $("#f2").hidden = false; }
+    catch (er) { $("#err").textContent = er.message; }
+  };
+  $("#f2").onsubmit = async e => {
+    e.preventDefault(); const kf = e.target.kf.files[0];
+    if (!kf) return $("#err2").textContent = "Choose the key file you downloaded.";
+    try { await API.req("POST", "/api/vault/recovery-key/confirm", { recovery_key: await kf.text() }); S.status = await API.req("GET", "/api/status"); render(); }
+    catch (er) { $("#err2").textContent = er.message; }
+  };
+  $("#later").onclick = () => { sessionStorage.setItem("sv-rk-later", "1"); render(); };
 }
 
 function viewLogin() {
@@ -386,7 +463,7 @@ function viewUnlock() {
     <form class="form" id="f">
       <label class="f">Encryption key<input name="k" type="password" autocomplete="off" required></label>
       <p class="err" id="err"></p>
-      <div class="row"><button class="btn primary" id="go">${I.lock} Unlock</button><span class="spacer"></span><label class="btn ghost sm" style="cursor:pointer">Use recovery key file<input type="file" id="kf" accept=".txt,text/plain" hidden></label></div>
+      <div class="row"><button class="btn primary" id="go">${I.lock} Unlock</button><span class="spacer"></span><button type="button" class="btn ghost sm" id="kfb">Use recovery key file</button><input type="file" id="kf" accept=".txt,text/plain" hidden></div>
     </form>
     <button class="btn ghost sm" id="out" style="justify-self:start">Sign out</button>`, "Locked at rest.");
   const done = async () => { S.status = await API.req("GET", "/api/status"); render(); };
@@ -395,6 +472,7 @@ function viewUnlock() {
     try { await API.req("POST", "/api/vault/unlock", { passphrase: e.target.k.value }); await done(); }
     catch (er) { $("#err").textContent = er.message; $("#go").disabled = false; }
   };
+  $("#kfb").onclick = () => $("#kf").click();
   $("#kf").onchange = async e => { try { await API.req("POST", "/api/vault/unlock", { recovery_key: await e.target.files[0].text() }); await done(); } catch (er) { $("#err").textContent = er.message; } };
   $("#out").onclick = async () => { await API.req("POST", "/api/auth/logout"); S.status.authenticated = false; render(); };
 }
@@ -465,8 +543,8 @@ async function viewPatient(id) {
       ${p.notes ? `<p class="small muted" style="margin-top:8px;white-space:pre-wrap">${esc(p.notes)}</p>` : ""}</div>
     <div class="row"><button class="btn" id="edit">Edit</button><button class="btn primary" id="up">${I.upload} Upload</button></div></div>
   <div class="drop" id="drop">${I.upload}<div><b>Drop scans or reports here</b><div class="small muted">DICOM files or a whole CD/zip export, JPG/PNG photos of films, PDF reports. DICOM is grouped into studies automatically.</div></div>
-    <div class="row" style="justify-content:center"><label class="btn sm">Choose files<input type="file" id="fi" multiple hidden accept=".dcm,.dicom,.zip,image/*,application/pdf,application/dicom,application/zip,*/*"></label>
-    <label class="btn sm">${I.camera} Take photo<input type="file" id="cam" accept="image/*" capture="environment" hidden></label></div></div>
+    <div class="row" style="justify-content:center"><label tabindex="0" role="button" class="btn sm">Choose files<input type="file" id="fi" multiple hidden accept=".dcm,.dicom,.zip,image/*,application/pdf,application/dicom,application/zip,*/*"></label>
+    <label tabindex="0" role="button" class="btn sm">${I.camera} Take photo<input type="file" id="cam" accept="image/*" capture="environment" hidden></label></div></div>
   <div class="queue" id="queue"></div>
   <div class="section-h"><h2>Studies</h2><button class="btn sm" id="ns">${I.plus} New study</button></div>
   <div class="timeline" id="tl">${studies.length ? studies.map(s => `<a class="card study" href="#/study/${esc(s.id)}" data-go="study/${esc(s.id)}">
@@ -542,7 +620,7 @@ async function viewStudy(id) {
   m.innerHTML = `${mobileHead()}<div class="crumbs"><a href="#/patients" data-go="patients">Patients</a><span>/</span><a href="#/patient/${esc(p.id)}" data-go="patient/${esc(p.id)}">${esc(p.name)}</a><span>/</span><span>${esc(s.title)}</span></div>
   <div class="top"><div><h1>${esc(s.title)}</h1><p class="sub">${[s.study_date && fmtDate(s.study_date), s.modality, s.facility, s.referring_physician && "Ref. " + s.referring_physician, s.accession && "Acc. " + s.accession].filter(Boolean).map(esc).join(" · ")}</p>
     ${s.description ? `<p class="small" style="margin-top:8px;max-width:70ch">${esc(s.description)}</p>` : ""}</div>
-    <div class="row"><button class="btn" id="edit">Edit</button><label class="btn primary">${I.upload} Add files<input type="file" id="fi" multiple hidden></label></div></div>
+    <div class="row"><button class="btn" id="edit">Edit</button><label tabindex="0" role="button" class="btn primary">${I.upload} Add files<input type="file" id="fi" multiple hidden></label></div></div>
   <div class="drop" id="drop" style="padding:16px">${I.upload}<div class="small"><b>Drop more files for this study</b></div></div>
   <div class="queue" id="queue"></div>
   ${reports.length ? `<div class="section-h"><h2>Reports</h2></div><div class="lightbox">${reports.map(tile).join("")}</div>` : ""}
@@ -773,7 +851,7 @@ async function viewUploadPage() {
     <label class="f">Patient<select id="pt">${list.map(p => `<option value="${esc(p.id)}">${esc(p.name)}${p.date_of_birth ? " · " + esc(fmtDate(p.date_of_birth)) : ""}</option>`).join("")}</select></label>
     <label class="f">Put files in<select id="st"><option value="">Automatic: group DICOM by study, others under today's date</option></select></label>
     <div class="drop" id="drop">${I.upload}<div><b>Drop files or a CD/zip export</b><div class="small muted">DICOM, JPG/PNG, PDF reports, ZIP</div></div>
-      <div class="row" style="justify-content:center"><label class="btn primary">Choose files<input type="file" id="fi" multiple hidden></label><label class="btn">${I.camera} Take photo<input type="file" id="cam" accept="image/*" capture="environment" hidden></label></div></div>
+      <div class="row" style="justify-content:center"><label tabindex="0" role="button" class="btn primary">Choose files<input type="file" id="fi" multiple hidden></label><label tabindex="0" role="button" class="btn">${I.camera} Take photo<input type="file" id="cam" accept="image/*" capture="environment" hidden></label></div></div>
     <div class="queue" id="queue"></div></div>`
     : `<div class="card empty">${I.users}<h2>Add a patient first</h2><p>Uploads always belong to a patient.</p><button class="btn primary" id="add">${I.plus} Add patient</button></div>`}`;
   if (!list.length) { $("#add").onclick = () => patientForm(); return; }
@@ -828,8 +906,8 @@ async function viewBackups() {
     ${runs.map(r => `<tr><td class="nowrap">${esc(fmtDT(r.started_at))}</td><td>${esc(r.target_name)}</td><td>${badge(r.status)}</td><td class="small">${esc(r.message || r.filename || "")}</td><td class="num">${r.size ? fmtBytes(r.size) : ""}</td></tr>`).join("")}</tbody></table>`
     : `<p class="pad muted">No backups have run yet.</p>`}</div>
   <div class="section-h"><h2>Restore</h2></div>
-  <div class="card pad stack"><p class="small">Replace this vault's contents with a backup made with the same key. Logins and backup destinations are kept. To restore onto a new server, use "Restore from a backup" during setup with your recovery key file.</p>
-    <div class="row"><label class="btn">${I.restore} Restore from file…<input type="file" id="rf" accept=".svb" hidden></label>${tg.length ? `<button class="btn" id="rr">Restore from a destination…</button>` : ""}</div></div>`;
+  <div class="card pad stack"><p class="small">Replace this vault's contents with a backup made with the same key. Logins, settings, your current encryption key and backup destinations are kept. To restore onto a new server, use "Restore from a backup" during setup with your recovery key file.</p>
+    <div class="row"><label tabindex="0" role="button" class="btn">${I.restore} Restore from file…<input type="file" id="rf" accept=".svb" hidden></label>${tg.length ? `<button class="btn" id="rr">Restore from a destination…</button>` : ""}</div></div>`;
   $("#add").onclick = () => chooseTargetType();
   $("#all").onclick = async e => { e.target.disabled = true; e.target.innerHTML = '<span class="spin"></span> Backing up…'; try { const r = await API.req("POST", "/api/backups/run"); toast(r.results.every(x => x.status === "ok") ? "Backup complete" : "Some backups failed"); } catch (er) { handleErr(er); } viewBackups(); };
   $$("[data-run]", m).forEach(b => b.onclick = async () => { b.disabled = true; b.innerHTML = '<span class="spin"></span>'; try { const r = await API.req("POST", `/api/backups/targets/${b.dataset.run}/run`); toast(r.results[0].status === "ok" ? "Backup uploaded" : "Backup failed: " + r.results[0].message); } catch (er) { handleErr(er); } viewBackups(); });
@@ -876,7 +954,7 @@ async function targetForm(type, t) {
   if (type === "dropbox") fields = `<div class="note info">${I.info}<div>At dropbox.com/developers create an app (Scoped access, "App folder" is enough) with the <code>files.content.write</code>, <code>files.content.read</code> and <code>files.metadata.read</code> permissions, and add the redirect URI <code>${esc(redirect)}</code>.</div></div>
     <div class="grid2"><label class="f">App key<input name="app_key" value="${esc(c.app_key)}"></label><label class="f">App secret<input name="app_secret" type="password" ${ph("app_secret")}></label></div>
     <label class="f">Folder <span class="hint">Inside the app folder or your Dropbox</span><input name="folder" value="${esc(c.folder || "ScanVault")}"></label>`;
-  if (type === "onedrive") fields = `<div class="note info">${I.info}<div>In the Microsoft Entra admin center register an app (accounts: personal and work, or your org only), add a Web redirect URI <code>${esc(redirect)}</code>, create a client secret, and grant the delegated <code>Files.ReadWrite</code> and <code>offline_access</code> permissions.</div></div>
+  if (type === "onedrive") fields = `<div class="note info">${I.info}<div>In the Microsoft Entra admin center register an app (accounts: personal and work, or your org only), add a Web redirect URI <code>${esc(redirect)}</code>, create a client secret, and grant the delegated <code>Files.ReadWrite.AppFolder</code> and <code>offline_access</code> permissions. Backups go to the app's own folder (Apps/&lt;app name&gt;); ScanVault can't see the rest of your OneDrive.</div></div>
     <div class="grid2"><label class="f">Application (client) ID<input name="client_id" value="${esc(c.client_id)}"></label><label class="f">Client secret<input name="client_secret" type="password" ${ph("client_secret")}></label></div>
     <div class="grid2"><label class="f">Account type<select name="tenant">${[["common", "Personal or work/school"], ["consumers", "Personal only"], ["organizations", "Work/school only"]].map(([v, l]) => `<option value="${v}" ${(c.tenant || "common") === v ? "selected" : ""}>${l}</option>`).join("")}${c.tenant && !["common", "consumers", "organizations"].includes(c.tenant) ? `<option selected value="${esc(c.tenant)}">${esc(c.tenant)}</option>` : ""}</select></label>
     <label class="f">Folder<input name="folder" value="${esc(c.folder || "ScanVault")}"></label></div>`;
@@ -888,17 +966,18 @@ async function targetForm(type, t) {
     <div class="grid2"><label class="f">Access key ID<input name="access_key_id" value="${esc(c.access_key_id)}" autocapitalize="none"></label><label class="f">Secret access key<input name="secret_access_key" type="password" ${ph("secret_access_key")}></label></div>
     <div class="grid2"><label class="f" data-s3="aws">Storage class<select name="storage_class">${["", "STANDARD_IA", "INTELLIGENT_TIERING", "GLACIER_IR"].map(v => `<option value="${v}" ${(c.storage_class || "") === v ? "selected" : ""}>${v || "Standard"}</option>`).join("")}</select></label>
       <label class="check" data-s3="minio other"><input type="checkbox" name="path_style" ${c.path_style ? "checked" : ""}> Path-style URLs</label></div>
-    <div class="note info">${I.info}<div>Use a key that can only reach this bucket. Turning on bucket versioning or object lock protects backups from ransomware.</div></div>`;
+    <div class="note info">${I.info}<div>Use a key that can only reach this bucket. Turning on bucket versioning or object lock protects backups from ransomware. With a write-only key, set Keep last to 0 and expire old backups with a lifecycle rule.</div></div>`;
   if (type === "webdav") fields = `<label class="f">WebDAV URL <span class="hint">Nextcloud: https://cloud.example.com/remote.php/dav/files/USERNAME</span><input name="url" value="${esc(c.url)}" placeholder="https://" autocapitalize="none"></label>
     <div class="grid2"><label class="f">Username<input name="username" value="${esc(c.username)}" autocapitalize="none"></label><label class="f">Password or app password<input name="password" type="password" ${ph("password")}></label></div>
     <label class="f">Folder<input name="folder" value="${esc(c.folder || "ScanVault")}"></label>
-    <label class="check"><input type="checkbox" name="insecure_tls" ${c.insecure_tls ? "checked" : ""}> Allow a self-signed certificate (LAN only)</label>`;
+    <label class="check"><input type="checkbox" name="self_signed" ${c.self_signed || c.insecure_tls ? "checked" : ""}> The server uses a self-signed certificate <span class="hint">Its fingerprint is pinned on the first Test, like an SSH host key</span></label>
+    ${c.tls_fingerprint ? `<label class="f">Pinned certificate <span class="hint">Clear it only if you replaced the server's certificate on purpose</span><input name="tls_fingerprint" class="mono" value="${esc(c.tls_fingerprint)}" autocapitalize="none" spellcheck="false"></label>` : ""}`;
   if (type === "smb") fields = `<div class="grid3"><label class="f" style="grid-column:span 2">Server<input name="host" value="${esc(c.host)}" placeholder="nas.local or 192.168.1.20" autocapitalize="none"></label><label class="f">Port<input name="port" type="number" value="${esc(c.port || 445)}"></label></div>
     <div class="grid2"><label class="f">Share<input name="share" value="${esc(c.share)}" placeholder="backup"></label><label class="f">Folder in share<input name="folder" value="${esc(c.folder || "scanvault")}"></label></div>
     <div class="grid2"><label class="f">Username <span class="hint">DOMAIN\\user if needed</span><input name="username" value="${esc(c.username)}" autocapitalize="none"></label><label class="f">Password<input name="password" type="password" ${ph("password")}></label></div>
     <label class="check"><input type="checkbox" name="require_encryption" ${c.require_encryption !== false ? "checked" : ""}> Require SMB3 encryption in transit</label>`;
   if (type === "local") fields = `<div class="note info">${I.info}<div>Map a USB drive, second disk or NFS mount into the container under <code>/backups</code> (see the docker-compose file), then point this at it.</div></div>
-    <label class="f">Folder<input name="path" value="${esc(c.path || "/backups/usb1/scanvault")}" autocapitalize="none"></label>
+    <label class="f">Folder <span class="hint">Must be under /backups</span><input name="path" value="${esc(c.path || "/backups/usb1/scanvault")}" autocapitalize="none"></label>
     <label class="check"><input type="checkbox" name="require_mount" ${c.require_mount !== false ? "checked" : ""}> Fail if the disk isn't mounted (so backups never fill the NAS's own drive)</label>`;
   const m = modal((t ? "Edit " : "Add ") + TT[type][0], `<form class="form" id="tf">${common}${fields}<p class="err" id="err"></p></form>`,
     { footer: `${t ? '<button class="btn danger" id="del">Remove</button><span class="spacer"></span>' : ""}<button class="btn" data-close>Cancel</button><button class="btn primary" form="tf" id="save">Save</button>` });
@@ -966,16 +1045,18 @@ async function viewSettings() {
     <div class="card pad stack"><h2>Encryption</h2>
       <div class="facts"><span>Vault <b class="mono">${esc(st.vault_id)}</b></span><span>Key fingerprint <b class="mono">${esc(st.fingerprint)}</b></span></div>
       <p class="small muted">AES-256-GCM for every file, preview and patient record. Your encryption key is stretched with scrypt and only unlocks the master key, which lives in memory while the vault is unlocked.</p>
-      <div class="row"><button class="btn" id="rk">${I.key} Download recovery key file</button><button class="btn" id="cpw">Change encryption key</button><button class="btn" id="lock">${I.lock} Lock now</button></div></div>
+      <div class="row"><button class="btn" id="rk">${I.key} Download recovery key file</button><button class="btn" id="cpw">Change encryption key</button><button class="btn" id="lock">${I.lock} Lock now</button></div>
+      <label class="check"><input type="checkbox" id="pr" ${st.passphrase_restore ? "checked" : ""}> <span>Allow restoring backups with the encryption key alone <span class="hint">Off: a backup file can only be opened with the recovery key file, so someone who steals a backup can't guess your passphrase offline. On: new backups carry a passphrase-protected copy of the key.</span></span></label>
+      <div class="row"><button class="btn ghost" id="rekey">Replace the master key…</button></div></div>
     <div class="card pad stack"><h2>Account</h2><p class="small">Signed in as <b>${esc(st.username)}</b>.</p>
-      <div class="row"><button class="btn" id="pw">Change password</button><button class="btn ghost" id="out">Sign out</button></div></div>
+      <div class="row"><button class="btn" id="pw">Change password</button><button class="btn" id="others">Sign out other devices</button><button class="btn ghost" id="out">Sign out</button></div></div>
     <div class="card pad stack"><h2>Install on your phone</h2>
       <p class="small">Open this address in Safari (iPhone) or Chrome (Android) and choose <b>Add to Home Screen</b>. ScanVault opens full screen and can take photos of films and paper reports. Use HTTPS when you reach it from outside your home network.</p></div>
     <div class="card pad stack"><h2>Privacy and HIPAA</h2>
       <ul class="small" style="margin:0;padding-left:18px;display:grid;gap:6px">
         <li>For personal and family records, HIPAA generally doesn't apply to you. If a practice uses ScanVault for patients, it is responsible for HIPAA safeguards, including business associate agreements with Google or Box.</li>
         <li>Backups are encrypted before upload, so cloud providers hold only ciphertext, but file sizes and backup times are visible to them.</li>
-        <li>Put ScanVault behind HTTPS (a reverse proxy such as Caddy or Traefik) before exposing it beyond your LAN.</li>
+        <li>Reach ScanVault only over HTTPS (your NAS's reverse proxy, Caddy or Traefik). Over plain http:// your password and keys cross the network in clear.</li>
         <li>Losing both the encryption key and the recovery key file makes the data unrecoverable. That is by design.</li></ul></div>
     <p class="small muted">ScanVault ${esc(st.version)}</p>
   </div>`;
@@ -986,7 +1067,7 @@ async function viewSettings() {
   $("#cc").onchange = () => viewSettings();
   $("#rk").onclick = () => {
     const mm = modal("Download recovery key", `<form class="form" id="f"><p class="small">Enter your encryption key to download the recovery key file again.</p><label class="f">Encryption key<input name="k" type="password" autocomplete="off" required></label><p class="err" id="err"></p></form>`, { footer: `<button class="btn" data-close>Cancel</button><button class="btn primary" form="f">Download</button>` });
-    $("#f", mm.el).onsubmit = async e => { e.preventDefault(); try { const t = await API.req("POST", "/api/vault/recovery-key", { passphrase: e.target.k.value }); saveText("scanvault-recovery-key.txt", t); await API.req("POST", "/api/vault/recovery-key/confirm", { recovery_key: t }); mm.close(); toast("Recovery key downloaded"); } catch (er) { $("#err", mm.el).textContent = er.message; } };
+    $("#f", mm.el).onsubmit = async e => { e.preventDefault(); try { const t = await API.req("POST", "/api/vault/recovery-key", { passphrase: e.target.k.value }); saveText("scanvault-recovery-key.txt", t); mm.close(); toast("Recovery key downloaded"); if (st.recovery_key_saved === false) { sessionStorage.removeItem("sv-rk-later"); S.status.recovery_key_saved = false; render(); } } catch (er) { $("#err", mm.el).textContent = er.message; } };
   };
   $("#cpw").onclick = () => {
     const mm = modal("Change encryption key", `<form class="form" id="f"><p class="small">Your files and existing backups stay valid and your recovery key file keeps working. Only the passphrase you type changes.</p>
@@ -995,11 +1076,29 @@ async function viewSettings() {
   };
   $("#pw").onclick = () => {
     const mm = modal("Change password", `<form class="form" id="f"><label class="f">Current password<input name="a" type="password" required autocomplete="current-password"></label><label class="f">New password<input name="b" type="password" required minlength="10" autocomplete="new-password"></label><p class="err" id="err"></p></form>`, { footer: `<button class="btn" data-close>Cancel</button><button class="btn primary" form="f">Change</button>` });
-    $("#f", mm.el).onsubmit = async e => { e.preventDefault(); try { await API.req("POST", "/api/auth/password", { current: e.target.a.value, new: e.target.b.value }); mm.close(); toast("Password changed"); } catch (er) { $("#err", mm.el).textContent = er.message; } };
+    $("#f", mm.el).onsubmit = async e => { e.preventDefault(); try { const r = await API.req("POST", "/api/auth/password", { current: e.target.a.value, new: e.target.b.value }); mm.close(); toast("Password changed" + (r.signed_out ? `. Signed out ${r.signed_out} other session(s)` : "")); } catch (er) { $("#err", mm.el).textContent = er.message; } };
+  };
+  $("#others").onclick = async () => { try { const r = await API.req("POST", "/api/auth/logout-others"); toast(`Signed out ${r.signed_out} other session(s)`); } catch (er) { handleErr(er); } };
+  $("#pr").onchange = async e => { try { await API.req("PUT", "/api/vault/settings", { passphrase_restore: e.target.checked }); toast(e.target.checked ? "New backups can be restored with the encryption key" : "New backups need the recovery key file to restore"); } catch (er) { e.target.checked = !e.target.checked; handleErr(er); } };
+  $("#rekey").onclick = () => {
+    const mm = modal("Replace the master key", `<form class="form" id="f"><p class="small">Every file, preview and record is re-encrypted with a brand-new master key, and you get a new recovery key file. Use this if a recovery key file or an old encryption key may have leaked.</p>
+      <div class="note">${I.warn}<div>Your current recovery key file stops working for this vault and for new backups. Backups made before now can still be opened with the old recovery key file, so delete old backups you no longer trust. Large vaults take a while; the vault is unavailable meanwhile.</div></div>
+      <label class="f">Current encryption key<input name="a" type="password" required autocomplete="off"></label>
+      <label class="f">New encryption key <span class="hint">Optional. Leave empty to keep using the current one.</span><input name="b" type="password" minlength="12" autocomplete="new-password"></label>
+      <p class="err" id="err"></p></form>`, { footer: `<button class="btn" data-close>Cancel</button><button class="btn danger" form="f" id="rgo">Replace key</button>` });
+    $("#f", mm.el).onsubmit = async e => {
+      e.preventDefault(); const f = e.target; $("#rgo", mm.el).disabled = true; $("#rgo", mm.el).innerHTML = '<span class="spin"></span> Re-encrypting…';
+      try {
+        const r = await API.req("POST", "/api/vault/rekey", { passphrase: f.a.value, ...(f.b.value ? { new_passphrase: f.b.value } : {}) });
+        mm.close(); saveText("scanvault-recovery-key.txt", r.recovery_key);
+        toast("Master key replaced. Save the new recovery key file."); sessionStorage.removeItem("sv-rk-later"); S.status = await API.req("GET", "/api/status"); render();
+      } catch (er) { $("#err", mm.el).textContent = er.message; $("#rgo", mm.el).disabled = false; $("#rgo", mm.el).textContent = "Replace key"; }
+    };
   };
   $("#lock").onclick = async () => { await API.req("POST", "/api/vault/lock"); S.status.unlocked = false; render(); };
   $("#out").onclick = async () => { await API.req("POST", "/api/auth/logout"); S.status.authenticated = false; render(); };
 }
 
 boot();
+if (!API.demo && "serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("/sw.js").catch(() => {});
 })();

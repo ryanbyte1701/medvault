@@ -90,10 +90,10 @@ def test_dropbox_needs_connect():
 @responses.activate
 def test_onedrive_upload_session_and_token_rotation(tmp_path):
     responses.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", json={"access_token": "AT", "refresh_token": "R2"})
-    responses.post("https://graph.microsoft.com/v1.0/me/drive/root:/Backups/ScanVault/" + NAMES[0] + ":/createUploadSession", json={"uploadUrl": "https://up.example/s"})
+    responses.post("https://graph.microsoft.com/v1.0/me/drive/special/approot:/Backups/ScanVault/" + NAMES[0] + ":/createUploadSession", json={"uploadUrl": "https://up.example/s"})
     responses.put("https://up.example/s", status=202, json={})
     responses.put("https://up.example/s", status=201, json={"id": "F"})
-    responses.get("https://graph.microsoft.com/v1.0/me/drive/root:/Backups/ScanVault:/children", json={"value": [{"id": f"id{i}", "name": n, "file": {}} for i, n in enumerate(NAMES)]})
+    responses.get("https://graph.microsoft.com/v1.0/me/drive/special/approot:/Backups/ScanVault:/children", json={"value": [{"id": f"id{i}", "name": n, "file": {}} for i, n in enumerate(NAMES)]})
     for i in range(3):
         responses.delete(f"https://graph.microsoft.com/v1.0/me/drive/items/id{i}", status=204)
     saved = {}
@@ -108,37 +108,92 @@ def test_onedrive_upload_session_and_token_rotation(tmp_path):
     assert "login.microsoftonline.com/consumers/" in targets.oauth_auth_url("onedrive", {"client_id": "c", "tenant": "consumers"}, "https://x/cb", "s")
 
 
-# ------------------------------------------------------------------ WebDAV (real server)
-@pytest.fixture()
-def dav_server(tmp_path):
+# ------------------------------------------------------------------ WebDAV (real server over TLS)
+def _self_signed(tmp_path, cn="127.0.0.1"):
+    import datetime
+    import ipaddress
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+        .serial_number(x509.random_serial_number()).not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=30))
+        .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address(cn))]), critical=False)
+        .sign(key, hashes.SHA256())
+    )
+    c, k = tmp_path / f"cert-{os.urandom(3).hex()}.pem", tmp_path / f"key-{os.urandom(3).hex()}.pem"
+    c.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    k.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    return c, k
+
+
+def _dav(root, cert, key, port=0):
     from cheroot import wsgi
+    from cheroot.ssl.builtin import BuiltinSSLAdapter
     from wsgidav.wsgidav_app import WsgiDAVApp
 
-    root = tmp_path / "dav"
-    root.mkdir()
     app = WsgiDAVApp({
         "provider_mapping": {"/remote.php/dav/files/ryan": str(root)},
         "simple_dc": {"user_mapping": {"*": {"ryan": {"password": "pw"}}}},
         "http_authenticator": {"accept_basic": True, "accept_digest": False, "default_to_digest": False},
         "verbose": 0, "logging": {"enable": False},
     })
-    srv = wsgi.Server(("127.0.0.1", 0), app)
+    srv = wsgi.Server(("127.0.0.1", port), app)
+    srv.ssl_adapter = BuiltinSSLAdapter(str(cert), str(key))
     srv.prepare()
-    th = threading.Thread(target=srv.serve, daemon=True)
-    th.start()
-    yield f"http://127.0.0.1:{srv.bind_addr[1]}/remote.php/dav/files/ryan", root
-    srv.stop()
+    threading.Thread(target=srv.serve, daemon=True).start()
+    return srv
+
+
+@pytest.fixture()
+def dav_server(tmp_path):
+    root = tmp_path / "dav"
+    root.mkdir()
+    cert, key = _self_signed(tmp_path)
+    srv = _dav(root, cert, key)
+    info = {"root": root, "srv": srv, "port": srv.bind_addr[1]}
+    yield f"https://127.0.0.1:{srv.bind_addr[1]}/remote.php/dav/files/ryan", info
+    info["srv"].stop()
 
 
 def test_webdav_nextcloud_style(tmp_path, dav_server):
-    url, root = dav_server
-    t = targets.make("webdav", {"url": url, "username": "ryan", "password": "pw", "folder": "Backups/ScanVault"})
-    assert "Connected" in t.test()
+    url, info = dav_server
+    root = info["root"]
+    saved = {}
+    cfg = {"url": url, "username": "ryan", "password": "pw", "folder": "Backups/ScanVault"}
+    # an untrusted self-signed certificate is refused unless the user opts in to pinning it
+    with pytest.raises(targets.TargetError, match="not trusted"):
+        targets.make("webdav", dict(cfg)).test()
+    t = targets.make("webdav", {**cfg, "self_signed": True}, saved.update)
+    msg = t.test()
+    assert "Connected" in msg and "pinned" in msg and saved["tls_fingerprint"].count(":") == 31
     _roundtrip(t, tmp_path)
     assert sorted(p.name for p in (root / "Backups" / "ScanVault").iterdir()) == NAMES[-2:]
-    bad = targets.make("webdav", {"url": url, "username": "ryan", "password": "nope"})
-    with pytest.raises(targets.TargetError):
+    bad = targets.make("webdav", {**cfg, "self_signed": True, "tls_fingerprint": saved["tls_fingerprint"], "password": "nope"})
+    with pytest.raises(targets.TargetError, match=r"HTTP 401"):
         bad.test()
+    # the server's certificate changes (MITM): refused before the password is sent
+    info["srv"].stop()
+    cert2, key2 = _self_signed(tmp_path)
+    info["srv"] = _dav(root, cert2, key2, info["port"])
+    pinned = targets.make("webdav", {**cfg, "self_signed": True, "tls_fingerprint": saved["tls_fingerprint"]})
+    with pytest.raises(targets.TargetError, match="changed"):
+        pinned.test()
+
+
+def test_webdav_rejects_cleartext_and_userinfo():
+    with pytest.raises(targets.TargetError, match="https"):
+        targets.WebDAV.validate({"url": "http://nas.local/dav"})
+    with pytest.raises(targets.TargetError, match="own fields"):
+        targets.WebDAV.validate({"url": "https://ryan:pw@nas.local/dav"})
+    targets.WebDAV.validate({"url": "https://nas.local/dav"})
 
 
 # ------------------------------------------------------------------ SMB (smbclient faked)
@@ -194,14 +249,20 @@ def test_smb(tmp_path, monkeypatch):
 
 # ------------------------------------------------------------------ local folder
 def test_local_folder(tmp_path, monkeypatch):
-    monkeypatch.setattr(targets.LocalFolder, "ROOT", tmp_path / "backups")
+    monkeypatch.setenv("SCANVAULT_LOCAL_BACKUP_ROOT", str(tmp_path / "backups"))
+    monkeypatch.setattr(targets, "_mount_root", lambda p: tmp_path)  # pretend a disk is mounted
     t = targets.make("local", {"path": "usb1/scanvault"})
     assert "free" in t.test()
     _roundtrip(t, tmp_path)
     assert (tmp_path / "backups" / "usb1" / "scanvault" / NAMES[-1]).exists()
-    monkeypatch.setenv("SCANVAULT_DATA", str(tmp_path / "data"))
-    with pytest.raises(targets.TargetError, match="outside"):
-        targets.make("local", {"path": str(tmp_path / "data" / "x")}).test()
+    # confined to the backup root
+    for bad in ("/etc", str(tmp_path), "../../x", str(tmp_path / "backups" / ".." / "elsewhere")):
+        with pytest.raises(targets.TargetError, match="under"):
+            targets.LocalFolder.validate({"path": bad})
+    with pytest.raises(targets.TargetError, match="Not a ScanVault backup"):
+        t.download("../../etc/passwd", tmp_path / "x")
+    # require_mount is on unless explicitly turned off
     monkeypatch.setattr(targets, "_mount_root", lambda p: Path("/"))  # e.g. USB disk not mounted
     with pytest.raises(targets.TargetError, match="mounted"):
-        targets.make("local", {"path": str(tmp_path / "nomount"), "require_mount": True}).test()
+        targets.make("local", {"path": "nomount"}).test()
+    assert "free" in targets.make("local", {"path": "nomount", "require_mount": False}).test()

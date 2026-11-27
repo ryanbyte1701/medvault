@@ -44,13 +44,24 @@ open http://localhost:8080
 
 First run walks you through:
 
+0. **Setup code**: printed in the container log (`docker logs scanvault`) when
+   ScanVault starts unconfigured. It stops anyone else on the network, or a
+   web page in your browser, from claiming the vault before you do. You can
+   preset it with `SCANVAULT_SETUP_CODE`.
 1. **Sign-in**: username and password for the web/mobile UI.
 2. **Encryption key**: a passphrase of 12+ characters (or click *Generate*
-   for six random words). It is separate from the sign-in password.
+   for six words from the EFF list, about 77 bits). It is separate from the
+   sign-in password.
 3. **Recovery key file**: download `scanvault-recovery-key.txt`, then
    upload it back to prove you saved it. Print it or keep it offline.
 
 Data lives in the `scanvault-data` volume (`/data` in the container).
+
+The compose file publishes the port on `127.0.0.1` only. To use ScanVault from
+other devices put an HTTPS reverse proxy in front of it (Caddy, Traefik, nginx,
+Tailscale Serve, your NAS's proxy) and set `FORWARDED_ALLOW_IPS` to the
+proxy's address so it alone may set `X-Forwarded-Proto`. Over plain `http://`
+the setup screen warns you that keys would cross the network in clear.
 
 **Synology NAS:** see [deploy/synology/README.md](deploy/synology/README.md)
 for a Container Manager project with `/volume1` paths, PUID/PGID, a DSM reverse
@@ -58,7 +69,9 @@ proxy with HTTPS, and backup tips. Prebuilt multi-arch images (amd64 and arm64)
 are published to `ghcr.io/ryanbyte1701/scanvault` on every merge to `main`.
 
 The container starts as root only to set the owner of `/data` to
-`PUID:PGID` (default `10001`), then drops to that user.
+`PUID:PGID` (default `10001`), then drops to that user. The compose files run
+it with a read-only root filesystem, a small `/tmp` tmpfs, all capabilities
+dropped except the few the entrypoint needs, and `no-new-privileges`.
 
 ### Locking and restarts
 
@@ -68,7 +81,15 @@ key file) to unlock. Scheduled backups pause while locked.
 
 For unattended servers you can opt into auto-unlock with a Docker secret
 (`SCANVAULT_PASSPHRASE_FILE`, see `docker-compose.yml`). The trade-off is that
-anyone who has the host disk also has the key.
+anyone who has the host disk also has the key. A missing or unreadable file is
+logged and the vault stays locked.
+
+`SCANVAULT_AUTO_LOCK_MINUTES` (default `0`, off) locks the vault after that
+many idle minutes. Sessions last at most 30 days and end after
+`SCANVAULT_SESSION_IDLE_DAYS` (default 14) without use. Changing the sign-in
+password signs out every other device; Settings also has *Sign out other
+devices*. Sign-in, unlock and key checks are rate limited (5 free failures,
+then growing delays, per client and per account).
 
 ### Phones
 
@@ -78,29 +99,46 @@ Cloudflare Tunnel) and set `SCANVAULT_PUBLIC_URL`.
 
 ## Backup destinations
 
-Every backup is a single `scanvault-backup-YYYYMMDD-HHMMSSZ.svb` file,
-encrypted with your master key before upload. Each destination has its own
-schedule (hours, `0` = manual) and retention (keep last N).
+Every backup is a single `scanvault-backup-<vault id>-YYYYMMDD-HHMMSSZ-<rand>.svb`
+file, encrypted with your master key before upload. Each destination has its
+own schedule (hours, `0` = manual; a failed run is retried after an hour) and
+retention (keep last N). Retention only deletes backups of the same vault, so
+several servers can share a folder. Backups from 0.1 (no vault id in the name)
+are never pruned automatically.
+
+The archive is streamed straight into the encryption (no plaintext tar on
+disk) and is a consistent snapshot: files deleted while a backup runs are
+removed only after it finishes. Session tokens are never included.
 
 | Destination | Auth options | Notes |
 |---|---|---|
 | **Google Drive** | Google account (OAuth, `drive.file` scope) or service account JSON | For OAuth create a *Web application* client in Google Cloud Console, enable the Drive API, add the redirect URI shown in the form, then click *Connect*. Service accounts need a Shared Drive folder shared with them. Uploads are resumable in 8 MiB chunks. |
 | **Box** | Box account (OAuth 2.0) or Custom App with Client Credentials Grant | Rotating refresh tokens are persisted after each use. Files over 50 MB use chunked upload sessions with SHA-1 digests. |
-| **OneDrive** | Microsoft account or work/school (Entra ID app, delegated `Files.ReadWrite offline_access`) | Register an app, add the redirect URI shown in the form as a *Web* platform, create a client secret, then click *Connect*. Upload sessions in 10 MiB chunks. Rotated refresh tokens are saved. |
+| **OneDrive** | Microsoft account or work/school (Entra ID app, delegated `Files.ReadWrite.AppFolder offline_access`) | Register an app, add the redirect URI shown in the form as a *Web* platform, create a client secret, then click *Connect*. Backups go to the app's own folder (`Apps/<app name>`); the token can't read the rest of the drive. Upload sessions in 10 MiB chunks. Rotated refresh tokens are saved. |
 | **Dropbox** | Dropbox app (scoped, App folder or Full Dropbox), offline refresh token | Permissions: `files.content.write`, `files.content.read`, `files.metadata.read`. Files over 150 MB use upload sessions. |
-| **S3 / object storage** | Access key + secret | Presets for Amazon S3, Backblaze B2, Wasabi, Cloudflare R2, Synology C2 and MinIO, or any endpoint URL. Multipart uploads, optional storage class and prefix. Bucket versioning or object lock is recommended. |
-| **SFTP / SCP** | Password and/or private key (Ed25519, ECDSA, RSA) | The host key is pinned on the first successful *Test*. A changed key blocks the connection. SFTP uploads to `.part` and then renames atomically. |
-| **SMB share** | Username + password (`DOMAIN\user` supported) | SMB 2/3 to Windows, Synology, QNAP, TrueNAS or Samba, with optional required SMB3 encryption. Writes `.part` then renames. |
-| **WebDAV / Nextcloud** | Username + password or app password | Nextcloud/ownCloud (`…/remote.php/dav/files/USER`), Synology WebDAV Server, Koofr, pCloud and others. Creates folders and uploads `.part` then MOVE. |
-| **USB / local disk** | None | Any folder mounted into the container under `/backups` (USB drive, second disk, NFS mount). It can refuse to run if the disk isn't mounted. |
+| **S3 / object storage** | Access key + secret (required; the host's own credentials are never used) | Presets for Amazon S3, Backblaze B2, Wasabi, Cloudflare R2, Synology C2 and MinIO, or any endpoint URL. Multipart uploads, optional storage class and prefix. Bucket versioning or object lock is recommended. With a write-only key set *Keep last* to 0 and expire old backups with a lifecycle rule. |
+| **SFTP / SCP** | Password and/or private key (Ed25519, ECDSA, RSA) | The host key is pinned on the first successful *Test*. A changed key blocks the connection. Both protocols upload to `.part` and rename only a complete file; failed uploads are cleaned up. |
+| **SMB share** | Username + password (`DOMAIN\user` supported) | SMB 2/3 to Windows, Synology, QNAP, TrueNAS or Samba, SMB3 encryption is required unless you turn it off. Writes `.part` then renames. |
+| **WebDAV / Nextcloud** | Username + password or app password | HTTPS only. Nextcloud/ownCloud (`…/remote.php/dav/files/USER`), Synology WebDAV Server, Koofr, pCloud and others. A self-signed certificate is pinned by SHA-256 fingerprint on the first *Test* instead of turning checks off. Creates folders and uploads `.part` then MOVE. |
+| **USB / local disk** | None | Any folder mounted into the container under `/backups` (USB drive, second disk, NFS mount); other paths are refused. By default it refuses to run if no disk is mounted there, so backups never fill the system drive. |
 
 You can also click **Download backup** to save an encrypted `.svb` locally.
 
 ## Emergency restore
 
-**Into ScanVault**: on a fresh install choose *Restore from a backup*, upload
-the `.svb` and your recovery key file (or type the encryption key), and choose a
-new sign-in.
+**Into ScanVault**: on a fresh install choose *Restore from a backup*, enter
+the setup code, upload the `.svb` and your recovery key file, and choose a new
+sign-in. Restored destinations start paused, so the new server doesn't write
+to (and prune) the old one's destinations until you turn them back on.
+
+By default backups can only be opened with the recovery key file. Settings ›
+Encryption › *Allow restoring backups with the encryption key alone* adds a
+passphrase-wrapped copy of the key to new backups (convenient, but a stolen
+backup can then be attacked by guessing the passphrase offline).
+
+**Over a running vault** (Backups › Restore): patients, studies and files are
+replaced with the backup's; logins, sessions, the current encryption key,
+settings, destinations and backup history stay as they are.
 
 **Without ScanVault** (e.g. years later, server gone):
 
@@ -111,29 +149,48 @@ python3 tools/restore.py --backup scanvault-backup-20261126-213000Z.svb \
 ```
 
 This writes `restored/<Patient (DOB)>/<date title - center>/<files>` plus a
-`patients.json` index. Use `--passphrase` instead of `--key` to be prompted for
-the encryption key.
+`patients.json` index (always written, even if some files fail; those are
+listed and the tool exits with status 1). Use `--passphrase` instead of `--key`
+to be prompted for the encryption key, for backups made with passphrase
+restore turned on.
 
 ## Security design
 
 - **Master key (MK)**: 32 random bytes. The passphrase is stretched with scrypt
-  (N=2^15, r=8, p=1) and wraps the MK with AES-256-GCM in `keystore.json`.
-  Changing the passphrase re-wraps the MK, so data, backups and the recovery file
-  stay valid.
+  (N=2^17, r=8, p=1; older keystores are upgraded at the next unlock) and wraps
+  the MK with AES-256-GCM in `keystore.json`. Changing the passphrase re-wraps
+  the MK, so data, backups and the recovery file stay valid.
+- **Key rotation**: Settings › Encryption › *Replace the master key* re-encrypts
+  every file, preview and record under a new MK and issues a new recovery key
+  file. The old recovery file then opens nothing made afterwards (it still
+  opens backups made before). The change is journaled, so an interrupted
+  rotation is finished or rolled back at the next start.
 - **Recovery key file**: the MK in base32 with a 4-byte checksum and a
   fingerprint, so typos and mismatched vaults are caught.
 - **Files**: streamed AES-256-GCM in 1 MiB chunks with a per-file HKDF subkey.
   The nonce encodes the chunk counter and a final-chunk flag, which detects
   truncation and reordering. The file id is bound as associated data, so blobs
   can't be swapped between records.
-- **Metadata**: patient names, DOB, MRN, notes, study details, file names and
-  DICOM tags are sealed per row (bound to the row id). The SQLite file holds no
-  plaintext PHI.
+- **Metadata**: patient names, DOB, MRN, notes, study details, file names,
+  file digests and DICOM tags are sealed per row (bound to the row id). The
+  database keeps only a keyed HMAC of each file's SHA-256 for duplicate
+  detection, so it can't be used to confirm that a known document is in the
+  vault. Row counts, sizes and timestamps are not hidden.
+- **Processing**: uploads are streamed (after authentication, with size
+  limits) into scratch files encrypted with a random key that exists only in
+  memory and are unlinked on creation; zip members and DICOM decoding use the
+  same scratch files, so no plaintext reaches the disk. Zip and DICOM
+  decompression bombs are refused (per-member and total limits, frame size
+  checks, one frame decoded at a time).
 - **Web**: HttpOnly SameSite=Strict session cookie plus a required
-  `X-ScanVault` header on state-changing requests. Uploaded content is served
-  inline only for images and PDFs; everything else is forced to download. The
-  service worker never caches `/api/` responses. The container runs as a
-  non-root user.
+  `X-ScanVault` header on every cookie-authenticated state-changing request.
+  The browser never sees the session token (it is only returned in JSON to API
+  clients). JSON endpoints only accept `application/json`. Content-Security-Policy
+  and (over HTTPS) HSTS on every page. Decrypted content, thumbnails and
+  renders are `no-store`. Uploaded content is served inline only for images
+  and PDFs; everything else is forced to download. The service worker never
+  caches `/api/` responses. `/api/docs` is off unless `SCANVAULT_API_DOCS=1`.
+  The container runs as a non-root user.
 
 ### HIPAA and privacy notes
 
@@ -149,9 +206,12 @@ the encryption key.
 
 ## API (for the Android app and scripts)
 
-Interactive docs: `http://localhost:8080/api/docs`. Authenticate with
-`POST /api/auth/login {username, password}` → `{token, expires_at}`, then send
-`Authorization: Bearer <token>`. Errors are `{"error": "...", "code"?: "..."}`.
+Interactive docs: set `SCANVAULT_API_DOCS=1`, then `http://localhost:8080/api/docs`.
+Authenticate with `POST /api/auth/login {username, password}` → `{token, expires_at}`
+(the token is in the body for API clients, i.e. requests without the browser's
+`X-ScanVault` header), then send `Authorization: Bearer <token>`. Errors are
+`{"error": "...", "code"?: "..."}`, including validation errors (400). Too many
+failed sign-ins or key checks return **429** with `Retry-After`.
 A locked vault returns **423** `{code: "locked"}`; unlock with
 `POST /api/vault/unlock {passphrase}`.
 
@@ -167,6 +227,9 @@ A locked vault returns **423** `{code: "locked"}`; unlock with
 | GET | `/api/files/{id}`, `/content`, `/thumbnail` | metadata, decrypted bytes, JPEG preview |
 | GET | `/api/files/{id}/render?wc=&ww=&frame=` | DICOM rendered with a window center/width in modality units (HU for CT). `X-Window-*`, `X-Default-*`, `X-Min/Max`, `X-Frames`, `X-Modality` headers |
 | GET/PUT | `/api/prefs` | `{theme: system\|light\|dark, dark_color: "#rrggbb"}` per user |
+| POST | `/api/auth/logout-others` | sign out every other session |
+| GET/PUT | `/api/vault/settings` | `{passphrase_restore: bool}` |
+| POST | `/api/vault/rekey` | `{passphrase, new_passphrase?}` → `{recovery_key, fingerprint}` |
 | GET/POST/PUT/DELETE | `/api/backups/targets[/{id}]` | destinations (secrets are write-only) |
 | POST | `/api/backups/run`, `/api/backups/targets/{id}/run`, `/test` | |
 | GET | `/api/backups/runs`, `/api/backups/download` | history; encrypted `.svb` download |
