@@ -47,6 +47,15 @@ CREATE TABLE IF NOT EXISTS user_identities (
   id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   provider_id TEXT NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, email TEXT,
   created_at REAL NOT NULL, last_login REAL, UNIQUE(issuer, subject));
+CREATE TABLE IF NOT EXISTS lab_reports (
+  id TEXT PRIMARY KEY, patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'draft', created_at REAL NOT NULL, updated_at REAL NOT NULL, blob BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS lab_results (
+  id TEXT PRIMARY KEY, report_id TEXT NOT NULL REFERENCES lab_reports(id) ON DELETE CASCADE,
+  patient_id TEXT NOT NULL, created_at REAL NOT NULL, blob BLOB NOT NULL);
+CREATE INDEX IF NOT EXISTS lab_reports_patient ON lab_reports(patient_id);
+CREATE INDEX IF NOT EXISTS lab_results_patient ON lab_results(patient_id);
+CREATE INDEX IF NOT EXISTS lab_results_report ON lab_results(report_id);
 """
 
 

@@ -9,6 +9,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     SCANVAULT_LOCAL_BACKUP_ROOT=/backups
 
 WORKDIR /srv
+# Tesseract reads scanned lab reports and photos of them (LabsVault). It runs
+# locally; set SCANVAULT_OCR=0 at build time to leave it out (~30 MB).
+ARG SCANVAULT_OCR=1
+RUN if [ "$SCANVAULT_OCR" = "1" ]; then apt-get update && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng && rm -rf /var/lib/apt/lists/*; fi
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

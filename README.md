@@ -20,6 +20,12 @@ a USB disk.
   scroll or slider through a series, a frame slider for multi-frame files,
   fullscreen and keyboard shortcuts. Photos get the same tools in the browser.
   PDFs open inline.
+- **LabsVault (lab results)**: upload a Labcorp, Quest or Sonora Quest report
+  PDF (or a photo or scan of one) and ScanVault reads each test, value, unit,
+  reference range, flag and collection date, matches tests to LOINC codes,
+  and lets you check and correct everything before it is saved. Each test
+  gets a graph over time with its reference range. Reading happens on your
+  server; nothing is sent anywhere.
 - **Compare side by side**: put two studies of the same patient next to each
   other (prior on the left, current on the right). Suggested matches come first:
   same type of scan and body part, closest in time. Zoom, pan, window/level,
@@ -31,7 +37,7 @@ a USB disk.
 - **Mobile and web**: responsive UI, installable as a PWA (Add to Home Screen),
   with a "Take photo" button for paper reports and films. A REST API with
   Bearer tokens serves native clients.
-- **Encrypted at rest**: every file, preview, patient/study record and stored
+- **Encrypted at rest**: every file, preview, patient/study/lab record and stored
   cloud credential is encrypted with AES-256-GCM.
 - **Encrypted backups**: one archive per run, encrypted before it leaves the
   box, with schedule and retention per destination.
@@ -249,6 +255,46 @@ How it is protected:
 - Directory sign-in never unlocks the vault. After a restart you still enter
   the encryption key.
 
+## LabsVault: lab results
+
+Open **Labs** (or **Lab results** on a patient) and drop in a lab report PDF.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/labs.png" alt="Lab results: tests grouped by panel with latest value, flag and a sparkline"><br><sub><b>Lab results.</b> Latest value, flag and trend for every test.</sub></td>
+<td width="50%"><img src="docs/screenshots/labs-trend.png" alt="Glucose over time with the reference range shaded"><br><sub><b>Trend.</b> One test over time, reference range shaded, out-of-range points marked.</sub></td>
+</tr>
+<tr>
+<td colspan="2"><img src="docs/screenshots/labs-review.png" alt="Review screen with every value read from the PDF, editable"><br><sub><b>Review.</b> Nothing is graphed until you check what was read and save it.</sub></td>
+</tr>
+</table>
+
+- **Labcorp** (both the "Result / Flag / Units / Reference Interval" layout
+  and the newer "Current Result and Flag / Previous Result and Date" one),
+  **Quest Diagnostics** and **Sonora Quest Laboratories** ("In Range / Out Of
+  Range / Reference Range / Lab") are recognized by their table layout. Other
+  labs fall back to a generic reader, and you can always type results in.
+- **Scans and photos** are read with Tesseract OCR, which the Docker image
+  includes (build with `--build-arg SCANVAULT_OCR=0` to leave it out). OCR
+  results are marked for extra checking.
+- **Review first.** A new report is a draft. You see every row next to a link
+  to the PDF, can fix values, units, ranges and flags, untick rows, add rows,
+  pick the right test for anything not recognized, and only then save. A
+  warning appears if the report's name or date of birth doesn't match the
+  patient you are saving to.
+- **Previous results** that Labcorp prints beside each value can be kept too,
+  so a single report already gives a short trend.
+- **Tests are matched** to about 80 common analytes (metabolic panel, lipids,
+  CBC, A1c, thyroid, vitamins, iron and more) with LOINC codes, so "GLUCOSE",
+  "Glucose, Serum" and "Glucose 01" land on the same graph.
+- **Stored like everything else**: values and report details are sealed with
+  the master key, the original PDF is kept as an encrypted file in a "lab
+  report" study on the patient's timeline, and both are included in backups,
+  key changes and `tools/restore.py` (which writes `lab-results.csv` per
+  patient). **Export CSV** on the Labs page downloads every value.
+
+Nothing leaves the server: parsing and OCR run locally.
+
 ## Backup destinations
 
 Every backup is a single `scanvault-backup-<vault id>-YYYYMMDD-HHMMSSZ-<rand>.svb`
@@ -427,6 +473,13 @@ https entries match scheme, host and port exactly.
 | POST/PUT/DELETE | `/api/sso/providers[/{id}]` | `{preset, name, issuer?, fields?, client_id, client_secret?, scopes?, enabled?}` |
 | PUT | `/api/sso/settings` | `{local_login: bool}` |
 | DELETE | `/api/sso/identities/{id}` | unlink |
+| GET | `/api/labs/info` | LabsVault: OCR available?, known labs, analyte catalog (`key`, `name`, `loinc`, `panel`) |
+| POST | `/api/patients/{id}/labs/upload` | multipart `file` (one PDF or photo) → draft report with parsed `rows`, `warnings` |
+| GET/POST | `/api/patients/{id}/labs/reports` | list / create a hand-entered report `{lab?, collected?, rows?, save?}` |
+| GET/PUT/DELETE | `/api/labs/reports/{id}` | PUT `{collected, reported?, lab?, ordering_provider?, rows: [{name, value, unit?, ref_low?, ref_high?, ref_text?, flag?, analyte?, include?}], save: true, import_previous?}`; DELETE also removes the PDF unless `?keep_file=1` |
+| GET | `/api/patients/{id}/labs/analytes` | every test with `latest`, `count`, `spark` |
+| GET | `/api/patients/{id}/labs/analytes/{key}` | `{name, loinc, units, points: [{date, value, value_num, unit, ref_low, ref_high, flag, lab_name, source}]}` |
+| GET | `/api/patients/{id}/labs/export.csv` | all saved values |
 | GET/PUT | `/api/prefs` | `{theme: system\|light\|dark, dark_color: "#rrggbb"}` per user |
 | POST | `/api/auth/logout-others` | sign out every other session |
 | GET/PUT | `/api/vault/settings` | `{passphrase_restore: bool}` |
