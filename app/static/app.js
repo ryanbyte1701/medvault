@@ -160,7 +160,17 @@ document.addEventListener("click", e => {
   if (a) { e.preventDefault(); const [n, id] = a.dataset.go.split("/"); go(n, id); }
 });
 
+async function finishSso() {
+  // The server redirects here after the identity provider; trade the one-time ticket for a session.
+  const m = !API.demo && location.hash.match(/^#\/sso\?ticket=([\w-]+)/);
+  if (!m) return;
+  history.replaceState(null, "", location.pathname + "#/patients");
+  try { await API.req("POST", "/api/auth/sso/exchange", { ticket: m[1] }); }
+  catch (e) { S.ssoError = e.message; }
+}
+
 async function boot() {
+  await finishSso();
   try { S.status = await API.req("GET", "/api/status"); }
   catch (e) { app.innerHTML = `<div class="empty"><h2>Can't reach ScanVault</h2><p>${esc(e.message)}</p><button class="btn" onclick="location.reload()">Retry</button></div>`; return; }
   S.route = parseHash();
@@ -168,6 +178,8 @@ async function boot() {
   const q = new URLSearchParams(location.hash.split("?")[1] || "");
   if (q.get("oauth") === "ok") toast("Account connected");
   if (q.get("oauth") === "error") toast("Connecting the account failed: " + (q.get("msg") || "unknown error"));
+  if (q.get("sso") === "linked") toast("Single sign-on account linked");
+  if (q.get("sso_error") && S.status.authenticated) toast(q.get("sso_error"));
 }
 
 function handleErr(e) {
@@ -369,11 +381,18 @@ function viewRestoreSetup() {
 }
 
 function viewLogin() {
+  const st = S.status, providers = st.sso || [], local = st.local_login !== false;
+  const ssoErr = S.ssoError || new URLSearchParams(location.hash.split("?")[1] || "").get("sso_error") || "";
+  S.ssoError = null;
+  const ssoBtns = providers.map(p => `<a class="btn ${local ? "" : "primary"} ssobtn" href="/api/auth/sso/${encodeURIComponent(p.id)}/start">${I.key} Continue with ${esc(p.name)}</a>`).join("");
   authLayout(`<div><h1>Sign in</h1></div>
-    <form class="form" id="f">
+    ${providers.length ? `<div class="stack ssobtns">${ssoBtns}</div>${local ? '<div class="ordiv"><span>or use your password</span></div>' : ""}` : ""}
+    ${local ? `<form class="form" id="f">
       <label class="f">Username<input name="u" autocomplete="username" required autocapitalize="none"></label>
       <label class="f">Password<input name="p" type="password" autocomplete="current-password" required></label>
-      <p class="err" id="err"></p><button class="btn primary" id="go">Sign in</button></form>`, "Welcome back.");
+      <p class="err" id="err">${esc(ssoErr)}</p><button class="btn primary" id="go">Sign in</button></form>`
+      : `<p class="err" id="err">${esc(ssoErr)}</p><p class="small muted">Password sign-in is turned off for this vault.</p>`}`, "Welcome back.");
+  if (!local) return;
   $("#f").onsubmit = async e => {
     e.preventDefault(); const f = e.target; $("#go").disabled = true;
     try { await API.req("POST", "/api/auth/login", { username: f.u.value, password: f.p.value }); S.status = await API.req("GET", "/api/status"); render(); }
@@ -912,6 +931,7 @@ async function viewSettings() {
       <div class="row"><button class="btn" id="rk">${I.key} Download recovery key file</button><button class="btn" id="cpw">Change encryption key</button><button class="btn" id="lock">${I.lock} Lock now</button></div></div>
     <div class="card pad stack"><h2>Account</h2><p class="small">Signed in as <b>${esc(st.username)}</b>.</p>
       <div class="row"><button class="btn" id="pw">Change password</button><button class="btn ghost" id="out">Sign out</button></div></div>
+    <div class="card pad stack" id="ssocard"><h2>Single sign-on</h2><div class="empty" style="padding:10px"><span class="spin"></span></div></div>
     <div class="card pad stack"><h2>Install on your phone</h2>
       <p class="small">Open this address in Safari (iPhone) or Chrome (Android) and choose <b>Add to Home Screen</b>. ScanVault opens full screen and can take photos of films and paper reports. Use HTTPS when you reach it from outside your home network.</p></div>
     <div class="card pad stack"><h2>Privacy and HIPAA</h2>
@@ -942,6 +962,74 @@ async function viewSettings() {
   };
   $("#lock").onclick = async () => { await API.req("POST", "/api/vault/lock"); S.status.unlocked = false; render(); };
   $("#out").onclick = async () => { await API.req("POST", "/api/auth/logout"); S.status.authenticated = false; render(); };
+  ssoCard().catch(handleErr);
+}
+
+// ------------------------------------------------------------------ single sign-on settings
+async function ssoCard() {
+  const el = $("#ssocard"); if (!el) return;
+  if (API.demo) { el.innerHTML = `<h2>Single sign-on</h2><p class="small muted">On your server you can sign in with Google, Microsoft, Authentik, Authelia, Keycloak, Synology SSO Server or any OpenID Connect provider. It isn't available in this preview.</p>`; return; }
+  const c = await API.req("GET", "/api/sso/config");
+  const linkedTo = new Set(c.identities.map(i => i.provider_id));
+  el.innerHTML = `<h2>Single sign-on</h2>
+    <p class="small muted">Sign in with Google, Microsoft, Authentik, Authelia, Keycloak, Synology SSO Server or any OpenID Connect provider. Single sign-on replaces your password only: after a restart you still unlock the vault with your encryption key, which never leaves ScanVault.</p>
+    ${c.providers.length ? `<div class="ssolist">${c.providers.map(p => `<div class="ssorow"><div><b>${esc(p.name)}</b>${p.enabled ? "" : ' <span class="small muted">(off)</span>'}<div class="small muted mono">${esc(p.resolved_issuer)}</div>
+        ${c.identities.filter(i => i.provider_id === p.id).map(i => `<div class="small">Linked: <b>${esc(i.email || "account")}</b>${i.last_login ? ` · last used ${esc(ago(i.last_login))}` : ""} <button class="btn ghost sm" data-unlink="${esc(i.id)}">Unlink</button></div>`).join("")}</div>
+        <div class="row">${p.enabled && !linkedTo.has(p.id) ? `<button class="btn sm primary" data-link="${esc(p.id)}">Link my account</button>` : ""}${p.managed ? '<span class="small muted">Set by environment</span>' : `<button class="btn sm" data-edit="${esc(p.id)}">Edit</button>`}</div></div>`).join("")}</div>` : ""}
+    <div class="row"><button class="btn" id="ssoadd">${I.plus} Add provider</button></div>
+    ${c.providers.length ? `<label class="row small" style="gap:8px"><input type="checkbox" id="ssolocal" ${c.local_login ? "checked" : ""} ${c.local_login_forced ? "disabled" : ""}> Allow password sign-in${c.local_login_forced ? " (forced on by SCANVAULT_FORCE_LOCAL_LOGIN)" : ""}</label>
+      <p class="small muted">Turn this off only after linking an account above. If your identity provider is ever unreachable, set <span class="mono">SCANVAULT_FORCE_LOCAL_LOGIN=1</span> and restart to get password sign-in back.</p>` : ""}`;
+  $("#ssoadd", el).onclick = () => ssoProviderForm(c);
+  $$("[data-edit]", el).forEach(b => b.onclick = () => ssoProviderForm(c, c.providers.find(p => p.id === b.dataset.edit)));
+  $$("[data-link]", el).forEach(b => b.onclick = async () => {
+    if (API.demo) return toast("Single sign-on isn't available in this preview.");
+    try { const r = await API.req("POST", `/api/auth/sso/${encodeURIComponent(b.dataset.link)}/link`); location.href = r.url; } catch (e) { handleErr(e); }
+  });
+  $$("[data-unlink]", el).forEach(b => b.onclick = async () => {
+    if (!await confirmBox("Unlink account", "You won't be able to sign in with this account until you link it again.", "Unlink")) return;
+    try { const r = await API.req("DELETE", `/api/sso/identities/${encodeURIComponent(b.dataset.unlink)}`); if (r.local_login && !c.local_login) toast("Password sign-in was turned back on"); ssoCard(); } catch (e) { handleErr(e); }
+  });
+  const cb = $("#ssolocal", el);
+  if (cb) cb.onchange = async () => { try { await API.req("PUT", "/api/sso/settings", { local_login: cb.checked }); toast(cb.checked ? "Password sign-in on" : "Password sign-in off"); } catch (e) { cb.checked = !cb.checked; handleErr(e); } };
+}
+
+function ssoProviderForm(c, p) {
+  const presets = c.presets;
+  let preset = p ? p.preset : "google";
+  const mm = modal(p ? "Edit sign-in provider" : "Add sign-in provider", `<form class="form" id="sf"></form>`, { footer: `${p ? '<button class="btn danger" id="sdel" type="button">Remove</button><span class="spacer"></span>' : ""}<button class="btn" data-close>Cancel</button><button class="btn primary" form="sf" id="ssave">Save</button>`, wide: true });
+  const f = $("#sf", mm.el), E = n => f.elements.namedItem(n);
+  const draw = () => {
+    const pr = presets[preset], vals = p && p.preset === preset ? p.fields : {};
+    f.innerHTML = `<label class="f">Provider<select name="preset" ${p ? "disabled" : ""}>${Object.entries(presets).map(([k, v]) => `<option value="${k}" ${k === preset ? "selected" : ""}>${esc(v.name)}</option>`).join("")}</select></label>
+      <div class="note info">${I.info}<div class="small">${esc(pr.help)}</div></div>
+      <label class="f">Redirect URI <span class="hint">register this with the provider</span><div class="row" style="flex-wrap:nowrap"><input readonly value="${esc(c.redirect_uri)}" class="mono" style="flex:1"><button type="button" class="btn sm" id="cpy">Copy</button></div></label>
+      <label class="f">Button label<input name="name" value="${esc(p ? p.name : pr.name)}" maxlength="60"></label>
+      ${preset === "generic" ? `<label class="f">Issuer URL<input name="issuer" required placeholder="https://auth.example.com" value="${esc(p ? p.issuer : "")}"></label>` : ""}
+      ${pr.fields.map(x => `<label class="f">${esc(x.label)}<input name="fld_${x.key}" required placeholder="${esc(x.placeholder || "")}" value="${esc(vals[x.key] ?? x.default ?? "")}"></label>`).join("")}
+      <label class="f">Client ID<input name="client_id" required autocomplete="off" value="${esc(p ? p.client_id : "")}"></label>
+      <label class="f">Client secret ${p && p.has_secret ? '<span class="hint">saved; leave blank to keep</span>' : '<span class="hint">leave blank for a public client</span>'}<input name="client_secret" type="password" autocomplete="off"></label>
+      <label class="f">Scopes<input name="scopes" value="${esc(p ? p.scopes : "openid email profile")}"></label>
+      <label class="row small" style="gap:8px"><input type="checkbox" name="enabled" ${!p || p.enabled ? "checked" : ""}> Show on the sign-in page</label>
+      <p class="err" id="serr"></p>`;
+    $("select", f).onchange = e => { preset = e.target.value; draw(); };
+    $("#cpy", f).onclick = () => copyText(c.redirect_uri);
+  };
+  draw();
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const body = { preset, name: E("name").value, client_id: E("client_id").value, scopes: E("scopes").value, enabled: E("enabled").checked, fields: {} };
+    if (E("issuer")) body.issuer = E("issuer").value;
+    presets[preset].fields.forEach(x => body.fields[x.key] = E("fld_" + x.key).value);
+    if (E("client_secret").value) body.client_secret = E("client_secret").value;
+    const btn = $("#ssave", mm.el); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Checking provider…';
+    try { await API.req(p ? "PUT" : "POST", p ? `/api/sso/providers/${encodeURIComponent(p.id)}` : "/api/sso/providers", body); mm.close(); toast(p ? "Provider saved" : "Provider added. Now link your account."); ssoCard(); }
+    catch (er) { $("#serr", f).textContent = er.message; btn.disabled = false; btn.textContent = "Save"; }
+  };
+  const del = $("#sdel", mm.el);
+  if (del) del.onclick = async () => {
+    if (!await confirmBox("Remove provider", `Accounts linked through ${esc(p.name)} will be unlinked.`, "Remove")) return;
+    try { await API.req("DELETE", `/api/sso/providers/${encodeURIComponent(p.id)}`); mm.close(); toast("Provider removed"); ssoCard(); } catch (er) { handleErr(er); }
+  };
 }
 
 boot();

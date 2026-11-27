@@ -39,6 +39,10 @@ CREATE TABLE IF NOT EXISTS backup_targets (
 CREATE TABLE IF NOT EXISTS backup_runs (
   id TEXT PRIMARY KEY, target_id TEXT, started_at REAL NOT NULL, finished_at REAL,
   status TEXT NOT NULL, message TEXT, size INTEGER, filename TEXT);
+CREATE TABLE IF NOT EXISTS user_identities (
+  id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  provider_id TEXT NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, email TEXT,
+  created_at REAL NOT NULL, last_login REAL, UNIQUE(issuer, subject));
 """
 
 
@@ -69,6 +73,8 @@ class Store:
             c.row_factory = sqlite3.Row
             c.execute("PRAGMA foreign_keys=ON")
             c.execute("PRAGMA journal_mode=WAL")
+            # A restored backup may predate newer tables; create any that are missing.
+            c.executescript(SCHEMA)
             self._local.c = c
             self._local.gen = self.generation
         return c
