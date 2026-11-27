@@ -111,6 +111,17 @@ def confirm(c, page, action="allow"):
     return r
 
 
+def sso_error(resp):
+    """The sign-in error the server handed to the page (in a short-lived cookie, never the URL)."""
+    from urllib.parse import unquote
+
+    assert "sso_error=1" in resp.headers["location"]
+    for v in resp.headers.get_list("set-cookie"):
+        if v.startswith("sv_sso_error="):
+            return unquote(v.split(";", 1)[0].split("=", 1)[1])
+    raise AssertionError("no sso error cookie")
+
+
 def fragment_params(location):
     path, _, qs = location.partition("?")
     return path, {k: v[0] for k, v in parse_qs(qs).items()}
@@ -156,7 +167,7 @@ def test_unlinked_identity_cannot_sign_in(env):
     cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{p['id']}/start", follow_redirects=False))
     r = c.get(cb, follow_redirects=False)
     path, q = fragment_params(r.headers["location"])
-    assert path == "/#/" and "isn't linked" in q["sso_error"]
+    assert path == "/#/" and "isn't linked" in sso_error(r)
 
 
 def test_link_then_sign_in_web(env):
@@ -198,12 +209,12 @@ def test_callback_binding_and_token_checks(env):
     cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{pid}/start", follow_redirects=False))
     c.cookies.clear()
     r = c.get(cb, follow_redirects=False)
-    assert "different browser" in fragment_params(r.headers["location"])[1]["sso_error"]
+    assert "different browser" in sso_error(r)
 
     # replayed state
     cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{pid}/start", follow_redirects=False))
     c.get(cb, follow_redirects=False)
-    assert "expired" in fragment_params(c.get(cb, follow_redirects=False).headers["location"])[1]["sso_error"]
+    assert "expired" in sso_error(c.get(cb, follow_redirects=False))
 
     for bad in ({"nonce": "wrong"}, {"aud": "someone-else"}, {"iss": "https://other.example.com"}, {"exp": int(time.time()) - 3600}):
         idp.override = bad
@@ -221,7 +232,7 @@ def test_callback_binding_and_token_checks(env):
     # IdP-reported error
     cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{pid}/start", follow_redirects=False))
     r = c.get(cb.replace("code=abc", "error=access_denied&error_description=User+cancelled"), follow_redirects=False)
-    assert fragment_params(r.headers["location"])[1]["sso_error"] == "User cancelled"
+    assert sso_error(r) == "User cancelled"
 
 
 def test_mobile_app_flow(env):
@@ -294,8 +305,8 @@ def test_identity_linked_to_one_account_only(env):
     r = c.post(f"/api/auth/sso/{pid}/link", json={"password": "pw-0987654321"}, headers={**B2, **H})
     q = {k: v[0] for k, v in parse_qs(urlparse(r.json()["url"]).query).items()}
     idp.nonce = q["nonce"]
-    loc = c.get(f"/api/auth/sso/callback?code=abc&state={q['state']}", follow_redirects=False).headers["location"]
-    assert "already linked" in fragment_params(loc)[1]["sso_error"]
+    r = c.get(f"/api/auth/sso/callback?code=abc&state={q['state']}", follow_redirects=False)
+    assert "already linked" in sso_error(r)
 
 
 def test_env_provider(env, monkeypatch):
@@ -390,7 +401,7 @@ def test_identity_signs_in_only_through_its_provider(env):
     link(c, idp, B, a["id"])
     c.cookies.clear()
     cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{b['id']}/start", follow_redirects=False))
-    assert "isn't linked" in fragment_params(c.get(cb, follow_redirects=False).headers["location"])[1]["sso_error"]
+    assert "isn't linked" in sso_error(c.get(cb, follow_redirects=False))
     cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{a['id']}/start", follow_redirects=False))
     assert fragment_params(c.get(cb, follow_redirects=False).headers["location"])[0] == "/#/sso"
 
@@ -401,8 +412,8 @@ def test_response_iss_must_match(env):
     link(c, idp, B)
     c.cookies.clear()
     cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{p['id']}/start", follow_redirects=False))
-    loc = c.get(cb + "&iss=https%3A%2F%2Fevil.example.com", follow_redirects=False).headers["location"]
-    assert "different provider" in fragment_params(loc)[1]["sso_error"]
+    r = c.get(cb + "&iss=https%3A%2F%2Fevil.example.com", follow_redirects=False)
+    assert "different provider" in sso_error(r)
 
 
 @pytest.mark.parametrize("bad", [

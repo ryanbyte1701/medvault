@@ -21,8 +21,12 @@ def test_ssh_upload_list_prune_download(tmp_path, protocol):
     saved = {}
     cfg = {"protocol": protocol, "host": "127.0.0.1", "port": srv.port, "username": "u", "private_key": keyfile.read_text(), "remote_dir": "nested/backups"}
     t = targets.make("sftp", cfg, saved.update)
+    first = t.test()  # first contact only pins the host key; nothing is signed in
+    assert "pinned its host key" in first and saved["host_key"].startswith("SHA256:")
+    assert srv.auth_attempts == 0
+    cfg["host_key"] = saved["host_key"]
     msg = t.test()
-    assert "Connected" in msg and saved["host_key"].startswith("SHA256:")
+    assert "Connected" in msg
     src = tmp_path / "a.bin"
     src.write_bytes(b"ciphertext" * 1000)
     for i in range(4):

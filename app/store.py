@@ -85,6 +85,7 @@ class Store:
             c.row_factory = sqlite3.Row
             c.execute("PRAGMA foreign_keys=ON")
             c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA synchronous=FULL")  # a commit survives power loss (key changes rely on it)
             # A restored backup may predate newer tables; create any that are missing.
             c.executescript(SCHEMA)
             cols = {r[1] for r in c.execute("PRAGMA table_info(sessions)")}
@@ -121,9 +122,9 @@ class Store:
 
     def write_keystore(self, ks: dict) -> None:
         tmp = self.keystore_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(ks, indent=2))
-        os.chmod(tmp, 0o600)
+        write_durable(tmp, json.dumps(ks, indent=2).encode())
         tmp.replace(self.keystore_path)
+        fsync_dir(self.keystore_path.parent)
 
     # ---- blobs
     def blob_path(self, file_id: str) -> Path:
@@ -162,6 +163,42 @@ class Store:
                 return
         for p in paths:
             p.unlink(missing_ok=True)
+
+
+def fsync_dir(path: Path) -> None:
+    """Make renames and new files in a directory survive power loss."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def fsync_tree(root: Path) -> None:
+    """fsync every file and directory below root (used before a key change commits)."""
+    for d, _dirs, files in os.walk(root):
+        for f in files:
+            fd = os.open(os.path.join(d, f), os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        fsync_dir(Path(d))
+
+
+def write_durable(path: Path, data: bytes, mode: int = 0o600) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.chmod(path, mode)
 
 
 def seal(mk: bytes, obj, ctx: str) -> bytes:

@@ -19,8 +19,10 @@ services:
       # when you are not on http://localhost:8080 (e.g. https://scans.example.com)
       SCANVAULT_PUBLIC_URL: ${SCANVAULT_PUBLIC_URL:-}
       SCANVAULT_MAX_UPLOAD_MB: ${SCANVAULT_MAX_UPLOAD_MB:-2048}
-      # Trust X-Forwarded-Proto/For only from your reverse proxy
-      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
+      # Trust X-Forwarded-Proto/For only from your reverse proxy. A proxy on
+      # this host reaches the container from the Docker bridge (172.16.0.0/12);
+      # the port above is bound to 127.0.0.1, so nothing else can connect.
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1,172.16.0.0/12}
       # Lock the vault after this many idle minutes (0 = stay unlocked)
       SCANVAULT_AUTO_LOCK_MINUTES: ${SCANVAULT_AUTO_LOCK_MINUTES:-0}
       PUID: ${PUID:-10001}
@@ -44,6 +46,8 @@ services:
     cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]
     security_opt:
       - no-new-privileges:true
+    ulimits:
+      nofile: {soft: 65536, hard: 65536}
 
 volumes:
   scanvault-data:

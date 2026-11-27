@@ -96,9 +96,15 @@ Data lives in the `scanvault-data` volume (`/data` in the container).
 
 The compose file publishes the port on `127.0.0.1` only. To use ScanVault from
 other devices put an HTTPS reverse proxy in front of it (Caddy, Traefik, nginx,
-Tailscale Serve, your NAS's proxy) and set `FORWARDED_ALLOW_IPS` to the
-proxy's address so it alone may set `X-Forwarded-Proto`. Over plain `http://`
+Tailscale Serve, your NAS's proxy). `FORWARDED_ALLOW_IPS` says who may set
+`X-Forwarded-Proto`; the compose file trusts `127.0.0.1` and the Docker bridge
+(`172.16.0.0/12`), which is where a proxy on the same host connects from. Set
+it to your proxy's address if the proxy runs elsewhere. Over plain `http://`
 the setup screen warns you that keys would cross the network in clear.
+
+A bare `docker run -p 8080:8080` publishes plain HTTP on every interface of
+the host. Use `-p 127.0.0.1:8080:8080` and a proxy instead, as the compose
+files do.
 
 **Synology NAS:** see [deploy/synology/README.md](deploy/synology/README.md)
 for a Container Manager project with `/volume1` paths, PUID/PGID, a DSM reverse
@@ -126,7 +132,14 @@ many idle minutes. Sessions last at most 30 days and end after
 `SCANVAULT_SESSION_IDLE_DAYS` (default 14) without use. Changing the sign-in
 password signs out every other device; Settings also has *Sign out other
 devices*. Sign-in, unlock and key checks are rate limited (5 free failures,
-then growing delays, per client and per account).
+then growing delays, per client and per account). The per-account limit is
+skipped by a browser or app that has signed in to that account before (it
+holds a device token that changes with the password), so failed guesses from
+strangers can't lock you out of your own vault.
+
+New encryption keys are checked for strength: four or more random words, or
+a long mix of letters, digits and symbols. Common passwords and repeated
+characters are refused.
 
 ### Phones
 
@@ -201,10 +214,10 @@ removed only after it finishes. Session tokens are never included.
 |---|---|---|
 | **Google Drive** | Google account (OAuth, `drive.file` scope) or service account JSON | For OAuth create a *Web application* client in Google Cloud Console, enable the Drive API, add the redirect URI shown in the form, then click *Connect*. Service accounts need a Shared Drive folder shared with them. Uploads are resumable in 8 MiB chunks. |
 | **Box** | Box account (OAuth 2.0) or Custom App with Client Credentials Grant | Rotating refresh tokens are persisted after each use. Files over 50 MB use chunked upload sessions with SHA-1 digests. |
-| **OneDrive** | Microsoft account or work/school (Entra ID app, delegated `Files.ReadWrite.AppFolder offline_access`) | Register an app, add the redirect URI shown in the form as a *Web* platform, create a client secret, then click *Connect*. Backups go to the app's own folder (`Apps/<app name>`); the token can't read the rest of the drive. Upload sessions in 10 MiB chunks. Rotated refresh tokens are saved. |
+| **OneDrive** | Microsoft account or work/school (Entra ID app, delegated `Files.ReadWrite.AppFolder offline_access`) | Register an app, add the redirect URI shown in the form as a *Web* platform, create a client secret, then click *Connect*. Backups go to the app's own folder (`Apps/<app name>`); the token can't read the rest of the drive. Upload sessions in 10 MiB chunks. Rotated refresh tokens are saved. **Upgrading from 0.1:** add the narrower permission to the app registration and click *Connect* again; backups made before the upgrade stay in the drive root (they aren't listed or pruned any more, so move them into `Apps/<app name>` or delete them yourself). |
 | **Dropbox** | Dropbox app (scoped, App folder or Full Dropbox), offline refresh token | Permissions: `files.content.write`, `files.content.read`, `files.metadata.read`. Files over 150 MB use upload sessions. |
-| **S3 / object storage** | Access key + secret (required; the host's own credentials are never used) | Presets for Amazon S3, Backblaze B2, Wasabi, Cloudflare R2, Synology C2 and MinIO, or any endpoint URL. Multipart uploads, optional storage class and prefix. Bucket versioning or object lock is recommended. With a write-only key set *Keep last* to 0 and expire old backups with a lifecycle rule. |
-| **SFTP / SCP** | Password and/or private key (Ed25519, ECDSA, RSA) | The host key is pinned on the first successful *Test*. A changed key blocks the connection. Both protocols upload to `.part` and rename only a complete file; failed uploads are cleaned up. |
+| **S3 / object storage** | Access key + secret (required; the host's own credentials are never used) | Presets for Amazon S3, Backblaze B2, Wasabi, Cloudflare R2, Synology C2 and MinIO, or any `https://` endpoint URL. Multipart uploads, optional storage class and prefix. Bucket versioning or object lock is recommended. With a write-only key set *Keep last* to 0 and expire old backups with a lifecycle rule. |
+| **SFTP / SCP** | Password and/or private key (Ed25519, ECDSA, RSA) | The first *Test* only fetches and pins the server's host key, without signing in; compare the fingerprint it shows with the server's, then press *Test* again. A changed key blocks the connection, and changing the host or port asks for the password or key again. Both protocols upload to `.part` and rename only a complete file; failed uploads are cleaned up. |
 | **SMB share** | Username + password (`DOMAIN\user` supported) | SMB 2/3 to Windows, Synology, QNAP, TrueNAS or Samba, SMB3 encryption is required unless you turn it off. Writes `.part` then renames. |
 | **WebDAV / Nextcloud** | Username + password or app password | HTTPS only. Nextcloud/ownCloud (`…/remote.php/dav/files/USER`), Synology WebDAV Server, Koofr, pCloud and others. A self-signed certificate is pinned by SHA-256 fingerprint on the first *Test* instead of turning checks off. Creates folders and uploads `.part` then MOVE. |
 | **USB / local disk** | None | Any folder mounted into the container under `/backups` (USB drive, second disk, NFS mount); other paths are refused. By default it refuses to run if no disk is mounted there, so backups never fill the system drive. |
@@ -304,7 +317,11 @@ Authenticate with `POST /api/auth/login {username, password}` → `{token, expir
 (the token is in the body for API clients, i.e. requests without the browser's
 `X-ScanVault` header), then send `Authorization: Bearer <token>`. Errors are
 `{"error": "...", "code"?: "..."}`, including validation errors (400). Too many
-failed sign-ins or key checks return **429** with `Retry-After`.
+failed sign-ins or key checks return **429** with `Retry-After`. A successful
+password sign-in also returns `device`: send it back as `device` in later
+`/api/auth/login` bodies so the per-account lockout never applies to this
+app. Mutating requests return **503** `{code: "maintenance"}` while the master
+key is being changed.
 A locked vault returns **423** `{code: "locked"}`; unlock with
 `POST /api/vault/unlock {passphrase}`.
 

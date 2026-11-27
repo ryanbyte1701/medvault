@@ -21,9 +21,10 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qs, quote, urlencode
 
-from fastapi import FastAPI, Form, Request
+import requests
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -33,7 +34,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import backup, crypto, media, sso, targets
 from .forms import Form as UploadForm, FormError, UploadPart, parse_form
 from .spool import Spool, SpoolFull
-from .store import Store, seal, unseal
+from .store import fsync_dir, fsync_tree, write_durable, Store, seal, unseal
 
 VERSION = "0.2.0"
 log = logging.getLogger("scanvault")
@@ -56,6 +57,7 @@ MAX_JSON = 1024 * 1024
 PUBLIC_URL = os.environ.get("SCANVAULT_PUBLIC_URL", "").rstrip("/")
 COOKIE_SECURE = os.environ.get("SCANVAULT_COOKIE_SECURE", "auto")
 MIN_PASSPHRASE = 12
+REKEY_WAIT = 300.0  # seconds a key change waits for running uploads and restores
 API_DOCS = os.environ.get("SCANVAULT_API_DOCS", "").lower() in ("1", "true", "yes")
 
 app = FastAPI(
@@ -68,7 +70,12 @@ app = FastAPI(
 store = Store()
 vault = crypto.Vault()
 backup_lock = threading.Lock()
-_state = {"maintenance": None, "last_activity": time.time(), "setup_code": None}
+_state = {"maintenance": None, "last_activity": time.time(), "setup_code": None, "rekeying": False}
+# Requests that may change stored data (POST, PUT, PATCH, DELETE) currently
+# being handled. A master key change waits for these to finish and refuses new
+# ones, so nothing is written with the old key while files are re-encrypted.
+_inflight = {"n": 0}
+_MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _setup_lock = asyncio.Lock()
 
 
@@ -121,7 +128,17 @@ APP_CSP = (
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
-    resp = await call_next(request)
+    if request.method in _MUTATING:
+        if _state["rekeying"]:
+            resp = JSONResponse({"error": _state["maintenance"] or "Changing the master key", "code": "maintenance"}, status_code=503, headers={"Retry-After": "30"})
+        else:
+            _inflight["n"] += 1
+            try:
+                resp = await call_next(request)
+            finally:
+                _inflight["n"] -= 1
+    else:
+        resp = await call_next(request)
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("Referrer-Policy", "no-referrer")
     resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
@@ -380,7 +397,7 @@ def _header_safe(v) -> str:
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "version": VERSION}
+    return {"status": "ok"}
 
 
 @app.get("/api/status")
@@ -402,7 +419,7 @@ def status(request: Request):
         "maintenance": _state["maintenance"],
         "local_login": local_login_enabled(),
         "sso": [_sso_public(p) for p in _sso_providers()] if setup_complete() else [],
-        "version": VERSION,
+        "version": VERSION if u else None,
     }
 
 
@@ -422,6 +439,36 @@ def _validate_new_passphrase(p: str) -> None:
         raise ApiError(400, "Encryption key is too long")
     if p != p.strip():
         raise ApiError(400, "The encryption key can't start or end with a space")
+    if passphrase_bits(p) < MIN_PASSPHRASE_BITS:
+        raise ApiError(400, "That encryption key is too easy to guess. Use four or more random words (the generator makes six), or a longer mix of letters, digits and symbols.", "weak_passphrase")
+
+
+MIN_PASSPHRASE_BITS = 44
+_COMMON = ("password", "passwort", "qwerty", "azerty", "letmein", "welcome", "scanvault", "123456", "abcdef", "iloveyou", "admin", "monkey", "dragon")
+
+
+def passphrase_bits(p: str) -> float:
+    """A deliberately conservative guess at how hard a passphrase is to guess.
+    Backups can be attacked offline, so this matters more than for a password."""
+    low = p.lower()
+    # Words: about 11 bits each for words a person picked (a random EFF list word is 12.9).
+    words = [w for w in re.split(r"[^a-z]+", low) if len(w) >= 3]
+    word_bits = 11.0 * len(set(words)) if len(words) >= 3 else 0.0
+    # Characters: pool size from the kinds used, length after removing
+    # well-known fragments and squeezing repeats.
+    for c in _COMMON:
+        low = low.replace(c, "")
+    squeezed = re.sub(r"(.)\1+", r"\1", low)
+    eff = min(len(squeezed), 2 * len(set(squeezed)))
+    pool = 0
+    pool += 26 if re.search(r"[a-z]", p) else 0
+    pool += 26 if re.search(r"[A-Z]", p) else 0
+    pool += 10 if re.search(r"[0-9]", p) else 0
+    pool += 33 if re.search(r"[^A-Za-z0-9]", p) else 0
+    char_bits = eff * math.log2(pool) if pool else 0.0
+    if re.fullmatch(r"[0-9]+", p):
+        char_bits = min(char_bits, len(set(p)) * 3.3)
+    return max(word_bits, char_bits)
 
 
 def _new_setup_code() -> str:
@@ -564,15 +611,47 @@ async def login(request: Request):
     password = jstr(j, "password")
     keys = ("ip:" + client_ip(request),)
     login_throttle.attempt(*keys)
-    account_throttle.attempt("user:" + username.lower())
     r = store.conn().execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+    # The per-account limit stops guessing spread over many addresses, but must
+    # not let a stranger lock the owner out: a browser or app that has signed
+    # in successfully before carries a device token and skips it.
+    device = request.cookies.get("sv_device") or jstr(j, "device")
+    known = bool(r) and _device_ok(r, device)
+    if not known:
+        account_throttle.attempt("user:" + username.lower())
     ok = await asyncio.to_thread(crypto.verify_password, password, r["password_hash"] if r else crypto.DUMMY_PASSWORD_HASH)
     if not r or not ok:
         raise ApiError(401, "Wrong username or password")
     login_throttle.success(*keys)
-    account_throttle.reset("user:" + username.lower())
+    if not known:
+        account_throttle.reset("user:" + username.lower())
     tok, exp = new_session(r["id"])
-    return session_response(request, {"expires_at": iso(exp), "unlocked": vault.unlocked}, tok, exp)
+    dev = _device_token(r)
+    body = {"expires_at": iso(exp), "unlocked": vault.unlocked}
+    if not _is_browser(request):
+        body["device"] = dev
+    resp = session_response(request, body, tok, exp)
+    resp.set_cookie("sv_device", dev, max_age=365 * 86400, httponly=True, samesite="strict", secure=_secure(request), path="/api/auth/login")
+    return resp
+
+
+def _device_secret() -> bytes:
+    sec = store.get_config("device_secret")
+    if not sec:
+        sec = secrets.token_hex(32)
+        store.set_config("device_secret", sec)
+    return bytes.fromhex(sec)
+
+
+def _device_token(user) -> str:
+    """Proof that this browser or app signed in to this account before. It is
+    tied to the password hash, so changing the password retires every token."""
+    mac = hmac.new(_device_secret(), f"device:{user['id']}:{user['password_hash']}".encode(), hashlib.sha256).hexdigest()
+    return f"d1.{mac}"
+
+
+def _device_ok(user, token: str | None) -> bool:
+    return bool(token) and hmac.compare_digest(str(token), _device_token(user))
 
 
 @app.post("/api/auth/logout")
@@ -771,9 +850,18 @@ async def rekey(request: Request):
     if _state["maintenance"] or not backup_lock.acquire(blocking=False):
         raise ApiError(409, "A backup or another key change is running. Try again when it has finished.")
     _state["maintenance"] = "Changing the master key. This can take a while for large vaults."
+    _state["rekeying"] = True
     try:
+        # Let uploads, restores and deletes that are already running finish
+        # first (this request is the one in-flight change that remains).
+        deadline = time.monotonic() + REKEY_WAIT
+        while _inflight["n"] > 1:
+            if time.monotonic() > deadline:
+                raise ApiError(409, "Uploads or other changes are still running. Try again when they have finished.", "busy")
+            await asyncio.sleep(0.05)
         new_master = await asyncio.to_thread(_rekey, master, new_pass)
     finally:
+        _state["rekeying"] = False
         _state["maintenance"] = None
         backup_lock.release()
     vault.master_key = new_master
@@ -806,9 +894,11 @@ def _rekey(old: bytes, passphrase: str) -> bytes:
             ks = store.keystore()
             nks = crypto.wrap_master_key(new, passphrase, ks["vault_id"])
             nks["created"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            new_ks_path.write_text(json.dumps(nks, indent=2))
-            os.chmod(new_ks_path, 0o600)
-            journal.write_text(json.dumps({"id": jid}))
+            # Everything the commit below points at must be on disk first.
+            fsync_tree(work)
+            write_durable(new_ks_path, json.dumps(nks, indent=2).encode())
+            write_durable(journal, json.dumps({"id": jid}).encode())
+            fsync_dir(store.dir)
             c.execute("BEGIN IMMEDIATE")
             try:
                 for t, ctx in (("patients", "patient"), ("studies", "study")):
@@ -855,9 +945,11 @@ def _finish_rekey(jid: str) -> None:
             elif target.exists():
                 shutil.rmtree(target)
             src.rename(target)
+            fsync_dir(store.dir)
         shutil.rmtree(old, ignore_errors=True)
     if new_ks_path.exists():
         new_ks_path.replace(store.keystore_path)
+        fsync_dir(store.dir)
     shutil.rmtree(work, ignore_errors=True)
     journal.unlink(missing_ok=True)
 
@@ -1221,13 +1313,18 @@ def _record(res: dict, f: dict) -> None:
         res["_sids"].append(f["study_id"])
 
 
-def _expand(sp: Spool, filename: str, out: list, skipped: list, budget: dict, depth: int = 0) -> None:
-    """Flatten an upload into (spool, name) items: zips (one level of nesting)
-    are expanded with per-member and total size limits."""
+def _expand(sp: Spool, filename: str, skipped: list, budget: dict, want=lambda key: True, key: tuple = (), depth: int = 0):
+    """Flatten an upload into a stream of (key, spool, name, owned) items. Zips
+    (one level of nesting) are expanded with per-member and total size limits.
+    Members are extracted one at a time and the caller closes each owned spool
+    before asking for the next, so a CD export with thousands of images needs
+    only a couple of open files. ``want(key)`` is asked before a member is
+    extracted, so a second pass can skip what the first already handled."""
     with sp.open() as fp:
         kind_raw, _ = media.sniff(fp, filename)
     if kind_raw != "zip":
-        out.append((sp, filename, False))
+        if want(key):
+            yield key, sp, filename, False
         return
     try:
         z = zipfile.ZipFile(sp.open())
@@ -1237,7 +1334,8 @@ def _expand(sp: Spool, filename: str, out: list, skipped: list, budget: dict, de
         members = [m for m in z.infolist() if not m.is_dir()]
         if len(members) > 20000:
             raise ApiError(400, "ZIP has too many entries")
-        for m in members:
+        for idx, m in enumerate(members):
+            mkey = key + (idx,)
             path = m.filename.replace("\\", "/")
             base = clean_filename(path, "")
             if (
@@ -1255,69 +1353,84 @@ def _expand(sp: Spool, filename: str, out: list, skipped: list, budget: dict, de
                 continue
             if m.file_size > MAX_UPLOAD:
                 raise ApiError(413, f"{base} inside the ZIP is larger than the upload limit")
+            if not want(mkey):  # also true for a nested zip holding something wanted
+                continue
             member = Spool(store.tmp_dir, limit=min(MAX_UPLOAD, max(0, MAX_ZIP_TOTAL - budget["used"])) + 1)
+            owned = True
             try:
-                with z.open(m) as src:
-                    while chunk := src.read(1 << 20):
-                        member.write(chunk)
-                        if member.size > MAX_UPLOAD:
-                            raise SpoolFull(MAX_UPLOAD)
-                member.finish()
-            except SpoolFull:
-                member.close()
-                raise ApiError(413, "The ZIP expands to more data than allowed (zip bomb protection)")
-            except (zipfile.BadZipFile, RuntimeError, OSError, EOFError, zlib.error) as exc:
-                member.close()
-                skipped.append(f"{m.filename} (unreadable: {exc.__class__.__name__})")
-                continue
-            budget["used"] += member.size
-            if budget["used"] > MAX_ZIP_TOTAL:
-                member.close()
-                raise ApiError(413, "The ZIP expands to more data than allowed (zip bomb protection)")
-            with member.open() as fp:
-                k, _ = media.sniff(fp, base)
-            if k == "zip" and depth == 0:
                 try:
-                    _expand(member, base, out, skipped, budget, depth + 1)
-                finally:
+                    with z.open(m) as src:
+                        while chunk := src.read(1 << 20):
+                            member.write(chunk)
+                            if member.size > MAX_UPLOAD:
+                                raise SpoolFull(MAX_UPLOAD)
+                    member.finish()
+                except SpoolFull:
+                    raise ApiError(413, "The ZIP expands to more data than allowed (zip bomb protection)")
+                except (zipfile.BadZipFile, RuntimeError, OSError, EOFError, zlib.error) as exc:
+                    skipped.append(f"{m.filename} (unreadable: {exc.__class__.__name__})")
+                    continue
+                budget["used"] += member.size
+                if budget["used"] > MAX_ZIP_TOTAL:
+                    raise ApiError(413, "The ZIP expands to more data than allowed (zip bomb protection)")
+                with member.open() as fp:
+                    k, _ = media.sniff(fp, base)
+                if k == "zip" and depth == 0:
+                    yield from _expand(member, base, skipped, budget, want, mkey, depth + 1)
+                    continue
+                if k in ("other", "zip", "empty"):
+                    skipped.append(m.filename)
+                    continue
+                owned = False  # handed to the caller, who closes it
+                yield mkey, member, base, True
+            finally:
+                if owned:
                     member.close()
-                continue
-            if k in ("other", "zip", "empty"):
-                member.close()
-                skipped.append(m.filename)
-                continue
-            out.append((member, base, True))
 
 
 def _ingest_all(parts: list[UploadPart], pid: str, sid: str | None, master: bytes, kind: str | None) -> dict:
     """DICOM (also from CD/zip exports) first; if it all belongs to one study,
-    the reports and photos uploaded alongside join that study."""
+    the reports and photos uploaded alongside join that study.
+
+    Two passes over the upload: the first ingests imaging as each member is
+    extracted and notes where everything else is, the second extracts and
+    ingests only those other files."""
     res: dict = {"files": [], "skipped": [], "_sids": []}
-    items: list = []
+    loose: set = set()
+    loose_prefixes: set = set()
     budget = {"used": 0}
-    try:
-        for p in parts:
-            _expand(p.spool, p.filename or "file", items, res["skipped"], budget)
-        sniffed = []
-        for sp, name, _owned in items:
-            with sp.open() as fp:
-                sniffed.append((sp, name, media.sniff(fp, name)[0]))
-        imaging = [(sp, n) for sp, n, k in sniffed if k == "dicom"]
-        loose = [(sp, n) for sp, n, k in sniffed if k != "dicom"]
-        for sp, n in imaging:
-            _record(res, _ingest(sp, n, pid, sid, master, kind))
-        target = sid or (res["_sids"][0] if len(res["_sids"]) == 1 else None)
-        for sp, n in loose:
+    for i, p in enumerate(parts):
+        for key, sp, name, owned in _expand(p.spool, p.filename or "file", res["skipped"], budget, key=(i,)):
             try:
-                _record(res, _ingest(sp, n, pid, target, master, kind))
+                with sp.open() as fp:
+                    k = media.sniff(fp, name)[0]
+                if k == "dicom":
+                    _record(res, _ingest(sp, name, pid, sid, master, kind))
+                else:
+                    loose.add(key)
+                    for n in range(1, len(key)):
+                        loose_prefixes.add(key[:n])
+            finally:
+                if owned:
+                    sp.close()
+    if not loose:
+        return res
+    target = sid or (res["_sids"][0] if len(res["_sids"]) == 1 else None)
+    want = lambda key: key in loose or key in loose_prefixes  # noqa: E731
+    again = {"used": 0}
+    for i, p in enumerate(parts):
+        if (i,) not in loose and (i,) not in loose_prefixes:
+            continue
+        for key, sp, name, owned in _expand(p.spool, p.filename or "file", [], again, want, key=(i,)):
+            try:
+                _record(res, _ingest(sp, name, pid, target, master, kind))
             except ApiError as exc:
                 if exc.status != 400:
                     raise
-                res["skipped"].append(f"{n} ({exc.msg})")
-    finally:
-        for sp, _n, owned in items:
-            if owned:
-                sp.close()
+                res["skipped"].append(f"{name} ({exc.msg})")
+            finally:
+                if owned:
+                    sp.close()
     return res
 
 
@@ -1677,6 +1790,19 @@ def _merge_config(type_: str, old: dict, new: dict) -> dict:
                 cfg.pop(k, None)  # null = remove it
                 continue
         cfg[k] = v.strip() if isinstance(v, str) and k not in NO_STRIP else v
+    def same(k):
+        a, b = old.get(k), cfg.get(k)
+        if k == "port":
+            a, b = str(a or ""), str(b or "")
+            a, b = a if a not in ("", "22") else "", b if b not in ("", "22") else ""
+        return (a or "") == (b or "")
+
+    if any(old.get(k) for k in cls.location_fields) and not all(same(k) for k in cls.location_fields):
+        for k in cls.secret_fields:
+            if new.get(k) in (None, ""):
+                cfg.pop(k, None)  # new server: secrets must be entered again
+        if type_ == "webdav" and new.get("tls_fingerprint") in (None, old.get("tls_fingerprint")):
+            cfg.pop("tls_fingerprint", None)
     if type_ == "sftp":
         def port(x):
             try:
@@ -1863,11 +1989,16 @@ async def download_backup(request: Request):
     name = backup.backup_name(store.keystore()["vault_id"])
     path = _tmp_name(name)
     started = time.time()
+    if _state["rekeying"]:
+        raise ApiError(503, _state["maintenance"] or "Changing the master key", "maintenance")
+    _inflight["n"] += 1  # a key change waits for this archive to be written
     try:
         await asyncio.to_thread(backup.create_archive, store, master, path, VERSION, bool(store.get_config("backup_include_wrapped_key", False)))
     except Exception:
         path.unlink(missing_ok=True)
         raise
+    finally:
+        _inflight["n"] -= 1
     size = path.stat().st_size
 
     def done():
@@ -1979,8 +2110,8 @@ def oauth_callback(provider: str, request: Request, state: str = "", code: str =
     tgt = _make_target(row, master)
     try:
         tgt.exchange_code(code, _redirect_uri(request, provider))  # type: ignore[attr-defined]
-    except targets.TargetError as exc:
-        log.warning("OAuth exchange failed: %s", exc)
+    except (targets.TargetError, requests.RequestException, ValueError) as exc:
+        log.warning("OAuth exchange failed: %s", exc.__class__.__name__ if not isinstance(exc, targets.TargetError) else exc)
         return RedirectResponse("/#/backups?oauth=error&msg=exchange")
     return RedirectResponse("/#/backups?oauth=ok")
 
@@ -2067,15 +2198,21 @@ def _recent_sso(u: dict) -> bool:
     return bool(u.get("identity_id")) and time.time() - (u.get("session_created") or 0) < REAUTH_SECONDS
 
 
-def _reauth(u: dict, j: dict) -> None:
+async def _reauth(u: dict, j: dict) -> None:
     """Changes that add a way to sign in need the password, or an SSO sign-in in
-    the last 10 minutes, so a stolen session can't plant a backdoor."""
+    the last 10 minutes, so a stolen session can't plant a backdoor. Wrong
+    passwords count against the same limits as the sign-in form."""
     if _recent_sso(u):
         return
-    r = store.conn().execute("SELECT password_hash FROM users WHERE id=?", (u["id"],)).fetchone()
-    if not r or not crypto.verify_password(str(j.get("password") or ""), r["password_hash"]):
-        time.sleep(0.5)
+    pw = j.get("password")
+    if not isinstance(pw, str) or not pw:
         raise ApiError(403, "Enter your ScanVault password to confirm this change", "reauth_required")
+    key = "reauth:" + u["id"]
+    login_throttle.attempt(key)
+    r = store.conn().execute("SELECT password_hash FROM users WHERE id=?", (u["id"],)).fetchone()
+    if not r or not await asyncio.to_thread(crypto.verify_password, pw, r["password_hash"]):
+        raise ApiError(403, "Enter your ScanVault password to confirm this change", "reauth_required")
+    login_throttle.success(key)
 
 
 def _revoke_identity_sessions(where: str, args: tuple) -> None:
@@ -2140,7 +2277,15 @@ def _app_redirect(app: dict, **params) -> RedirectResponse:
 
 
 def _web_redirect(path: str, **params) -> RedirectResponse:
-    return RedirectResponse(f"/#/{path}?{urlencode(params)}" if params else f"/#/{path}")
+    # An error message travels in a short-lived cookie that only this server
+    # can set, not in the URL, so a crafted link can't put words on the page.
+    err = params.pop("sso_error", None)
+    if err:
+        params["sso_error"] = "1"
+    resp = RedirectResponse(f"/#/{path}?{urlencode(params)}" if params else f"/#/{path}")
+    if err:
+        resp.set_cookie("sv_sso_error", quote(str(err)[:300]), max_age=120, samesite="lax", path="/")
+    return resp
 
 
 @app.get("/api/auth/sso/{pid}/start")
@@ -2177,7 +2322,7 @@ async def sso_link_start(pid: str, request: Request):
         j = await request.json()
     except Exception:
         j = {}
-    _reauth(u, j if isinstance(j, dict) else {})
+    await _reauth(u, j if isinstance(j, dict) else {})
     p = _sso_provider(pid)
     url, binding = _sso_flow(request, p, "link", user_id=u["id"])
     return _set_binding(request, JSONResponse({"url": url}), binding)
@@ -2282,7 +2427,19 @@ button.go{{background:#0b5d63;color:#fff;border-color:#0b5d63}}.warn{{font-size:
 
 
 @app.post("/api/auth/sso/app-confirm")
-def sso_app_confirm(request: Request, cid: str = Form(""), action: str = Form("")):
+async def sso_app_confirm(request: Request):
+    # A tiny urlencoded form; read it by hand with a cap so nobody can stream a
+    # large multipart body to disk on this unauthenticated endpoint.
+    ctype = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if ctype != "application/x-www-form-urlencoded":
+        return HTMLResponse("<!doctype html><p>Unsupported request.</p>", status_code=415)
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > 4096:
+            return HTMLResponse("<!doctype html><p>Request too large.</p>", status_code=413)
+    fields = {k: v[0] for k, v in parse_qs(buf.decode("latin-1"), keep_blank_values=True).items()}
+    cid, action = fields.get("cid", ""), fields.get("action", "")
     c = _sso_confirms.pop(cid)
     if not c:
         return HTMLResponse("<!doctype html><p>This sign-in expired. Go back to the ScanVault app and try again.</p>", status_code=400)
@@ -2375,7 +2532,7 @@ def _sso_provider_from(j: dict, old: dict | None = None) -> dict:
 async def sso_create_provider(request: Request):
     u = _require_admin(request)
     j = await body_json(request)
-    _reauth(u, j)
+    await _reauth(u, j)
     p = _sso_provider_from(j)
     p["id"] = crypto.random_id()
     p.setdefault("enabled", True)
@@ -2389,7 +2546,7 @@ async def sso_create_provider(request: Request):
 async def sso_update_provider(pid: str, request: Request):
     u = _require_admin(request)
     j = await body_json(request)
-    _reauth(u, j)
+    await _reauth(u, j)
     cfg = _sso_cfg()
     for i, old in enumerate(cfg["providers"]):
         if old["id"] == pid:
@@ -2440,7 +2597,7 @@ async def sso_settings(request: Request):
     if "local_login" in j:
         want = bool(j["local_login"])
         if not want and cfg["local_login"]:
-            _reauth(u, j)
+            await _reauth(u, j)
         if not want:
             ids = {p["id"] for p in _sso_providers()}
             mine = [r for r in store.conn().execute("SELECT provider_id FROM user_identities WHERE user_id=?", (u["id"],)) if r["provider_id"] in ids]

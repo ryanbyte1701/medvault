@@ -184,7 +184,7 @@ async function boot() {
   const OAUTH_ERR = { denied: "the sign-in was cancelled or refused", expired: "the sign-in took too long, please try again", locked: "the vault is locked", exchange: "the provider did not accept the sign-in" };
   if (q.get("oauth") === "error") toast("Connecting the account failed: " + (OAUTH_ERR[q.get("msg")] || "unknown error"));
   if (q.get("sso") === "linked") toast("Single sign-on account linked");
-  if (q.get("sso_error") && S.status.authenticated) toast(q.get("sso_error"));
+  if (q.get("sso_error") && S.status.authenticated) { const m = takeSsoError(); if (m) toast(m); }
 }
 
 function handleErr(e) {
@@ -460,9 +460,18 @@ function viewRecoveryNag() {
   $("#later").onclick = () => { sessionStorage.setItem("sv-rk-later", "1"); render(); };
 }
 
+// The server hands sign-in errors over in a short-lived cookie (never via the
+// URL, which anyone can craft); read it once and clear it.
+function takeSsoError() {
+  const m = document.cookie.split("; ").find(c => c.startsWith("sv_sso_error="));
+  if (!m) return "";
+  document.cookie = "sv_sso_error=; Max-Age=0; Path=/; SameSite=Lax";
+  try { return decodeURIComponent(m.slice("sv_sso_error=".length)).slice(0, 300); } catch { return ""; }
+}
+
 function viewLogin() {
   const st = S.status, providers = st.sso || [], local = st.local_login !== false;
-  const ssoErr = S.ssoError || new URLSearchParams(location.hash.split("?")[1] || "").get("sso_error") || "";
+  const ssoErr = S.ssoError || takeSsoError();
   S.ssoError = null;
   const ssoBtns = providers.map(p => `<a class="btn ${local ? "" : "primary"} ssobtn" href="/api/auth/sso/${encodeURIComponent(p.id)}/start">${I.key} Continue with ${esc(p.name)}</a>`).join("");
   authLayout(`<div><h1>Sign in</h1></div>
