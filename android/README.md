@@ -65,8 +65,8 @@ patient data. They are rendered by the screenshot tests described under [Buildin
   (text, images and where it will go) before anything is sent; nothing goes out until you tick
   "Send this" and tap Send. The AI provider's API key is set up in the web app and never reaches
   the phone. Answers carry a "not medical advice" notice; Copy marks the clipboard as sensitive.
-- **Lab results (LabsVault)**: from a patient, tap the flask to see every lab test with its latest
-  value, flag and a sparkline. Upload a Labcorp, Quest or Sonora Quest report PDF (or a photo of
+- **Lab results (LabsVault)**: each patient has two tabs, **Scans** and **Labs**. The Labs tab
+  shows every lab test with its latest value, flag and a sparkline. Upload a Labcorp, Quest or Sonora Quest report PDF (or a photo of
   one); the server reads it and the app shows a review screen where you correct values, ranges and
   flags, untick rows and pick the right test before saving. Each test opens a trend chart with
   the reference range shaded and out-of-range results marked ▲/▼. Needs a server with LabsVault.

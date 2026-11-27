@@ -108,6 +108,37 @@ S(mom, "CT head without contrast", "CT", "2025-12-03", "Northside Hospital ED", 
 S(jane, "MRI left knee", "MR", "2024-06-10", "Lakeside Imaging Center", 8, { name: "MRI-knee-2024-report.pdf", lines: [["Indication", "Left knee pain, no injury."], ["Findings", "Mild degenerative signal in the posterior horn of the medial meniscus without a tear. Small joint effusion."], ["Impression", "Early medial meniscal degeneration. No tear."]] }, { body: "KNEE", series: "SAG PD FS", shift: 1 });
 S(mom, "CT head", "CT", "2023-04-18", "Northside Hospital", 6, null, { body: "HEAD", series: "AXIAL 5MM", shift: 1 });
 db.files.filter(f => f._img && f._img[0] === "CT" && db.studies.find(s => s.id === f.study_id).title.includes("head")).forEach(f => f._img[0] = "HEAD");
+
+// ---------------------------------------------------------- sample lab results (the Labs tab of a patient)
+db.labs = [];
+const TESTS = {
+  glucose: ["Glucose", "Metabolic", "mg/dL", 65, 99, "2345-7"], creatinine: ["Creatinine", "Metabolic", "mg/dL", 0.57, 1.0, "2160-0"],
+  ldl: ["LDL cholesterol (calc)", "Lipids", "mg/dL", null, 99, "13457-7"], hdl: ["HDL cholesterol", "Lipids", "mg/dL", 39, null, "2085-9"],
+  a1c: ["Hemoglobin A1c", "Diabetes", "%", 4.8, 5.6, "4548-4"], tsh: ["TSH", "Thyroid", "uIU/mL", 0.45, 4.5, "3016-3"],
+  hgb: ["Hemoglobin", "CBC", "g/dL", 11.1, 15.9, "718-7"], vitd: ["Vitamin D, 25-hydroxy", "Vitamins", "ng/mL", 30, 100, "1989-3"],
+};
+const LR = (pat, lab_name, collected, provider, vals) => {
+  const r = { id: id(), patient_id: pat.id, status: "saved", lab: lab_name.startsWith("Quest") ? "quest" : "labcorp", lab_name, collected, reported: collected, ordering_provider: provider, created_at: iso(30), file_id: null, filename: null };
+  r.results = Object.entries(vals).map(([k, v]) => {
+    const [name, panel, unit, lo, hi] = TESTS[k];
+    const flag = hi != null && v > hi ? "H" : lo != null && v < lo ? "L" : null;
+    return { id: id(), report_id: r.id, analyte: k, name, panel, date: collected, value: String(v), value_num: v, unit, ref_low: lo, ref_high: hi, ref_text: null, flag, source: "report", lab_name };
+  });
+  db.labs.push(r);
+};
+LR(jane, "Labcorp", "2024-05-28", "Dr. Alvarez", { glucose: 94, creatinine: 0.82, ldl: 131, hdl: 58, a1c: 5.4, tsh: 2.1, hgb: 13.2, vitd: 22 });
+LR(jane, "Labcorp", "2025-06-03", "Dr. Alvarez", { glucose: 101, creatinine: 0.85, ldl: 118, hdl: 61, a1c: 5.7, tsh: 2.6, hgb: 13.0, vitd: 31 });
+LR(jane, "Quest Diagnostics", "2026-06-09", "Dr. Alvarez", { glucose: 97, creatinine: 0.80, ldl: 104, hdl: 63, a1c: 5.6, tsh: 3.1, hgb: 13.4, vitd: 38 });
+LR(mom, "Labcorp", "2026-02-11", "Dr. Huang", { glucose: 112, creatinine: 1.12, ldl: 88, hdl: 52, a1c: 6.1, hgb: 11.4 });
+const labReportOut = r => { const { results, ...o } = r; return { ...o, result_count: results.length, flagged_count: results.filter(x => x.flag).length }; };
+const labPoints = pid => db.labs.filter(r => r.patient_id === pid).flatMap(r => r.results).sort((a, b) => a.date.localeCompare(b.date));
+const PANELS = ["Metabolic", "Liver", "Lipids", "CBC", "Diabetes", "Thyroid", "Vitamins", "Other"];
+function labAnalytes(pid) {
+  const g = {};
+  labPoints(pid).forEach(x => (g[x.analyte] = g[x.analyte] || []).push(x));
+  return Object.entries(g).map(([key, pts]) => ({ key, name: TESTS[key][0], loinc: TESTS[key][5], panel: TESTS[key][1], unit: TESTS[key][2], count: pts.length, latest: pts[pts.length - 1], spark: pts.map(x => [x.date, x.value_num]) }))
+    .sort((a, b) => PANELS.indexOf(a.panel) - PANELS.indexOf(b.panel) || a.name.localeCompare(b.name));
+}
 db.targets.push(
   { id: id(), type: "gdrive", name: "Google Drive", enabled: true, schedule_hours: 24, keep_last: 14, config: { auth_mode: "oauth", client_id: "1234-abc.apps.googleusercontent.com", folder_id: "1AbCdEfMedVault" }, secrets_set: { client_secret: true, refresh_token: true, service_account_json: false }, connected: true, last_run: iso(0.3), last_status: "ok" },
   { id: id(), type: "sftp", name: "Home NAS", enabled: true, schedule_hours: 6, keep_last: 30, config: { protocol: "sftp", host: "nas.local", port: 22, username: "medvault", remote_dir: "backups/medvault", host_key: "SHA256:q2Vx4Jw0b6Tq3yZ6m3Q1nqk2sLr8m8uZ7v0c4p9X1aA" }, secrets_set: { password: false, private_key: true, key_passphrase: false }, connected: true, last_run: iso(0.1), last_status: "ok" },
@@ -182,7 +213,8 @@ const err = (status, msg, code) => { const e = new Error(msg); e.status = status
 const pub = f => { const { _img, _report, _blob, ...o } = f; return o; };
 const counts = pid => {
   const ss = db.studies.filter(s => s.patient_id === pid);
-  return { study_count: ss.length, file_count: db.files.filter(f => f.patient_id === pid).length, last_study_date: ss.map(s => s.study_date).filter(Boolean).sort().pop() || null };
+  return { study_count: ss.length, file_count: db.files.filter(f => f.patient_id === pid).length, last_study_date: ss.map(s => s.study_date).filter(Boolean).sort().pop() || null,
+    lab_report_count: db.labs.filter(r => r.patient_id === pid).length, lab_draft_count: 0 };
 };
 const studyOut = s => ({ ...s, file_count: db.files.filter(f => f.study_id === s.id).length });
 const need = () => { if (!state.authed) err(401, "Not signed in", "unauthenticated"); if (!state.unlocked) err(423, "Vault is locked", "locked"); };
@@ -230,8 +262,20 @@ async function req(method, path, body) {
   if ((m = url.match(/^\/api\/patients\/([^/]+)$/))) {
     const p = findP(m[1]);
     if (method === "PUT") { Object.assign(p, Object.fromEntries(Object.entries(body).map(([k, v]) => [k, v || null]))); if (!p.name) err(400, "Patient name is required"); }
-    if (method === "DELETE") { db.patients = db.patients.filter(x => x !== p); db.studies = db.studies.filter(s => s.patient_id !== p.id); db.files = db.files.filter(f => f.patient_id !== p.id); return { ok: true }; }
+    if (method === "DELETE") { db.patients = db.patients.filter(x => x !== p); db.studies = db.studies.filter(s => s.patient_id !== p.id); db.files = db.files.filter(f => f.patient_id !== p.id); db.labs = db.labs.filter(r => r.patient_id !== p.id); return { ok: true }; }
     return { ...p, ...counts(p.id) };
+  }
+  if (url === "/api/labs/info") return { ocr: true, catalog: Object.entries(TESTS).map(([key, t]) => ({ key, name: t[0], panel: t[1], unit: t[2], loinc: t[5] })) };
+  if ((m = url.match(/^\/api\/patients\/([^/]+)\/labs\/reports$/))) { findP(m[1]); if (method === "POST") err(400, "Entering results is off in this preview"); return db.labs.filter(r => r.patient_id === m[1]).map(labReportOut).sort((a, b) => b.collected.localeCompare(a.collected)); }
+  if ((m = url.match(/^\/api\/patients\/([^/]+)\/labs\/analytes$/))) { findP(m[1]); return labAnalytes(m[1]); }
+  if ((m = url.match(/^\/api\/patients\/([^/]+)\/labs\/analytes\/([^/]+)$/))) {
+    findP(m[1]); const key = decodeURIComponent(m[2]), t = TESTS[key] || err(404, "No results for this test");
+    return { key, name: t[0], loinc: t[5], panel: t[1], units: [t[2]], points: labPoints(m[1]).filter(x => x.analyte === key) };
+  }
+  if ((m = url.match(/^\/api\/labs\/reports\/([^/]+)$/))) {
+    const r = db.labs.find(x => x.id === m[1]) || err(404, "Lab report not found");
+    if (method !== "GET") err(400, "Editing lab reports is off in this preview");
+    return { ...labReportOut(r), rows: r.results, warnings: [], parsed_patient: null };
   }
   if ((m = url.match(/^\/api\/patients\/([^/]+)\/studies$/))) {
     findP(m[1]);
@@ -312,6 +356,7 @@ async function upload(path, form, onProgress) {
   if (url === "/api/setup/restore") { state.setup = state.authed = state.unlocked = true; return { patients: db.patients.length, files: db.files.length }; }
   if (url === "/api/backups/restore") { if (form.get("confirm") !== "REPLACE") err(400, "Type REPLACE to confirm restoring over current data"); await wait(800); return { patients: db.patients.length, files: db.files.length }; }
   need();
+  if (/\/labs\/upload$/.test(url)) err(400, "Reading lab reports needs the real server. This preview shows sample results only.");
   let m, pid, sid = null;
   if ((m = url.match(/^\/api\/patients\/([^/]+)\/import$/))) pid = findP(m[1]).id;
   else if ((m = url.match(/^\/api\/studies\/([^/]+)\/files$/))) { const s = findS(m[1]); sid = s.id; pid = s.patient_id; }

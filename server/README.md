@@ -356,7 +356,8 @@ avoids the question.
 
 ## LabsVault: lab results
 
-Open **Labs** (or **Lab results** on a patient) and drop in a lab report PDF.
+Each patient record has two tabs: **Scans** (imaging studies) and **Labs**
+(lab results). Open a patient, switch to **Labs** and drop in a lab report PDF.
 
 <table>
 <tr>

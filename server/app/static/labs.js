@@ -2,7 +2,7 @@
    report, review what was read, save, and follow each test over time. */
 (() => {
 "use strict";
-const { API, S, $, $$, esc, fmtDate, toast, modal, confirmBox, main, mobileHead, handleErr, go, wireDrop, I, initials } = window.SV;
+const { API, S, $, $$, esc, fmtDate, toast, modal, confirmBox, main, mobileHead, handleErr, go, wireDrop, I, initials, patientHead, wirePatientHead } = window.SV;
 
 const FLAG_TXT = { H: "High", L: "Low", HH: "Critical high", LL: "Critical low", A: "Abnormal", C: "Critical" };
 const flagBadge = f => f ? `<span class="badge ${f === "A" ? "warn" : "err"}" title="${esc(FLAG_TXT[f] || f)}">${f === "H" || f === "HH" ? "▲" : f === "L" || f === "LL" ? "▼" : "!"} ${esc(FLAG_TXT[f] || f)}</span>` : "";
@@ -90,6 +90,7 @@ function wireChart(box, points) {
 }
 
 // ------------------------------------------------------------------ views
+// The Labs tab of a patient record (#/labs/<patient>); Scans is the other tab.
 async function viewLabs(pid) {
   if (!pid) return pickPatient();
   const [p, an, reports] = await Promise.all([API.req("GET", `/api/patients/${pid}`), API.req("GET", `/api/patients/${pid}/labs/analytes`), API.req("GET", `/api/patients/${pid}/labs/reports`)]);
@@ -98,9 +99,9 @@ async function viewLabs(pid) {
   const groups = {};
   an.forEach(a => (groups[a.panel] = groups[a.panel] || []).push(a));
   const flagged = an.filter(a => a.latest.flag);
-  m.innerHTML = `${mobileHead()}<div class="crumbs"><a href="#/patients" data-go="patients">Patients</a><span>/</span><a href="#/patient/${esc(p.id)}" data-go="patient/${esc(p.id)}">${esc(p.name)}</a><span>/</span><span>Labs</span></div>
-  <div class="top"><div><h1>Lab results</h1><p class="sub">${esc(p.name)} · ${an.length} ${an.length === 1 ? "test" : "tests"} tracked · ${reports.length - drafts.length} ${reports.length - drafts.length === 1 ? "report" : "reports"}</p></div>
-    <div class="row">${an.length ? `<a class="btn" href="/api/patients/${esc(p.id)}/labs/export.csv" download>Export CSV</a>` : ""}<button class="btn" id="manual">${I.plus} Enter by hand</button><button class="btn primary" id="lup">${I.upload} Upload lab report</button></div></div>
+  m.innerHTML = `${mobileHead()}${patientHead(p, "labs")}<div id="tabpanel" role="tabpanel" aria-labelledby="tab-labs">
+  <div class="section-h"><div><h2>Lab results</h2><p class="small muted">${an.length} ${an.length === 1 ? "test" : "tests"} tracked · ${reports.length - drafts.length} ${reports.length - drafts.length === 1 ? "report" : "reports"}</p></div>
+    <div class="row">${an.length ? `<a class="btn sm" href="/api/patients/${esc(p.id)}/labs/export.csv" download>Export CSV</a>` : ""}<button class="btn sm" id="manual">${I.plus} Enter by hand</button><button class="btn sm primary" id="lup">${I.upload} Upload lab report</button></div></div>
   <div class="drop" id="ldrop">${I.flask}<div><b>Drop a lab report PDF here</b><div class="small muted">Labcorp, Quest and Sonora Quest reports are read automatically${S.labsOcr === false ? "" : ", scans and photos too"}. You check every value before it is saved. Nothing leaves this server.</div></div>
     <div class="row" style="justify-content:center"><label tabindex="0" role="button" class="btn sm">Choose PDF<input type="file" id="lfi" hidden accept="application/pdf,.pdf,image/*"></label>
     <label tabindex="0" role="button" class="btn sm">${I.camera} Take photo<input type="file" id="lcam" accept="image/*" capture="environment" hidden></label></div></div>
@@ -117,7 +118,8 @@ async function viewLabs(pid) {
   ${reports.length - drafts.length ? `<div class="section-h"><h2>Reports</h2></div><div class="card scroll"><table class="stk"><thead><tr><th>Collected</th><th>Lab</th><th>Results</th><th></th></tr></thead><tbody>
     ${reports.filter(r => r.status !== "draft").map(r => `<tr><td data-l="Collected">${esc(fmtDate(r.collected))}</td><td data-l="Lab">${esc(r.lab_name || "Lab")}${r.ordering_provider ? `<div class="small muted">${esc(r.ordering_provider)}</div>` : ""}</td>
       <td data-l="Results">${r.result_count}${r.flagged_count ? ` <span class="badge err">${r.flagged_count} flagged</span>` : ""}</td>
-      <td class="num">${r.file_id ? `<a class="btn sm ghost" href="${esc(API.fileUrl(r.file_id))}" target="_blank" rel="noopener">PDF</a>` : ""}<button class="btn sm ghost" data-review="${esc(r.id)}">Edit</button></td></tr>`).join("")}</tbody></table></div>` : ""}`;
+      <td class="num">${r.file_id ? `<a class="btn sm ghost" href="${esc(API.fileUrl(r.file_id))}" target="_blank" rel="noopener">PDF</a>` : ""}<button class="btn sm ghost" data-review="${esc(r.id)}">Edit</button></td></tr>`).join("")}</tbody></table></div>` : ""}</div>`;
+  wirePatientHead(p);
   const refresh = () => viewLabs(pid).catch(handleErr);
   const up = files => uploadLab(pid, files[0], refresh);
   wireDrop($("#ldrop"), up);
@@ -133,7 +135,7 @@ async function viewLabs(pid) {
 async function pickPatient() {
   const list = await API.req("GET", "/api/patients");
   if (list.length === 1) return go("labs", list[0].id);
-  main().innerHTML = `${mobileHead()}<div class="top"><div><h1>Lab results</h1><p class="sub">Choose whose results to open.</p></div></div>
+  main().innerHTML = `${mobileHead()}<div class="top"><div><h1>Lab results</h1><p class="sub">Lab results are kept in each patient's record, next to their scans. Choose whose to open.</p></div></div>
   <div class="plist">${list.length ? list.map(p => `<a class="card pcard" href="#/labs/${esc(p.id)}" data-go="labs/${esc(p.id)}"><div class="avatar">${esc(initials(p.name))}</div><div><h3>${esc(p.name)}</h3><div class="meta">${p.date_of_birth ? `<span>${esc(fmtDate(p.date_of_birth))}</span>` : ""}</div></div></a>`).join("")
     : `<div class="card empty" style="grid-column:1/-1">${I.users}<h2>Add a patient first</h2><p>Lab results belong to a patient record.</p><a class="btn primary" href="#/patients" data-go="patients">Go to patients</a></div>`}</div>`;
 }

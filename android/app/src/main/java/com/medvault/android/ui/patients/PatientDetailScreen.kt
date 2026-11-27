@@ -63,6 +63,13 @@ import com.medvault.android.ui.components.EmptyState
 import com.medvault.android.ui.components.Loadable
 import com.medvault.android.ui.components.LoadableContent
 import com.medvault.android.ui.components.userMessage
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material3.PrimaryTabRow
+import androidx.compose.material3.Tab
+import com.medvault.android.ui.labs.LabsOverview
+import com.medvault.android.ui.labs.LabsTabContent
+import com.medvault.android.ui.labs.LabsViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -118,6 +125,12 @@ class PatientDetailViewModel(private val container: AppContainer, private val pa
     }
 }
 
+/** The two halves of a patient record. */
+enum class PatientTab { Scans, Labs }
+
+/** Lab report PDFs are filed in a study of this modality; they are reached from the Labs tab. */
+private const val LAB_MODALITY = "LAB"
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PatientDetailScreen(
@@ -126,20 +139,32 @@ fun PatientDetailScreen(
     onBack: () -> Unit,
     onOpenStudy: (String) -> Unit,
     onOpenActivity: (patientName: String) -> Unit = {},
-    onOpenLabs: () -> Unit = {},
+    initialTab: PatientTab = PatientTab.Scans,
+    onOpenLabReport: (String) -> Unit = {},
+    onOpenLabTrend: (String) -> Unit = {},
 ) {
     val vm: PatientDetailViewModel = viewModel(key = "patient-$patientId") { PatientDetailViewModel(container, patientId) }
+    val labsVm: LabsViewModel = viewModel(key = "labs-$patientId") { LabsViewModel(container, patientId) }
     val state by vm.state.collectAsStateWithLifecycle()
     val importing by vm.importing.collectAsStateWithLifecycle()
+    val labs by labsVm.state.collectAsStateWithLifecycle()
+    val labUploading by labsVm.uploading.collectAsStateWithLifecycle()
     val session by container.session.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val resolver = LocalContext.current.contentResolver
+    var tab by rememberSaveable { mutableStateOf(initialTab) }
     var showAdd by rememberSaveable { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var confirmDelete by rememberSaveable { mutableStateOf(false) }
 
-    LaunchedEffect(session) { if (session == SessionState.Ready) vm.load() }
+    // Both tabs load up front, so their counts are right and switching is instant.
+    LaunchedEffect(session) {
+        if (session == SessionState.Ready) {
+            vm.load()
+            labsVm.load()
+        }
+    }
 
     val importPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
@@ -147,18 +172,34 @@ fun PatientDetailScreen(
         if (parts.isNotEmpty()) vm.importFiles(parts)
         else scope.launch { snackbar.showSnackbar("Those files couldn't be read") }
     }
+    val labPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val part = runCatching { resolver.uploadPartFor(uri) }.getOrNull()
+        if (part != null) labsVm.upload(part) else scope.launch { snackbar.showSnackbar("That file couldn't be read") }
+    }
     LaunchedEffect(vm) { for (m in vm.messages) snackbar.showSnackbar(m) }
+    LaunchedEffect(labsVm) { for (m in labsVm.messages) snackbar.showSnackbar(m) }
+    LaunchedEffect(labsVm) { for (id in labsVm.openReview) onOpenLabReport(id) }
+
+    val patientName = (state as? Loadable.Loaded<PatientDetail>)?.value?.patient?.name
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text((state as? Loadable.Loaded<PatientDetail>)?.value?.patient?.name ?: "Patient") },
+                title = { Text(patientName ?: "Patient") },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 actions = {
-                    IconButton(onClick = onOpenLabs) { Icon(Icons.Default.Science, "Lab results") }
+                    if (tab == PatientTab.Labs) {
+                        IconButton(onClick = {
+                            scope.launch {
+                                labsVm.newManualReport().onSuccess { onOpenLabReport(it.id) }
+                                    .onFailure { snackbar.showSnackbar(it.userMessage()) }
+                            }
+                        }) { Icon(Icons.Default.Edit, "Enter lab results by hand") }
+                    }
                     IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "More") }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        DropdownMenuItem(
+                        if (tab == PatientTab.Scans) DropdownMenuItem(
                             text = { Text("Import DICOM / CD (.zip)") },
                             leadingIcon = { Icon(Icons.Default.FolderZip, null) },
                             onClick = {
@@ -172,7 +213,7 @@ fun PatientDetailScreen(
                             leadingIcon = { Icon(Icons.Default.History, null) },
                             onClick = {
                                 menu = false
-                                onOpenActivity((state as? Loadable.Loaded<PatientDetail>)?.value?.patient?.name.orEmpty())
+                                onOpenActivity(patientName.orEmpty())
                             },
                         )
                         DropdownMenuItem(
@@ -185,37 +226,51 @@ fun PatientDetailScreen(
             )
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { showAdd = true },
-                icon = { Icon(Icons.Default.Add, null) },
-                text = { Text("Study") },
-            )
+            when (tab) {
+                PatientTab.Scans -> ExtendedFloatingActionButton(
+                    onClick = { showAdd = true },
+                    icon = { Icon(Icons.Default.Add, null) },
+                    text = { Text("Study") },
+                )
+                PatientTab.Labs -> ExtendedFloatingActionButton(
+                    onClick = {
+                        if (!labUploading) {
+                            container.appLock.expectExternalTrip()
+                            labPicker.launch(arrayOf("application/pdf", "image/*"))
+                        }
+                    },
+                    icon = { Icon(Icons.Default.UploadFile, null) },
+                    text = { Text("Lab report") },
+                )
+            }
         },
         snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
         LoadableContent(state, onRetry = vm::load, modifier = Modifier.padding(padding)) { detail ->
+            val scans = detail.studies.filter { it.modality != LAB_MODALITY }
+            val labCount = (labs as? Loadable.Loaded<LabsOverview>)?.value?.reports?.count { !it.isDraft }
+                ?: detail.patient.labReportCount
             Column(Modifier.padding(padding)) {
                 if (importing) LinearProgressIndicator(Modifier.fillMaxWidth())
                 PatientHeader(detail.patient)
-                HorizontalDivider()
-                if (detail.studies.isEmpty()) {
-                    EmptyState("No studies yet. Add one for a scan visit, or import a DICOM CD export from the menu.")
-                } else {
-                    LazyColumn(contentPadding = PaddingValues(bottom = 88.dp)) {
-                        items(detail.studies, key = { it.id }) { s ->
-                            ListItem(
-                                leadingContent = { Icon(Icons.Default.MedicalServices, null) },
-                                headlineContent = { Text(s.title) },
-                                overlineContent = {
-                                    Text(listOfNotNull(s.modality, s.studyDate).joinToString(" · "))
-                                },
-                                supportingContent = {
-                                    Text(listOfNotNull(s.facility, "${s.fileCount} file(s)").joinToString(" · "))
-                                },
-                                modifier = Modifier.clickable { onOpenStudy(s.id) },
-                            )
-                            HorizontalDivider()
-                        }
+                PrimaryTabRow(selectedTabIndex = tab.ordinal) {
+                    Tab(
+                        selected = tab == PatientTab.Scans,
+                        onClick = { tab = PatientTab.Scans },
+                        icon = { Icon(Icons.Default.MedicalServices, null) },
+                        text = { Text("Scans (${scans.size})") },
+                    )
+                    Tab(
+                        selected = tab == PatientTab.Labs,
+                        onClick = { tab = PatientTab.Labs },
+                        icon = { Icon(Icons.Default.Science, null) },
+                        text = { Text("Labs ($labCount)") },
+                    )
+                }
+                when (tab) {
+                    PatientTab.Scans -> ScansTab(scans, onOpenStudy)
+                    PatientTab.Labs -> LoadableContent(labs, onRetry = labsVm::load) { o ->
+                        LabsTabContent(o, labUploading, onOpenLabReport, onOpenLabTrend)
                     }
                 }
             }
@@ -229,7 +284,7 @@ fun PatientDetailScreen(
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
             title = { GuardDialogTouches(); Text("Delete patient?") },
-            text = { Text("This removes the patient and all of their studies and files from the vault. Existing backups are not touched.") },
+            text = { Text("This removes the patient and all of their scans, lab results and files from the vault. Existing backups are not touched.") },
             confirmButton = {
                 TextButton(onClick = {
                     confirmDelete = false
@@ -241,6 +296,30 @@ fun PatientDetailScreen(
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
         )
+    }
+}
+
+@Composable
+private fun ScansTab(studies: List<Study>, onOpenStudy: (String) -> Unit) {
+    if (studies.isEmpty()) {
+        EmptyState("No scans yet. Add a study for a scan visit, or import a DICOM CD export from the menu.")
+        return
+    }
+    LazyColumn(contentPadding = PaddingValues(bottom = 88.dp)) {
+        items(studies, key = { it.id }) { s ->
+            ListItem(
+                leadingContent = { Icon(Icons.Default.MedicalServices, null) },
+                headlineContent = { Text(s.title) },
+                overlineContent = {
+                    Text(listOfNotNull(s.modality, s.studyDate).joinToString(" · "))
+                },
+                supportingContent = {
+                    Text(listOfNotNull(s.facility, "${s.fileCount} file(s)").joinToString(" · "))
+                },
+                modifier = Modifier.clickable { onOpenStudy(s.id) },
+            )
+            HorizontalDivider()
+        }
     }
 }
 

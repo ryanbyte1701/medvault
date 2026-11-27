@@ -61,6 +61,10 @@ data class Patient(
     val mrn: String? = null,
     val notes: String? = null,
     @SerialName("study_count") val studyCount: Int = 0,
+    /** Imaging studies, without the studies that only hold a lab report's PDF. */
+    @SerialName("scan_count") val scanCount: Int? = null,
+    @SerialName("lab_report_count") val labReportCount: Int = 0,
+    @SerialName("lab_draft_count") val labDraftCount: Int = 0,
 )
 
 @Serializable

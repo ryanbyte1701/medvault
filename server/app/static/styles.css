@@ -482,3 +482,14 @@ code{overflow-wrap:anywhere;word-break:break-word}
 @media (max-width:820px) and (orientation:portrait){.cmpgrid{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr) minmax(0,1fr)}}
 @media (max-width:820px){.cmp{height:calc(100vh - 120px)}.cmpbar.vtools{flex-wrap:nowrap;justify-content:flex-start}.cphead{padding:6px 10px}.cpt b{font-size:14px}}
 @media (max-width:600px){.cmp{height:calc(100dvh - 58px)}}
+
+/* Patient record tabs: Scans | Labs */
+.ptabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:-6px 0 6px;overflow-x:auto}
+.ptabs a{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;min-height:46px;font-weight:650;color:var(--muted);text-decoration:none;border-bottom:3px solid transparent;margin-bottom:-1px;white-space:nowrap}
+.ptabs a:hover{color:var(--ink)}
+.ptabs a.on{color:var(--teal);border-bottom-color:var(--teal)}
+.ptabs a:focus-visible{outline:2px solid var(--teal);outline-offset:-2px;border-radius:8px 8px 0 0}
+.ptabs svg{width:18px;height:18px}
+.ptabs .n{font-size:12px;font-weight:650;padding:1px 8px;border-radius:999px;background:color-mix(in srgb,var(--muted) 14%,transparent)}
+.ptabs a.on .n{background:var(--teal-soft);color:var(--teal)}
+@media (max-width:600px){.ptabs a{flex:1;justify-content:center;padding:10px 8px}}

@@ -134,7 +134,8 @@ fun PatientsScreen(
                                     Text(listOfNotNull(
                                         p.dateOfBirth?.let { "DOB $it" },
                                         p.mrn?.let { "MRN $it" },
-                                        "${p.studyCount} ${if (p.studyCount == 1) "study" else "studies"}",
+                                        (p.scanCount ?: p.studyCount).let { "$it ${if (it == 1) "scan" else "scans"}" },
+                                        "${p.labReportCount} ${if (p.labReportCount == 1) "lab report" else "lab reports"}",
                                     ).joinToString(" · "))
                                 },
                                 modifier = Modifier.clickable { onOpen(p.id) },

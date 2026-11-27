@@ -212,9 +212,9 @@ function render() {
 }
 
 function shell(active) {
-  const nav = [["home", "Home", I.home], ["patients", "Patients", I.users], ["upload", "Upload", I.upload], ["labs", "Labs", I.flask], ["backups", "Backups", I.cloud], ["activity", "Activity", I.activity], ["settings", "Settings", I.gear]];
-  const tabs = nav.filter(([n]) => n !== "activity"); // six fit the phone tab bar; Activity is reached from Settings there
-  const on = n => (n === active || (n === "patients" && (active === "patient" || active === "study"))) ? "on" : "";
+  const nav = [["home", "Home", I.home], ["patients", "Patients", I.users], ["upload", "Upload", I.upload], ["backups", "Backups", I.cloud], ["activity", "Activity", I.activity], ["settings", "Settings", I.gear]];
+  const tabs = nav; // six fit the phone tab bar. Labs live in each patient record, next to their scans.
+  const on = n => (n === active || (n === "patients" && ["patient", "study", "labs"].includes(active))) ? "on" : "";
   app.innerHTML = `${API.demo ? '<div class="demo-banner">Interactive preview with sample patients. Nothing leaves your browser and nothing is stored.</div>' : ""}
   <div class="shell">
     <nav class="side" aria-label="Main">
@@ -638,7 +638,7 @@ async function viewPatients() {
     $("#pl").innerHTML = rows.length ? rows.map(p => `<a class="card pcard" href="#/patient/${esc(p.id)}" data-go="patient/${esc(p.id)}">
       <div class="avatar">${esc(initials(p.name))}</div>
       <div><h3>${esc(p.name)}</h3><div class="meta">${p.date_of_birth ? `<span>${esc(fmtDate(p.date_of_birth))} (${age(p.date_of_birth)})</span>` : ""}${p.mrn ? `<span>MRN ${esc(p.mrn)}</span>` : ""}</div>
-      <div class="stats"><span><b>${p.study_count}</b> ${p.study_count === 1 ? "study" : "studies"}</span><span><b>${p.file_count}</b> ${p.file_count === 1 ? "file" : "files"}</span>${p.last_study_date ? `<span class="muted">Last ${esc(fmtDate(p.last_study_date))}</span>` : ""}</div></div></a>`).join("")
+      <div class="stats"><span><b>${p.scan_count ?? p.study_count}</b> ${(p.scan_count ?? p.study_count) === 1 ? "scan" : "scans"}</span><span><b>${p.lab_report_count || 0}</b> ${p.lab_report_count === 1 ? "lab report" : "lab reports"}</span>${p.last_study_date ? `<span class="muted">Last ${esc(fmtDate(p.last_study_date))}</span>` : ""}</div></div></a>`).join("")
       : list.length ? `<p class="muted">No patients match "${esc(q)}".</p>`
       : `<div class="card empty" style="grid-column:1/-1">${I.users}<h2>Add your first patient</h2><p>Create one record per person: you, a parent, a child. Each keeps their own studies and reports.</p><button class="btn primary" id="add2">${I.plus} Add patient</button></div>`;
     const a2 = $("#add2"); if (a2) a2.onclick = () => patientForm();
@@ -667,29 +667,56 @@ function patientForm(p) {
   if (d) d.onclick = async () => { m.close(); if (await confirmBox("Delete patient?", `This permanently deletes ${esc(p.name)} and all ${p.file_count} files from this server. Existing backups keep their copy.`)) { await API.req("DELETE", `/api/patients/${p.id}`); toast("Deleted"); go("patients"); } };
 }
 
-async function viewPatient(id) {
-  const [p, studies] = await Promise.all([API.req("GET", `/api/patients/${id}`), API.req("GET", `/api/patients/${id}/studies`)]);
-  const thumbs = {};
-  await Promise.all(studies.slice(0, 30).map(async s => { if (s.file_count) thumbs[s.id] = (await API.req("GET", `/api/studies/${s.id}/files`)).slice(0, 4); }));
-  const m = main();
-  m.innerHTML = `${mobileHead()}<div class="crumbs"><a href="#/patients" data-go="patients">Patients</a><span>/</span><span>${esc(p.name)}</span></div>
+// A patient record holds both kinds of results: imaging studies (Scans) and lab
+// results (Labs). Both tabs share this header; the Labs tab is drawn by labs.js.
+function patientHead(p, tab) {
+  const id = esc(p.id), drafts = p.lab_draft_count || 0;
+  const t = (key, route, icon, label, n, extra = "") => `<a role="tab" id="tab-${key}" aria-selected="${tab === key}" aria-controls="tabpanel" tabindex="${tab === key ? 0 : -1}" class="${tab === key ? "on" : ""}" href="#/${route}/${id}" data-go="${route}/${id}">${icon}<span>${label}</span><span class="n">${n || 0}</span>${extra}</a>`;
+  return `<div class="crumbs"><a href="#/patients" data-go="patients">Patients</a><span>/</span><span>${esc(p.name)}</span></div>
   <div class="card phead"><div class="avatar">${esc(initials(p.name))}</div>
     <div><h1>${esc(p.name)}</h1><div class="facts">
       ${p.date_of_birth ? `<span>Born <b>${esc(fmtDate(p.date_of_birth))}</b> (${age(p.date_of_birth)})</span>` : ""}${p.sex ? `<span>Sex <b>${esc(p.sex)}</b></span>` : ""}${p.mrn ? `<span>MRN <b>${esc(p.mrn)}</b></span>` : ""}
-      <span><b>${p.study_count}</b> ${p.study_count === 1 ? "study" : "studies"}</span><span><b>${p.file_count}</b> ${p.file_count === 1 ? "file" : "files"}</span></div>
+      <span><b>${p.file_count}</b> ${p.file_count === 1 ? "file" : "files"}</span></div>
       ${p.notes ? `<p class="small muted" style="margin-top:8px;white-space:pre-wrap">${esc(p.notes)}</p>` : ""}</div>
-    <div class="row"><a class="btn" href="#/activity/patient:${esc(p.id)}" data-go="activity/patient:${esc(p.id)}">${I.activity} Activity</a><button class="btn" id="edit">Edit</button><a class="btn" href="#/labs/${esc(p.id)}" data-go="labs/${esc(p.id)}">${I.flask} Lab results</a><button class="btn primary" id="up">${I.upload} Upload</button></div></div>
+    <div class="row"><a class="btn" href="#/activity/patient:${id}" data-go="activity/patient:${id}">${I.activity} Activity</a><button class="btn" id="pedit">Edit</button></div></div>
+  <div class="ptabs" role="tablist" aria-label="Records for ${esc(p.name)}">
+    ${t("scans", "patient", I.scan, "Scans", p.scan_count ?? p.study_count)}
+    ${t("labs", "labs", I.flask, "Labs", p.lab_report_count, drafts ? `<span class="badge warn">${drafts} to review</span>` : "")}
+  </div>`;
+}
+function wirePatientHead(p) {
+  $("#pedit").onclick = () => patientForm(p);
+  // Arrow keys switch tabs, as in any tab list.
+  const tl = $(".ptabs");
+  tl.addEventListener("keydown", e => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+    const other = $$("[role=tab]", tl).find(a => a.getAttribute("aria-selected") !== "true");
+    if (other) { e.preventDefault(); other.click(); }
+  });
+  const sel = $("[role=tab][aria-selected=true]", tl);
+  if (sel && S.focusTab) { S.focusTab = false; sel.focus(); }
+  tl.addEventListener("click", () => { S.focusTab = true; });
+}
+
+async function viewPatient(id) {
+  const [p, all] = await Promise.all([API.req("GET", `/api/patients/${id}`), API.req("GET", `/api/patients/${id}/studies`)]);
+  // Lab report PDFs are filed in a "LAB" study; they are reached from the Labs tab.
+  const studies = all.filter(s => s.modality !== "LAB");
+  const thumbs = {};
+  await Promise.all(studies.slice(0, 30).map(async s => { if (s.file_count) thumbs[s.id] = (await API.req("GET", `/api/studies/${s.id}/files`)).slice(0, 4); }));
+  const m = main();
+  m.innerHTML = `${mobileHead()}${patientHead(p, "scans")}<div id="tabpanel" role="tabpanel" aria-labelledby="tab-scans">
+  <div class="section-h"><h2>Imaging studies</h2><div class="row"><button class="btn sm" id="ns">${I.plus} New study</button><button class="btn sm primary" id="up">${I.upload} Upload scans</button></div></div>
   <div class="drop" id="drop">${I.upload}<div><b>Drop scans or reports here</b><div class="small muted">DICOM files or a whole CD/zip export, JPG/PNG photos of films, PDF reports. DICOM is grouped into studies automatically.</div></div>
     <div class="row" style="justify-content:center"><label tabindex="0" role="button" class="btn sm">Choose files<input type="file" id="fi" multiple hidden accept=".dcm,.dicom,.zip,image/*,application/pdf,application/dicom,application/zip,*/*"></label>
     <label tabindex="0" role="button" class="btn sm">${I.camera} Take photo<input type="file" id="cam" accept="image/*" capture="environment" hidden></label></div></div>
   <div class="queue" id="queue"></div>
-  <div class="section-h"><h2>Studies</h2><button class="btn sm" id="ns">${I.plus} New study</button></div>
   <div class="timeline" id="tl">${studies.length ? studies.map(s => `<a class="card study" href="#/study/${esc(s.id)}" data-go="study/${esc(s.id)}">
     <div class="date">${esc(s.study_date ? fmtDate(s.study_date) : "No date")}<small>${s.modality ? esc(s.modality) : ""}</small></div>
     <div><h3>${esc(s.title)}</h3><div class="small muted">${[s.facility, `${s.file_count} file${s.file_count === 1 ? "" : "s"}`].filter(Boolean).map(esc).join(" · ")}</div></div>
     <div class="film">${(thumbs[s.id] || []).map(f => `<div class="t">${f.has_thumbnail ? `<img alt="" loading="lazy" src="${esc(API.thumbUrl(f.id))}">` : f.kind === "report" ? I.pdf : I.file}</div>`).join("")}</div></a>`).join("")
-    : `<div class="card empty">${I.scan}<h2>No studies yet</h2><p>Upload the files an imaging center gave you, or create a study first and add files to it.</p></div>`}</div>`;
-  $("#edit").onclick = () => patientForm(p);
+    : `<div class="card empty">${I.scan}<h2>No studies yet</h2><p>Upload the files an imaging center gave you, or create a study first and add files to it.</p></div>`}</div></div>`;
+  wirePatientHead(p);
   $("#ns").onclick = () => studyForm(p.id);
   $("#up").onclick = () => $("#fi").click();
   wireDrop($("#drop"), files => uploadFiles(`/api/patients/${p.id}/import`, files, () => viewPatient(id)));
@@ -1976,7 +2003,7 @@ async function aiAuditLog() {
   } catch (er) { body.innerHTML = `<p class="err">${esc(er.message)}</p>`; }
 }
 // Feature modules (static/labs.js) build on these.
-window.SV = { API, S, render, $, $$, esc, fmtDate, toast, modal, confirmBox, main, mobileHead, handleErr, go, wireDrop, I, initials, age };
+window.SV = { API, S, render, $, $$, esc, fmtDate, toast, modal, confirmBox, main, mobileHead, handleErr, go, wireDrop, I, initials, age, patientHead, wirePatientHead };
 
 boot();
 if (!API.demo && "serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("/sw.js").catch(() => {});

@@ -24,9 +24,10 @@ import com.medvault.android.ui.compare.CompareScreen
 import com.medvault.android.ui.files.ImageViewerScreen
 import com.medvault.android.ui.labs.LabReviewScreen
 import com.medvault.android.ui.labs.LabTrendScreen
-import com.medvault.android.ui.labs.LabsScreen
 import com.medvault.android.ui.login.LoginScreen
 import com.medvault.android.ui.patients.PatientDetailScreen
+import com.medvault.android.ui.patients.PatientTab
+import androidx.navigation.NavHostController
 import com.medvault.android.ui.patients.PatientsScreen
 import com.medvault.android.ui.settings.SettingsScreen
 import com.medvault.android.ui.studies.AiExplainScreen
@@ -113,25 +114,14 @@ fun MedVaultNavHost(container: AppContainer) {
             arguments = listOf(navArgument("id") { type = NavType.StringType }),
         ) { entry ->
             val id = entry.arguments!!.getString("id")!!
-            PatientDetailScreen(
-                container, id,
-                onBack = { nav.popBackStack() },
-                onOpenStudy = { nav.navigate("study/${enc(it)}") },
-                onOpenActivity = { name -> nav.navigate("activity?patient=${enc(id)}&title=${enc(name)}") },
-                onOpenLabs = { nav.navigate("labs/${enc(id)}") },
-            )
+            PatientRecord(nav, container, id, PatientTab.Scans)
         }
+        // The Labs tab of the same record, for links that open a patient's lab results.
         composable(
             "labs/{id}",
             arguments = listOf(navArgument("id") { type = NavType.StringType }),
         ) { entry ->
-            val id = entry.arguments!!.getString("id")!!
-            LabsScreen(
-                container, id,
-                onBack = { nav.popBackStack() },
-                onOpenReport = { nav.navigate("labreport/${enc(it)}") },
-                onOpenAnalyte = { nav.navigate("labtrend/${enc(id)}/${enc(it)}") },
-            )
+            PatientRecord(nav, container, entry.arguments!!.getString("id")!!, PatientTab.Labs)
         }
         composable(
             "labreport/{id}",
@@ -215,4 +205,18 @@ fun MedVaultNavHost(container: AppContainer) {
     }
     if (showLock) LockScreen(container.appLock)
     }
+}
+
+/** A patient's record: their scans and their lab results, as two tabs of one screen. */
+@Composable
+private fun PatientRecord(nav: NavHostController, container: AppContainer, id: String, tab: PatientTab) {
+    PatientDetailScreen(
+        container, id,
+        onBack = { nav.popBackStack() },
+        onOpenStudy = { nav.navigate("study/${enc(it)}") },
+        onOpenActivity = { name -> nav.navigate("activity?patient=${enc(id)}&title=${enc(name)}") },
+        initialTab = tab,
+        onOpenLabReport = { nav.navigate("labreport/${enc(it)}") },
+        onOpenLabTrend = { nav.navigate("labtrend/${enc(id)}/${enc(it)}") },
+    )
 }

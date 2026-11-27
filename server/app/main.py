@@ -1254,8 +1254,16 @@ def _patient_out(row, master: bytes, counts: dict | None = None) -> dict:
         "updated_at": iso(row["updated_at"]),
     }
     if counts is not None:
-        out.update(counts.get(row["id"], {"study_count": 0, "file_count": 0, "last_study_date": None}))
+        out.update(counts.get(row["id"], _empty_counts()))
     return out
+
+
+def _empty_counts() -> dict:
+    return {"study_count": 0, "scan_count": 0, "file_count": 0, "last_study_date": None, "lab_report_count": 0, "lab_draft_count": 0}
+
+
+# Modality of the study a lab report's PDF is filed in (see labs.py).
+LAB_MODALITY = "LAB"
 
 
 def _changed(old: dict, new: dict) -> list[str]:
@@ -1276,17 +1284,25 @@ def _patient_fields(j: dict, existing: dict | None = None) -> dict:
 
 
 def _patient_counts(master: bytes) -> dict:
+    """Per patient: imaging studies and files (Scans) and saved lab reports (Labs)."""
     c = store.conn()
     out: dict = {}
+    entry = lambda pid: out.setdefault(pid, _empty_counts())
     for r in c.execute("SELECT patient_id, COUNT(*) n FROM studies GROUP BY patient_id"):
-        out.setdefault(r["patient_id"], {"study_count": 0, "file_count": 0, "last_study_date": None})["study_count"] = r["n"]
+        entry(r["patient_id"])["study_count"] = r["n"]
     for r in c.execute("SELECT patient_id, COUNT(*) n FROM files GROUP BY patient_id"):
-        out.setdefault(r["patient_id"], {"study_count": 0, "file_count": 0, "last_study_date": None})["file_count"] = r["n"]
+        entry(r["patient_id"])["file_count"] = r["n"]
     for r in c.execute("SELECT id, patient_id, blob FROM studies"):
-        sd = unseal(master, r["blob"], f"study:{r['id']}").get("study_date")
-        e = out.setdefault(r["patient_id"], {"study_count": 0, "file_count": 0, "last_study_date": None})
+        d = unseal(master, r["blob"], f"study:{r['id']}")
+        sd = d.get("study_date")
+        e = entry(r["patient_id"])
+        # Lab report PDFs are filed in a "LAB" study; they show under Labs, not Scans.
+        if d.get("modality") != LAB_MODALITY:
+            e["scan_count"] += 1
         if sd and (not e["last_study_date"] or sd > e["last_study_date"]):
             e["last_study_date"] = sd
+    for r in c.execute("SELECT patient_id, status, COUNT(*) n FROM lab_reports GROUP BY patient_id, status"):
+        entry(r["patient_id"])["lab_report_count" if r["status"] == "saved" else "lab_draft_count"] += r["n"]
     return out
 
 
