@@ -17,13 +17,14 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
-from . import backup, crypto, media, targets
+from . import backup, crypto, media, sso, targets
 from .store import Store, seal, unseal
 
 VERSION = "0.1.0"
@@ -105,7 +106,7 @@ def current_user(request: Request) -> dict | None:
         return None
     th = hashlib.sha256(tok.encode()).hexdigest()
     r = store.conn().execute(
-        "SELECT u.id, u.username, u.role, s.expires_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?",
+        "SELECT u.id, u.username, u.role, s.expires_at, s.created_at AS session_created, s.identity_id FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?",
         (th,),
     ).fetchone()
     if not r or r["expires_at"] < time.time():
@@ -131,12 +132,12 @@ def data_access(request: Request) -> bytes:
     return mk()
 
 
-def new_session(user_id: str) -> tuple[str, float]:
+def new_session(user_id: str, identity_id: str | None = None) -> tuple[str, float]:
     tok = secrets.token_urlsafe(32)
     exp = time.time() + SESSION_DAYS * 86400
     store.conn().execute(
-        "INSERT INTO sessions(token_hash,user_id,created_at,expires_at) VALUES(?,?,?,?)",
-        (hashlib.sha256(tok.encode()).hexdigest(), user_id, time.time(), exp),
+        "INSERT INTO sessions(token_hash,user_id,created_at,expires_at,identity_id) VALUES(?,?,?,?,?)",
+        (hashlib.sha256(tok.encode()).hexdigest(), user_id, time.time(), exp, identity_id),
     )
     return tok, exp
 
@@ -194,6 +195,8 @@ def status(request: Request):
         "vault_id": ks["vault_id"] if ks else None,
         "fingerprint": ks["fingerprint"] if (ks and u) else None,
         "recovery_key_saved": bool(store.get_config("recovery_key_saved", False)) if u else None,
+        "local_login": local_login_enabled(),
+        "sso": [_sso_public(p) for p in _sso_providers()] if setup_complete() else [],
         "version": VERSION,
     }
 
@@ -225,6 +228,7 @@ async def setup(request: Request):
     store.write_keystore(ks)
     c = store.conn()
     uid = crypto.random_id()
+    c.execute("DELETE FROM user_identities")
     c.execute("DELETE FROM users")
     c.execute(
         "INSERT INTO users(id,username,password_hash,role,created_at) VALUES(?,?,?,?,?)",
@@ -266,7 +270,9 @@ async def setup_restore(
         archive.unlink(missing_ok=True)
     c = store.conn()
     c.execute("DELETE FROM sessions")
+    c.execute("DELETE FROM user_identities")  # SSO links belonged to the replaced login
     c.execute("DELETE FROM users")
+    _sso_save({**_sso_cfg(), "local_login": True})
     uid = crypto.random_id()
     c.execute(
         "INSERT INTO users(id,username,password_hash,role,created_at) VALUES(?,?,?,?,?)",
@@ -285,6 +291,8 @@ async def setup_restore(
 async def login(request: Request):
     if not setup_complete():
         raise ApiError(409, "ScanVault has not been set up yet", "setup_required")
+    if not local_login_enabled():
+        raise ApiError(403, "Password sign-in is turned off. Use single sign-on.", "local_login_disabled")
     j = await body_json(request)
     r = store.conn().execute("SELECT * FROM users WHERE username=?", ((j.get("username") or "").strip(),)).fetchone()
     if not r or not crypto.verify_password(j.get("password") or "", r["password_hash"]):
@@ -1215,13 +1223,20 @@ async def restore_existing(request: Request, backup_file: Optional[UploadFile] =
         hdr = backup.read_header(archive)
         if hdr["fingerprint"] != crypto.fingerprint(master):
             raise ApiError(400, "This backup was made with a different encryption key. Use a fresh install and the recovery key instead.")
-        # keep current logins and backup targets across the restore
+        # keep current logins, SSO links and backup targets across the restore
         users = [dict(r) for r in store.conn().execute("SELECT * FROM users")]
+        idents = [dict(r) for r in store.conn().execute("SELECT * FROM user_identities")]
+        sso_cfg = store.get_config("sso")
         tg = [dict(r) for r in store.conn().execute("SELECT * FROM backup_targets")]
         header = await asyncio.to_thread(backup.restore_into_store, store, archive, master)
         c = store.conn()
         for u in users:
             c.execute("INSERT OR REPLACE INTO users(id,username,password_hash,role,created_at) VALUES(?,?,?,?,?)", tuple(u[k] for k in ("id", "username", "password_hash", "role", "created_at")))
+        c.execute("DELETE FROM user_identities")
+        for i in idents:
+            c.execute(f"INSERT INTO user_identities({','.join(i.keys())}) VALUES({','.join('?' * len(i))})", tuple(i.values()))
+        if sso_cfg is not None:
+            store.set_config("sso", sso_cfg)
         for t in tg:
             cols = ",".join(t.keys())
             c.execute(f"INSERT OR REPLACE INTO backup_targets({cols}) VALUES({','.join('?' * len(t))})", tuple(t.values()))
@@ -1276,6 +1291,484 @@ def oauth_callback(provider: str, request: Request, state: str = "", code: str =
         log.warning("OAuth exchange failed: %s", exc)
         return RedirectResponse("/#/backups?oauth=error&msg=exchange")
     return RedirectResponse("/#/backups?oauth=ok")
+
+
+# =================================================================== single sign-on (OIDC)
+# SSO only proves who is signing in. It never touches the vault encryption key:
+# a locked vault still has to be unlocked with the encryption key or recovery
+# key file afterwards, exactly like after a password sign-in.
+
+oidc = sso.OIDC()
+_sso_requests = sso.PendingStore(ttl=600)   # state -> pending authorization request
+_sso_tickets = sso.PendingStore(ttl=120)    # one-time ticket -> signed-in user
+SSO_COOKIE = "sv_sso"
+SSO_COOKIE_PATH = "/api/auth/sso"
+FORCE_LOCAL_LOGIN = os.environ.get("SCANVAULT_FORCE_LOCAL_LOGIN", "").lower() in ("1", "true", "yes")
+
+
+def _sso_cfg() -> dict:
+    return {"providers": [], "local_login": True, **(store.get_config("sso", {}) or {})}
+
+
+def _sso_save(cfg: dict) -> None:
+    store.set_config("sso", {"providers": cfg.get("providers", []), "local_login": bool(cfg.get("local_login", True))})
+
+
+def _sso_providers(include_disabled: bool = False) -> list[dict]:
+    ps = []
+    env = sso.env_provider()
+    if env:
+        ps.append(env)
+    ps += _sso_cfg()["providers"]
+    return [p for p in ps if include_disabled or p.get("enabled", True)]
+
+
+def _sso_provider(pid: str, include_disabled: bool = False) -> dict:
+    for p in _sso_providers(include_disabled):
+        if p["id"] == pid:
+            return p
+    raise ApiError(404, "Unknown sign-in provider")
+
+
+def _sso_public(p: dict) -> dict:
+    return {"id": p["id"], "name": p["name"], "preset": p.get("preset", "generic")}
+
+
+def _sso_admin_out(p: dict) -> dict:
+    return {
+        "id": p["id"], "name": p["name"], "preset": p.get("preset", "generic"), "issuer": p.get("issuer", ""),
+        "fields": p.get("fields") or {}, "resolved_issuer": sso.resolve_issuer(p), "client_id": p.get("client_id", ""),
+        "has_secret": bool(p.get("client_secret")), "scopes": p.get("scopes") or sso.DEFAULT_SCOPES,
+        "enabled": p.get("enabled", True), "managed": p.get("managed"),
+    }
+
+
+def _linked_identity_count() -> int:
+    ids = {p["id"] for p in _sso_providers()}
+    rows = store.conn().execute("SELECT provider_id FROM user_identities").fetchall()
+    return sum(1 for r in rows if r["provider_id"] in ids)
+
+
+def local_login_enabled() -> bool:
+    """Password sign-in can be turned off only while some SSO link can still sign in."""
+    if FORCE_LOCAL_LOGIN or _sso_cfg()["local_login"]:
+        return True
+    return _linked_identity_count() == 0
+
+
+def _require_admin(request: Request) -> dict:
+    u = require_user(request)
+    if u["role"] != "admin":
+        raise ApiError(403, "Only an administrator can change sign-in settings")
+    return u
+
+
+def _sso_redirect_uri(request: Request) -> str:
+    base = PUBLIC_URL or str(request.base_url).rstrip("/")
+    return f"{base}/api/auth/sso/callback"
+
+
+REAUTH_SECONDS = 600
+
+
+def _recent_sso(u: dict) -> bool:
+    return bool(u.get("identity_id")) and time.time() - (u.get("session_created") or 0) < REAUTH_SECONDS
+
+
+def _reauth(u: dict, j: dict) -> None:
+    """Changes that add a way to sign in need the password, or an SSO sign-in in
+    the last 10 minutes, so a stolen session can't plant a backdoor."""
+    if _recent_sso(u):
+        return
+    r = store.conn().execute("SELECT password_hash FROM users WHERE id=?", (u["id"],)).fetchone()
+    if not r or not crypto.verify_password(str(j.get("password") or ""), r["password_hash"]):
+        time.sleep(0.5)
+        raise ApiError(403, "Enter your ScanVault password to confirm this change", "reauth_required")
+
+
+def _revoke_identity_sessions(where: str, args: tuple) -> None:
+    store.conn().execute(f"DELETE FROM sessions WHERE identity_id IN (SELECT id FROM user_identities WHERE {where})", args)
+
+
+_start_hits: dict[str, list[float]] = {}
+START_LIMIT = (30, 600)  # sign-in starts per client per 10 minutes
+
+
+def _start_rate_ok(request: Request) -> bool:
+    ip = request.client.host if request.client else "?"
+    now = time.time()
+    hits = [t for t in _start_hits.get(ip, []) if now - t < START_LIMIT[1]]
+    if len(_start_hits) > 10000:
+        _start_hits.clear()
+    ok = len(hits) < START_LIMIT[0]
+    if ok:
+        hits.append(now)
+    _start_hits[ip] = hits
+    return ok
+
+
+def _sso_flow(request: Request, p: dict, mode: str, user_id: str | None = None, app: dict | None = None) -> tuple[str, str | None]:
+    """Start an authorization request. Returns (provider URL, browser binding cookie)."""
+    verifier, challenge = sso.pkce_pair()
+    nonce = secrets.token_urlsafe(24)
+    binding = None if app else secrets.token_urlsafe(24)
+    redirect_uri = _sso_redirect_uri(request)
+    state = _sso_requests.put({
+        "mode": mode, "pid": p["id"], "user_id": user_id, "verifier": verifier, "nonce": nonce,
+        "binding": sso.sha(binding) if binding else None, "app": app, "redirect_uri": redirect_uri,
+    })
+    try:
+        # Apps: make the provider show which account is used instead of silently reusing a session.
+        prompt = "select_account" if app and p.get("preset") in ("google", "microsoft") else None
+        url = oidc.authorization_url(p, redirect_uri, state, nonce, challenge, prompt=prompt)
+    except sso.SSOError as exc:
+        _sso_requests.pop(state)
+        raise ApiError(502, str(exc), "sso_provider") from exc
+    return url, binding
+
+
+def _set_binding(request: Request, resp: Response, binding: str | None) -> Response:
+    if binding:
+        # Lax, not Strict: the browser must send it on the top-level redirect back from the provider.
+        resp.set_cookie(SSO_COOKIE, binding, max_age=600, httponly=True, samesite="lax", secure=_secure(request), path=SSO_COOKIE_PATH)
+    return resp
+
+
+def _binding_ok(request: Request, expected_hash: str | None) -> bool:
+    got = request.cookies.get(SSO_COOKIE)
+    return bool(expected_hash and got and secrets.compare_digest(sso.sha(got), expected_hash))
+
+
+def _app_redirect(app: dict, **params) -> RedirectResponse:
+    uri = app["redirect"]
+    q = {k: v for k, v in params.items() if v is not None}
+    if app.get("state"):
+        q["state"] = app["state"]
+    return RedirectResponse(uri + ("&" if "?" in uri else "?") + urlencode(q))
+
+
+def _web_redirect(path: str, **params) -> RedirectResponse:
+    return RedirectResponse(f"/#/{path}?{urlencode(params)}" if params else f"/#/{path}")
+
+
+@app.get("/api/auth/sso/{pid}/start")
+def sso_start(pid: str, request: Request, app_redirect: str = "", app_state: str = "", code_challenge: str = ""):
+    """Begin SSO sign-in. Browsers navigate here directly. Mobile apps open it in a
+    browser tab with ``app_redirect`` (e.g. ``scanvault://sso``) and a PKCE
+    ``code_challenge``; the ticket comes back to ``app_redirect``."""
+    app_ctx = None
+    if app_redirect:
+        if not sso.app_redirect_allowed(app_redirect):
+            raise ApiError(400, "app_redirect is not allowed (see SCANVAULT_SSO_APP_REDIRECTS)")
+        if not (43 <= len(code_challenge) <= 128) or not all(c.isalnum() or c in "-_" for c in code_challenge):
+            raise ApiError(400, "A PKCE code_challenge (S256, base64url) is required")
+        app_ctx = {"redirect": app_redirect, "state": app_state[:500] or None, "challenge": code_challenge}
+    if not setup_complete():
+        return _app_redirect(app_ctx, error="setup_required") if app_ctx else _web_redirect("")
+    if not _start_rate_ok(request):
+        raise ApiError(429, "Too many sign-in attempts. Wait a few minutes.")
+    try:
+        p = _sso_provider(pid)
+        url, binding = _sso_flow(request, p, "login", app=app_ctx)
+    except ApiError as exc:
+        log.warning("SSO start failed: %s", exc.msg)
+        return _app_redirect(app_ctx, error=exc.msg) if app_ctx else _web_redirect("", sso_error=exc.msg)
+    return _set_binding(request, RedirectResponse(url), binding)
+
+
+@app.post("/api/auth/sso/{pid}/link")
+async def sso_link_start(pid: str, request: Request):
+    """Signed-in user links an identity-provider account. Returns the URL to open.
+    Body: ``{password}`` (not needed within 10 minutes of an SSO sign-in)."""
+    u = require_user(request)
+    try:
+        j = await request.json()
+    except Exception:
+        j = {}
+    _reauth(u, j if isinstance(j, dict) else {})
+    p = _sso_provider(pid)
+    url, binding = _sso_flow(request, p, "link", user_id=u["id"])
+    return _set_binding(request, JSONResponse({"url": url}), binding)
+
+
+@app.get("/api/auth/sso/callback")
+def sso_callback(request: Request, state: str = "", code: str = "", error: str = "", error_description: str = ""):
+    resp_iss = request.query_params.get("iss", "")
+    entry = _sso_requests.pop(state)
+    if not entry:
+        return _web_redirect("", sso_error="This sign-in link expired. Try again.")
+    app_ctx = entry["app"]
+    back = "settings" if entry["mode"] == "link" else ""
+
+    def fail(msg: str):
+        log.info("SSO %s failed: %r", entry["mode"], msg)
+        resp = _app_redirect(app_ctx, error=msg) if app_ctx else _web_redirect(back, sso_error=msg)
+        resp.delete_cookie(SSO_COOKIE, path=SSO_COOKIE_PATH)
+        return resp
+
+    if not app_ctx and not _binding_ok(request, entry["binding"]):
+        return fail("This sign-in was started in a different browser. Try again.")
+    if error:
+        return fail((error_description or error)[:300])
+    try:
+        p = _sso_provider(entry["pid"])
+        # RFC 9207: if the provider names itself in the response, it must be the one we asked.
+        doc = oidc.discover(sso.resolve_issuer(p))
+        if resp_iss and doc["issuer"] != sso.MS_TEMPLATE and resp_iss.rstrip("/") != doc["issuer"].rstrip("/"):
+            return fail("The sign-in response came from a different provider.")
+        tokens = oidc.exchange_code(p, code, entry["redirect_uri"], entry["verifier"])
+        claims = oidc.validate_id_token(p, tokens["id_token"], entry["nonce"])
+    except (sso.SSOError, ApiError) as exc:
+        return fail(getattr(exc, "msg", None) or str(exc))
+    iss, sub = claims["iss"], str(claims["sub"])
+    if resp_iss and doc["issuer"] == sso.MS_TEMPLATE and resp_iss.rstrip("/") != iss.rstrip("/"):
+        return fail("The sign-in response came from a different provider.")
+    email = claims.get("email") if claims.get("email_verified", True) not in (False, "false") else None
+    email = email or claims.get("preferred_username")
+    c = store.conn()
+    row = c.execute("SELECT * FROM user_identities WHERE issuer=? AND subject=?", (iss, sub)).fetchone()
+
+    if entry["mode"] == "link":
+        if row and row["user_id"] != entry["user_id"]:
+            return fail(f"That {p['name']} account is already linked to another ScanVault login.")
+        if row:
+            if row["provider_id"] != p["id"]:
+                c.execute("DELETE FROM sessions WHERE identity_id=?", (row["id"],))
+            c.execute("UPDATE user_identities SET provider_id=?, email=? WHERE id=?", (p["id"], email, row["id"]))
+        else:
+            c.execute(
+                "INSERT INTO user_identities(id,user_id,provider_id,issuer,subject,email,created_at) VALUES(?,?,?,?,?,?,?)",
+                (crypto.random_id(), entry["user_id"], p["id"], iss, sub, email, time.time()),
+            )
+        resp = _web_redirect("settings", sso="linked")
+        resp.delete_cookie(SSO_COOKIE, path=SSO_COOKIE_PATH)
+        return resp
+
+    if row and row["provider_id"] != p["id"]:
+        row = None  # an identity only signs in through the provider it was linked with
+    if not row or not c.execute("SELECT 1 FROM users WHERE id=?", (row["user_id"],)).fetchone():
+        return fail(f"This {p['name']} account isn't linked to ScanVault yet. Sign in with your password, then link it under Settings > Single sign-on.")
+    c.execute("UPDATE user_identities SET last_login=?, email=? WHERE id=?", (time.time(), email, row["id"]))
+    grant = {
+        "user_id": row["user_id"],
+        "identity_id": row["id"],
+        "binding": entry["binding"],
+        "challenge": app_ctx["challenge"] if app_ctx else None,
+    }
+    if app_ctx:
+        # Anything on the phone can open /start with its own scanvault:// redirect,
+        # so the person confirms on a page served by ScanVault before an app gets a ticket.
+        cid = _sso_confirms.put({"grant": grant, "app": app_ctx, "email": email, "provider": p["name"]})
+        return _app_confirm_page(cid, email, p["name"])
+    # The session itself is issued by POST /api/auth/sso/exchange, a same-origin
+    # request, so the SameSite=Strict session cookie is set reliably.
+    return _web_redirect("sso", ticket=_sso_tickets.put(grant))
+
+
+_sso_confirms = sso.PendingStore(ttl=300)
+
+
+def _app_confirm_page(cid: str, email: str | None, provider: str) -> HTMLResponse:
+    from html import escape
+
+    who = escape(email or "your account")
+    body = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in to the ScanVault app?</title><style>
+body{{font:16px/1.5 system-ui,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;background:#f4f7f7;color:#13201f}}
+main{{max-width:420px;margin:24px;padding:28px;background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.08)}}
+h1{{font-size:22px;margin:0 0 12px}}p{{margin:0 0 14px}}.row{{display:flex;gap:10px;margin-top:20px}}
+button{{flex:1;font:inherit;font-weight:600;padding:12px;border-radius:10px;border:1px solid #c9d6d5;background:#fff;cursor:pointer}}
+button.go{{background:#0b5d63;color:#fff;border-color:#0b5d63}}.warn{{font-size:14px;color:#6b4b00;background:#fff6dc;padding:10px 12px;border-radius:10px}}
+@media (prefers-color-scheme:dark){{body{{background:#0d1416;color:#e6eeee}}main{{background:#162024}}button{{background:#162024;color:#e6eeee;border-color:#2b3a3e}}.warn{{background:#3a2f12;color:#ffe3a3}}}}
+</style></head><body><main><h1>Sign in to the ScanVault app?</h1>
+<p>You signed in with {escape(provider)} as <b>{who}</b>. Continuing gives the app that opened this page access to your ScanVault for 30 days.</p>
+<p class="warn">Only continue if you just tapped <b>Continue with {escape(provider)}</b> in the ScanVault app yourself.</p>
+<form method="post" action="/api/auth/sso/app-confirm"><input type="hidden" name="cid" value="{escape(cid)}">
+<div class="row"><button name="action" value="cancel">Cancel</button><button class="go" name="action" value="allow">Continue</button></div></form>
+</main></body></html>"""
+    return HTMLResponse(body, headers={"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'", "Cache-Control": "no-store"})
+
+
+@app.post("/api/auth/sso/app-confirm")
+def sso_app_confirm(request: Request, cid: str = Form(""), action: str = Form("")):
+    c = _sso_confirms.pop(cid)
+    if not c:
+        return HTMLResponse("<!doctype html><p>This sign-in expired. Go back to the ScanVault app and try again.</p>", status_code=400)
+    if action != "allow":
+        return RedirectResponse(_app_redirect(c["app"], error="cancelled").headers["location"], status_code=303)
+    ticket = _sso_tickets.put(c["grant"])
+    return RedirectResponse(_app_redirect(c["app"], ticket=ticket).headers["location"], status_code=303)
+
+
+@app.post("/api/auth/sso/exchange")
+async def sso_exchange(request: Request):
+    """Trade a one-time SSO ticket for a session. Browsers are matched by the
+    binding cookie; apps must send the PKCE ``code_verifier`` they started with."""
+    j = await body_json(request)
+    t = _sso_tickets.pop(str(j.get("ticket") or ""))
+    if not t:
+        raise ApiError(400, "This sign-in link expired. Try again.", "sso_expired")
+    if t["challenge"]:
+        if not secrets.compare_digest(sso.pkce_challenge(str(j.get("code_verifier") or "")), t["challenge"]):
+            raise ApiError(400, "code_verifier does not match", "sso_pkce")
+    elif not _binding_ok(request, t["binding"]):
+        raise ApiError(400, "This sign-in was started in a different browser. Try again.", "sso_binding")
+    tok, exp = new_session(t["user_id"], t.get("identity_id"))
+    resp = session_response(request, {"token": tok, "expires_at": iso(exp), "unlocked": vault.unlocked}, tok, exp)
+    resp.delete_cookie(SSO_COOKIE, path=SSO_COOKIE_PATH)
+    return resp
+
+
+# ---- administration
+
+@app.get("/api/sso/config")
+def sso_config(request: Request):
+    u = require_user(request)
+    cfg = _sso_cfg()
+    names = {p["id"]: p["name"] for p in _sso_providers(include_disabled=True)}
+    idents = [
+        {"id": r["id"], "provider_id": r["provider_id"], "provider_name": names.get(r["provider_id"], "Removed provider"),
+         "email": r["email"], "linked_at": iso(r["created_at"]), "last_login": iso(r["last_login"])}
+        for r in store.conn().execute("SELECT * FROM user_identities WHERE user_id=? ORDER BY created_at", (u["id"],))
+    ]
+    return {
+        "providers": [_sso_admin_out(p) for p in _sso_providers(include_disabled=True)],
+        "local_login": cfg["local_login"],
+        "local_login_effective": local_login_enabled(),
+        "local_login_forced": FORCE_LOCAL_LOGIN,
+        "reauth_fresh": _recent_sso(u),
+        "redirect_uri": _sso_redirect_uri(request),
+        "presets": sso.PRESETS,
+        "identities": idents,
+    }
+
+
+def _sso_provider_from(j: dict, old: dict | None = None) -> dict:
+    p = dict(old or {})
+    preset = j.get("preset", p.get("preset", "generic"))
+    if preset not in sso.PRESETS:
+        raise ApiError(400, "Unknown provider type")
+    p["preset"] = preset
+    p["name"] = _str(j.get("name"), 60) or p.get("name") or sso.PRESETS[preset]["name"]
+    if "issuer" in j:
+        p["issuer"] = (_str(j["issuer"], 500) or "").rstrip("/") if preset == "generic" else ""
+    if "fields" in j:
+        keys = {f["key"] for f in sso.PRESETS[preset]["fields"]}
+        p["fields"] = {k: _str(v, 300) or "" for k, v in (j.get("fields") or {}).items() if k in keys}
+    if "client_id" in j:
+        p["client_id"] = _str(j["client_id"], 300) or ""
+    if j.get("client_secret"):
+        p["client_secret"] = str(j["client_secret"]).strip()[:2000]
+    if j.get("clear_secret"):
+        p.pop("client_secret", None)
+    if "scopes" in j:
+        scopes = (_str(j["scopes"], 300) or sso.DEFAULT_SCOPES).split()
+        p["scopes"] = " ".join(["openid"] + [s for s in scopes if s != "openid"])
+    if "enabled" in j:
+        p["enabled"] = bool(j["enabled"])
+    if not p.get("client_id"):
+        raise ApiError(400, "Enter the client ID from your identity provider")
+    issuer = sso.resolve_issuer(p)
+    if not issuer:
+        raise ApiError(400, "Enter the issuer URL" if preset == "generic" else "Fill in every field of the provider")
+    try:
+        sso.validate_issuer_url(issuer)
+        oidc.discover(issuer, force=True)
+    except sso.SSOError as exc:
+        raise ApiError(400, f"Could not read the provider's OpenID configuration: {exc}", "sso_discovery") from exc
+    return p
+
+
+@app.post("/api/sso/providers")
+async def sso_create_provider(request: Request):
+    u = _require_admin(request)
+    j = await body_json(request)
+    _reauth(u, j)
+    p = _sso_provider_from(j)
+    p["id"] = crypto.random_id()
+    p.setdefault("enabled", True)
+    cfg = _sso_cfg()
+    cfg["providers"].append(p)
+    _sso_save(cfg)
+    return _sso_admin_out(p)
+
+
+@app.put("/api/sso/providers/{pid}")
+async def sso_update_provider(pid: str, request: Request):
+    u = _require_admin(request)
+    j = await body_json(request)
+    _reauth(u, j)
+    cfg = _sso_cfg()
+    for i, old in enumerate(cfg["providers"]):
+        if old["id"] == pid:
+            cfg["providers"][i] = p = _sso_provider_from(j, old)
+            _sso_save(cfg)
+            c = store.conn()
+            if sso.resolve_issuer(p) != sso.resolve_issuer(old) or p["client_id"] != old.get("client_id"):
+                # A different provider behind the same entry: its old links no longer mean anything.
+                _revoke_identity_sessions("provider_id=?", (pid,))
+                c.execute("DELETE FROM user_identities WHERE provider_id=?", (pid,))
+            elif not p.get("enabled", True):
+                _revoke_identity_sessions("provider_id=?", (pid,))
+            return _sso_admin_out(p)
+    if pid == "env":
+        raise ApiError(409, "This provider is configured with SCANVAULT_OIDC_* environment variables")
+    raise ApiError(404, "Unknown sign-in provider")
+
+
+@app.delete("/api/sso/providers/{pid}")
+def sso_delete_provider(pid: str, request: Request):
+    _require_admin(request)
+    if pid == "env":
+        raise ApiError(409, "This provider is configured with SCANVAULT_OIDC_* environment variables")
+    cfg = _sso_cfg()
+    cfg["providers"] = [p for p in cfg["providers"] if p["id"] != pid]
+    _sso_save(cfg)
+    _revoke_identity_sessions("provider_id=?", (pid,))
+    store.conn().execute("DELETE FROM user_identities WHERE provider_id=?", (pid,))
+    return {"ok": True, "local_login": local_login_enabled()}
+
+
+@app.post("/api/sso/providers/{pid}/test")
+def sso_test_provider(pid: str, request: Request):
+    _require_admin(request)
+    p = _sso_provider(pid, include_disabled=True)
+    try:
+        doc = oidc.discover(sso.resolve_issuer(p), force=True)
+    except sso.SSOError as exc:
+        raise ApiError(502, str(exc), "sso_discovery") from exc
+    return {"ok": True, "issuer": doc["issuer"], "authorization_endpoint": doc["authorization_endpoint"]}
+
+
+@app.put("/api/sso/settings")
+async def sso_settings(request: Request):
+    u = _require_admin(request)
+    j = await body_json(request)
+    cfg = _sso_cfg()
+    if "local_login" in j:
+        want = bool(j["local_login"])
+        if not want and cfg["local_login"]:
+            _reauth(u, j)
+        if not want:
+            ids = {p["id"] for p in _sso_providers()}
+            mine = [r for r in store.conn().execute("SELECT provider_id FROM user_identities WHERE user_id=?", (u["id"],)) if r["provider_id"] in ids]
+            if not mine:
+                raise ApiError(400, "Link an SSO account to your login first, so you can still sign in.")
+        cfg["local_login"] = want
+    _sso_save(cfg)
+    return {"ok": True, "local_login": local_login_enabled()}
+
+
+@app.delete("/api/sso/identities/{iid}")
+def sso_unlink(iid: str, request: Request):
+    u = require_user(request)
+    _revoke_identity_sessions("id=? AND user_id=?", (iid, u["id"]))
+    store.conn().execute("DELETE FROM user_identities WHERE id=? AND user_id=?", (iid, u["id"]))
+    if _linked_identity_count() == 0 and not _sso_cfg()["local_login"]:
+        cfg = _sso_cfg()
+        cfg["local_login"] = True  # never leave the vault without a way to sign in
+        _sso_save(cfg)
+    return {"ok": True, "local_login": local_login_enabled()}
 
 
 # =================================================================== scheduler

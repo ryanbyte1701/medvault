@@ -18,6 +18,13 @@ services:
       SCANVAULT_MAX_UPLOAD_MB: ${SCANVAULT_MAX_UPLOAD_MB:-2048}
       PUID: ${PUID:-10001}
       PGID: ${PGID:-10001}
+      # Optional single sign-on provider (or add providers in Settings > Single sign-on):
+      # SCANVAULT_OIDC_PRESET: authentik
+      # SCANVAULT_OIDC_ISSUER: https://auth.example.com/application/o/scanvault/
+      # SCANVAULT_OIDC_CLIENT_ID: scanvault
+      # SCANVAULT_OIDC_CLIENT_SECRET_FILE: /run/secrets/scanvault_oidc_secret
+      # Break-glass: re-enable password sign-in if it was turned off
+      # SCANVAULT_FORCE_LOCAL_LOGIN: "1"
       # Optional unattended unlock after restarts (see README trade-offs):
       # SCANVAULT_PASSPHRASE_FILE: /run/secrets/scanvault_passphrase
     # secrets:
