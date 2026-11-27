@@ -56,7 +56,7 @@ fun UnlockDialog(container: AppContainer) {
     AlertDialog(
         onDismissRequest = {},
         properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),
-        title = { Text("Vault is locked") },
+        title = { GuardDialogTouches(); Text("Vault is locked") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("The ScanVault server restarted and needs its encryption key before it can show records.")
@@ -106,7 +106,7 @@ fun UnlockDialog(container: AppContainer) {
             }
         },
         dismissButton = {
-            TextButton(onClick = { container.signOut() }, enabled = !busy) { Text("Sign out") }
+            TextButton(onClick = { container.logout() }, enabled = !busy) { Text("Sign out") }
         },
     )
 }

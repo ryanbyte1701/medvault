@@ -41,6 +41,14 @@ class NetworkSecurityTest {
         assertEquals(0, api().patients().size)
     }
 
+    @Test fun httpOptInIsBoundToItsHost() = runTest {
+        server.enqueue(MockResponse().setBody("[]"))
+        val other = ApiClient(server.url("/").toString(), { "tok" },
+            HttpClients.create({ host -> host == "nas.local" }, { emptySet() }))
+        try { other.patients(); fail("expected refusal") } catch (e: InsecureConnectionException) { }
+        assertEquals(0, server.requestCount)
+    }
+
     @Test fun vaultKeyIsNeverSentOverHttpEvenWhenOptedIn() = runTest {
         allowHttp = true
         try { api().unlock(passphrase = "secret"); fail("expected refusal") } catch (e: InsecureConnectionException) { }
@@ -74,16 +82,29 @@ class CertificatePinningTest {
     @Test fun selfSignedIsRejectedWithItsFingerprintUntilPinned() = runTest {
         var pins = emptySet<String>()
         val api = ApiClient(url, { null }, HttpClients.create({ false }, { pins }))
-        val fp = try {
-            api.status(); fail("expected untrusted"); ""
-        } catch (e: Exception) {
-            HttpClients.untrustedCertificate(e)!!.fingerprint
-        }
-        assertEquals(cert.certificate.sha256Fingerprint(), fp)
+        val untrusted = checkNotNull(
+            try {
+                api.status(); fail("expected untrusted"); null
+            } catch (e: Exception) {
+                HttpClients.untrustedCertificate(e)
+            },
+        )
+        assertEquals(cert.certificate.sha256Fingerprint(), untrusted.fingerprint)
+        assertEquals(CertPins.key("localhost", server.port, untrusted.fingerprint), untrusted.pinKey)
         assertEquals(0, server.requestCount)
 
-        pins = setOf(fp)
+        pins = setOf(untrusted.pinKey!!)
         server.enqueue(MockResponse().setBody("""{"unlocked":true}"""))
         assertTrue(api.status().unlocked)
+    }
+
+    @Test fun aPinOnlyAppliesToItsOwnHostAndPort() = runTest {
+        val fp = cert.certificate.sha256Fingerprint()
+        val pins = setOf(CertPins.key("localhost", server.port + 1, fp), CertPins.key("nas.local", server.port, fp))
+        val api = ApiClient(url, { null }, HttpClients.create({ false }, { pins }))
+        try { api.status(); fail("pin for another server must not apply") } catch (e: Exception) {
+            assertTrue(HttpClients.untrustedCertificate(e) != null)
+        }
+        assertEquals(0, server.requestCount)
     }
 }
