@@ -10,17 +10,19 @@ works for backups made with "passphrase restore" turned on in Settings.
 
 Output:
     restored/
-      patients.json                 # every patient, study and file record
+      patients.json                 # every patient, study, file and lab result record
       Jane Doe (1980-04-02)/
         2026-03-14 MR Knee - Lakeside Imaging/
           report.pdf
           IM000001.dcm ...
+        lab-results.csv             # LabsVault values, one row per result
 Add --vault-only to just extract the encrypted vault (to import into a new
 ScanVault via setup > Restore instead).
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import getpass
 import json
 import re
@@ -96,6 +98,33 @@ def restore(ap, a) -> int:
             shutil.rmtree(work, ignore_errors=True)
 
 
+LAB_COLS = ["date", "name", "loinc", "value", "unit", "flag", "ref_low", "ref_high", "ref_text", "lab_name", "source"]
+
+
+def lab_results(db, mk: bytes, pid: str, failed: list) -> list[dict]:
+    """Saved LabsVault results for one patient (none in backups made before LabsVault)."""
+    try:
+        reports = db.execute("SELECT * FROM lab_reports WHERE patient_id=? AND status='saved'", (pid,)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    out = []
+    for rep in reports:
+        try:
+            rd = crypto.open_json(mk, rep["blob"], f"labreport:{rep['id']}")
+        except crypto.CryptoError as exc:
+            failed.append(f"lab report {rep['id']}: {exc}")
+            continue
+        for r in db.execute("SELECT * FROM lab_results WHERE report_id=?", (rep["id"],)):
+            try:
+                d = crypto.open_json(mk, r["blob"], f"labresult:{r['id']}")
+            except crypto.CryptoError as exc:
+                failed.append(f"lab result {r['id']}: {exc}")
+                continue
+            out.append({**d, "lab_name": rd.get("lab_name"), "report_id": rep["id"]})
+    out.sort(key=lambda d: (d.get("date") or "", d.get("name") or ""))
+    return out
+
+
 def export(mk: bytes, work: Path, out: Path) -> int:
     db = sqlite3.connect(work / "scanvault.db")
     db.row_factory = sqlite3.Row
@@ -139,6 +168,14 @@ def export(mk: bytes, work: Path, out: Path) -> int:
                     srec["files"].append({**fd, "id": f["id"], "kind": f["kind"], "sha256": sha, "path": str(dst.relative_to(out))})
                     n += 1
                 prec["studies"].append(srec)
+            prec["lab_results"] = lab_results(db, mk, p["id"], failed)
+            if prec["lab_results"]:
+                pdir.mkdir(parents=True, exist_ok=True)
+                with open(pdir / "lab-results.csv", "w", newline="") as fh:
+                    w = csv.writer(fh)
+                    w.writerow(LAB_COLS)
+                    for r in prec["lab_results"]:
+                        w.writerow([r.get(k, "") if r.get(k) is not None else "" for k in LAB_COLS])
             index.append(prec)
     finally:
         db.close()

@@ -51,6 +51,15 @@ CREATE TABLE IF NOT EXISTS ai_config (id TEXT PRIMARY KEY, blob BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS ai_audit (
   id TEXT PRIMARY KEY, created_at REAL NOT NULL, user_id TEXT, blob BLOB NOT NULL);
 CREATE INDEX IF NOT EXISTS ai_audit_time ON ai_audit(created_at);
+CREATE TABLE IF NOT EXISTS lab_reports (
+  id TEXT PRIMARY KEY, patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'draft', created_at REAL NOT NULL, updated_at REAL NOT NULL, blob BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS lab_results (
+  id TEXT PRIMARY KEY, report_id TEXT NOT NULL REFERENCES lab_reports(id) ON DELETE CASCADE,
+  patient_id TEXT NOT NULL, created_at REAL NOT NULL, blob BLOB NOT NULL);
+CREATE INDEX IF NOT EXISTS lab_reports_patient ON lab_reports(patient_id);
+CREATE INDEX IF NOT EXISTS lab_results_patient ON lab_results(patient_id);
+CREATE INDEX IF NOT EXISTS lab_results_report ON lab_results(report_id);
 """
 
 
