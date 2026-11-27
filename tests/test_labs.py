@@ -272,3 +272,17 @@ def test_emergency_restore_exports_lab_results(vault, tmp_path):
     csv_text = next(out.glob("*/lab-results.csv")).read_text()
     assert "2026-06-09,GLUCOSE,2345-7,108,mg/dL,H,65.0,99.0" in csv_text
     assert next(out.glob("*/*/*.pdf")).read_bytes()[:4] == b"%PDF"
+
+
+def test_lab_actions_reach_the_activity_log(vault, monkeypatch):
+    c, B, _ = vault
+    seen = []
+    monkeypatch.setattr(main, "log_event", lambda request, action, **kw: seen.append((action, kw)), raising=False)
+    p = _patient(c, B)
+    d = _upload(c, B, p["id"], lab_samples.labcorp_classic())
+    c.put(f"/api/labs/reports/{d['id']}", json={"save": True}, headers=B)
+    c.get(f"/api/patients/{p['id']}/labs/export.csv", headers=B)
+    c.delete(f"/api/labs/reports/{d['id']}", headers=B)
+    assert [a for a, _ in seen] == ["lab.upload", "lab.save", "lab.export", "lab.delete"]
+    assert all(kw["patient_id"] == p["id"] for _, kw in seen)
+    assert "5.120" not in repr(seen)  # no lab values in the log

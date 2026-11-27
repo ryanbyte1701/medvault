@@ -39,7 +39,7 @@ FLAGS = ("H", "L", "HH", "LL", "A", "C")
 
 def _activity(request: Request, action: str, **details) -> None:
     """Record in the activity log when the app has one (best effort)."""
-    fn = getattr(M, "log_activity", None) or getattr(M, "audit", None)
+    fn = getattr(M, "log_event", None)
     if fn is None:
         return
     try:
@@ -358,7 +358,7 @@ async def upload_report(pid: str, request: Request):
     finally:
         form.close()
     if not out.get("duplicate"):
-        _activity(request, "lab_report.upload", patient_id=pid, report_id=out["id"], file_id=out.get("file_id"), lab=out.get("lab"), results=len(out.get("rows", [])))
+        _activity(request, "lab.upload", patient_id=pid, report_id=out["id"], file_id=out.get("file_id"), lab=out.get("lab"), results=len(out.get("rows", [])))
     return out
 
 
@@ -375,7 +375,7 @@ async def create_report(pid: str, request: Request):
         "INSERT INTO lab_reports(id,patient_id,status,created_at,updated_at,blob) VALUES(?,?,?,?,?,?)",
         (rid, pid, "draft", now, now, seal(master, d, f"labreport:{rid}")),
     )
-    _activity(request, "lab_report.create", patient_id=pid, report_id=rid)
+    _activity(request, "lab.create", patient_id=pid, report_id=rid)
     if j.get("rows") or j.get("save"):
         return await _update(rid, j, master, request)
     return _report_out(_report_row(rid), master, full=True)
@@ -425,7 +425,7 @@ async def _update(rid: str, j: dict, master: bytes, request: Request) -> dict:
             sd = unseal(master, srow["blob"], f"study:{sid}")
             sd.update(study_date=d.get("collected"), facility=d.get("lab_name") or sd.get("facility"), title=f"{d.get('lab_name') or 'Lab'} lab report")
             c.execute("UPDATE studies SET blob=? WHERE id=?", (seal(master, sd, f"study:{sid}"), sid))
-        _activity(request, "lab_report.save" if status == "draft" else "lab_report.update", patient_id=row["patient_id"], report_id=rid, results=n)
+        _activity(request, "lab.save" if status == "draft" else "lab.update", patient_id=row["patient_id"], report_id=rid, results=n)
     else:
         if status == "saved" and rows is not None:
             raise M.ApiError(400, "Send save: true to change the results of a saved report")
@@ -433,7 +433,7 @@ async def _update(rid: str, j: dict, master: bytes, request: Request) -> dict:
             d["rows"] = rows
         c.execute("UPDATE lab_reports SET updated_at=?, blob=? WHERE id=?", (time.time(), seal(master, d, f"labreport:{rid}"), rid))
         if status == "saved":
-            _activity(request, "lab_report.update", patient_id=row["patient_id"], report_id=rid)
+            _activity(request, "lab.update", patient_id=row["patient_id"], report_id=rid)
     return _report_out(_report_row(rid), master, full=True)
 
 
@@ -461,7 +461,7 @@ def delete_report(rid: str, request: Request, keep_file: int = 0):
             srow = c.execute("SELECT * FROM studies WHERE id=?", (sid,)).fetchone()
             if srow and unseal(master, srow["blob"], f"study:{sid}").get("lab_report"):
                 c.execute("DELETE FROM studies WHERE id=?", (sid,))
-    _activity(request, "lab_report.delete", patient_id=row["patient_id"], report_id=rid, file_id=d.get("file_id") if removed_file else None)
+    _activity(request, "lab.delete", patient_id=row["patient_id"], report_id=rid, file_id=d.get("file_id") if removed_file else None)
     return {"ok": True}
 
 
@@ -555,6 +555,6 @@ def export_csv(pid: str, request: Request):
         row = [d.get("date"), info.get("name") or d.get("name"), d.get("loinc") or "", d.get("value"), d.get("unit") or "", d.get("flag") or "",
                "" if d.get("ref_low") is None else d["ref_low"], "" if d.get("ref_high") is None else d["ref_high"], d.get("ref_text") or "", d.get("lab_name") or "", d.get("source")]
         w.writerow([("'" + str(x)) if isinstance(x, str) and x[:1] in ("=", "+", "-", "@") and not re.fullmatch(r"-?\d+(\.\d+)?", x) else x for x in row])
-    _activity(request, "lab_results.export", patient_id=pid)
+    _activity(request, "lab.export", patient_id=pid)
     name = re.sub(r"[^A-Za-z0-9]+", "-", p.get("name") or "patient").strip("-") or "patient"
     return Response(b.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="labs-{name}.csv"'})
