@@ -83,6 +83,8 @@ class ReadmeScreenshots {
         c.theme.update { it.copy(mode = ThemeMode.DARK, darkColor = "#0d1416") }
         c.onSignedIn(url, "ryan", "sample-token", unlocked = true)
         c.appLock.unlock()
+        // Robolectric can't draw hardware bitmaps, so thumbnails need software ones.
+        coil.Coil.setImageLoader(c.imageLoader.newBuilder().allowHardware(false).build())
         scenario = ActivityScenario.launch(MainActivity::class.java)
         settle()
     }
@@ -104,6 +106,7 @@ class ReadmeScreenshots {
         clickAny("Jane Doe")
         shot("android-patient")
         clickAny("CT chest with contrast")
+        settle(3000)
         shot("android-study")
         compose.onAllNodes(hasContentDescription("IM000003.dcm"), useUnmergedTree = true)[0].performClick()
         settle(4000)
