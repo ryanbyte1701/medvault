@@ -2,14 +2,14 @@ name: README screenshots
 
 # Renders the README screenshots (real screens, fictional sample vault, dark theme) with
 # Robolectric and uploads them as the `readme-screenshots` artifact. Copy them into
-# docs/screenshots/ to update the README.
+# android/docs/screenshots/ to update the README.
 on:
   workflow_dispatch:
   pull_request:
     paths:
-      - "app/src/test/java/com/scanvault/android/screenshots/**"
-      - "app/src/test/resources/sample-vault/**"
-      - ".github/workflows/screenshots.yml"
+      - "android/app/src/test/java/com/scanvault/android/screenshots/**"
+      - "android/app/src/test/resources/sample-vault/**"
+      - ".github/workflows/android-screenshots.yml"
 
 permissions:
   contents: read
@@ -17,6 +17,9 @@ permissions:
 jobs:
   screenshots:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: gradle/actions/wrapper-validation@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
@@ -36,9 +39,9 @@ jobs:
         if: always()
         with:
           name: readme-screenshots
-          path: app/build/screenshots/*.png
+          path: android/app/build/screenshots/*.png
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: screenshot-test-report
-          path: app/build/reports/tests/
+          path: android/app/build/reports/tests/

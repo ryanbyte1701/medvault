@@ -1,10 +1,12 @@
-name: Docker image
+name: Server (tests and Docker image)
 
 on:
   push:
     branches: [main]
     tags: ["v*"]
+    paths: ["server/**", ".github/workflows/server.yml"]
   pull_request:
+    paths: ["server/**", ".github/workflows/server.yml"]
   workflow_dispatch:
 
 permissions:
@@ -15,6 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    defaults:
+      run:
+        working-directory: server
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -50,7 +55,7 @@ jobs:
             type=sha
       - uses: docker/build-push-action@v6
         with:
-          context: .
+          context: server
           # amd64 for Intel/AMD Synology models (DS920+, DS923+, DS1522+...),
           # arm64 for ARM ones (DS223, DS423, DS124...)
           platforms: linux/amd64,linux/arm64
