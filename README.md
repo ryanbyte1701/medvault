@@ -206,6 +206,49 @@ Notes:
   at a different issuer or client ID ends the sessions it created.
 - SAML is not supported. Every provider listed above speaks OpenID Connect.
 
+### Directory sign-in (LDAPS)
+
+If you already have a directory (Active Directory, Synology Directory Server,
+Synology LDAP Server, FreeIPA or OpenLDAP), people can sign in with their
+directory username and password on the normal sign-in form. The Android app
+works with no changes because it uses the same password sign-in.
+
+1. **Settings > Single sign-on > Directory sign-in > Set up.** Pick the
+   directory type, enter the server (`ldaps://host`, or `ldap://host` for
+   StartTLS), a service account and the base DN, and optionally the groups
+   whose members may sign in. **Save and test** connects before saving.
+2. **Link my account** with your directory username and password once. As with
+   OIDC, only linked directory accounts can sign in.
+
+How it is protected:
+
+- **Always encrypted.** ScanVault speaks LDAPS or LDAP with StartTLS (TLS 1.2+)
+  and never plain LDAP. The certificate is checked against trusted CAs (the
+  system's, or a CA certificate you paste) and the host name, or against a
+  pinned SHA-256 fingerprint for a self-signed NAS certificate. The check runs
+  before any password is sent. **Read from server** shows the fingerprint the
+  server presents; compare it with the one your directory shows.
+- ScanVault finds the person with the service account, requires exactly one
+  match (usernames are escaped against LDAP filter injection), checks the
+  allowed groups (nested groups on Active Directory), then binds as that
+  person. Empty passwords are refused, so an anonymous bind can't pass for a
+  sign-in. Links use the account's permanent ID (`objectGUID`, `entryUUID` or
+  `ipaUniqueID`), so a renamed account stays linked and a reused username does
+  not inherit access.
+- Failed attempts count against the same per-address and per-account limits as
+  ScanVault passwords. Setting up, changing or linking the directory needs your
+  ScanVault password (or an SSO sign-in in the last 10 minutes). Pointing it at
+  a different server or base DN unlinks everyone; disabling, unlinking or
+  removing it signs out the sessions it created.
+- The service account password is stored like OIDC client secrets (in the
+  database, write-only in the API). To keep it out of the database, use
+  `SCANVAULT_LDAP_BIND_PASSWORD_FILE` with a Docker secret. The whole
+  configuration can also come from `SCANVAULT_LDAP_URL`, `_BIND_DN`, `_BASE_DN`,
+  `_PRESET` (`active_directory`, `synology_ldap`, `freeipa`, `openldap`),
+  `_PIN_SHA256`, `_GROUPS` (separated by `;`) and `_NAME`.
+- Directory sign-in never unlocks the vault. After a restart you still enter
+  the encryption key.
+
 ## Backup destinations
 
 Every backup is a single `scanvault-backup-<vault id>-YYYYMMDD-HHMMSSZ-<rand>.svb`
@@ -376,6 +419,9 @@ https entries match scheme, host and port exactly.
 | GET | `/api/files/{id}/render?wc=&ww=&frame=` | DICOM rendered with a window center/width in modality units (HU for CT). `X-Window-*`, `X-Default-*`, `X-Min/Max`, `X-Frames`, `X-Modality` headers |
 | GET | `/api/auth/sso/{id}/start` | begin SSO sign-in (browser navigation; apps add `app_redirect`, `app_state`, `code_challenge`) |
 | POST | `/api/auth/sso/exchange` | `{ticket, code_verifier?}` → session |
+| GET/PUT/DELETE | `/api/ldap/config` | directory sign-in settings (bind password write-only; PUT tests the connection and needs `password`) |
+| POST | `/api/ldap/link` | `{directory_username, directory_password, password}` |
+| POST | `/api/ldap/fingerprint` | `{url}` → `{sha256}` of the certificate the server presents |
 | POST | `/api/auth/sso/{id}/link` | signed in: returns `{url}` to link a provider account |
 | GET | `/api/sso/config` | providers (secrets write-only), redirect URI, presets, your linked accounts |
 | POST/PUT/DELETE | `/api/sso/providers[/{id}]` | `{preset, name, issuer?, fields?, client_id, client_secret?, scopes?, enabled?}` |
