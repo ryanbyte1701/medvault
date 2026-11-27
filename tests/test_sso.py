@@ -72,11 +72,13 @@ def env(monkeypatch):
     main._sso_requests.clear()
     main._sso_tickets.clear()
     main._start_hits.clear()
+    for t in (main.login_throttle, main.account_throttle, main.key_throttle, main.setup_throttle):
+        t._fails.clear()
     idp = IdP()
     with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
         idp.install(rsps)
         with TestClient(main.app, base_url="https://sv.example.com") as c:
-            r = c.post("/api/setup", json={"username": "ryan", "password": "pw-1234567890", "passphrase": PASS}, headers=H)
+            r = c.post("/api/setup", json={"username": "ryan", "password": "pw-1234567890", "passphrase": PASS}, headers={"X-Setup-Code": "TEST-CODE-0001"})
             assert r.status_code == 200, r.text
             c.cookies.clear()
             yield c, idp, {"Authorization": f"Bearer {r.json()['token']}"}

@@ -7,6 +7,7 @@ import os
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import crypto
@@ -19,7 +20,8 @@ CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'admin', created_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions (
-  token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL);
+  token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL,
+  last_seen REAL);
 CREATE TABLE IF NOT EXISTS patients (
   id TEXT PRIMARY KEY, created_at REAL NOT NULL, updated_at REAL NOT NULL, blob BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS studies (
@@ -60,8 +62,18 @@ class Store:
         self._local = threading.local()
         self.generation = 0  # bumped on restore so every thread reopens the DB
         self.lock = threading.RLock()
+        self._guard = threading.Lock()
+        self._backups_running = 0
+        self._deferred: list[Path] = []
         with self.conn() as c:
             c.executescript(SCHEMA)
+        self.migrate()
+
+    def migrate(self) -> None:
+        c = self.conn()
+        cols = {r[1] for r in c.execute("PRAGMA table_info(sessions)")}
+        if "last_seen" not in cols:
+            c.execute("ALTER TABLE sessions ADD COLUMN last_seen REAL")
 
     def conn(self) -> sqlite3.Connection:
         c = getattr(self._local, "c", None)
@@ -122,6 +134,34 @@ class Store:
 
     def now(self) -> float:
         return time.time()
+
+    # ---- consistent backups
+    @contextmanager
+    def backup_guard(self):
+        """While a backup is being written, blob deletions are queued and run
+        when the last backup finishes, so the archive never references a
+        file that has disappeared."""
+        with self._guard:
+            self._backups_running += 1
+        try:
+            yield
+        finally:
+            with self._guard:
+                self._backups_running -= 1
+                doomed = self._deferred if self._backups_running == 0 else []
+                if doomed:
+                    self._deferred = []
+            for p in doomed:
+                p.unlink(missing_ok=True)
+
+    def remove_blobs(self, file_id: str) -> None:
+        paths = [self.blob_path(file_id), self.preview_path(file_id)]
+        with self._guard:
+            if self._backups_running:
+                self._deferred.extend(paths)
+                return
+        for p in paths:
+            p.unlink(missing_ok=True)
 
 
 def seal(mk: bytes, obj, ctx: str) -> bytes:

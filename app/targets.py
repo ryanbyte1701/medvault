@@ -1,4 +1,4 @@
-"""Backup destinations: Google Drive, Box, SFTP and SCP.
+"""Backup destinations: cloud drives, object storage, SSH, WebDAV, SMB, local disks.
 
 Every archive handed to these classes is already encrypted with the vault
 master key (see backup.py). Providers only ever see ciphertext and an
@@ -35,9 +35,14 @@ class Target:
     # Secrets are write-only in the UI: never returned by the API.
     secret_fields: tuple[str, ...] = ()
 
-    def __init__(self, config: dict, save_config: Callable[[dict], None] | None = None):
+    def __init__(self, config: dict, save_config: Callable[[dict], None] | None = None, vault_id: str = ""):
         self.config = config
         self._save = save_config or (lambda c: None)
+        self.vault_id = vault_id
+
+    @classmethod
+    def validate(cls, config: dict) -> None:
+        """Reject a configuration before it is saved (raise TargetError)."""
 
     def test(self) -> str:
         raise NotImplementedError
@@ -55,10 +60,17 @@ class Target:
     def download(self, handle: str, dest: Path) -> None:
         raise NotImplementedError
 
+    def own_prefix(self) -> str:
+        return f"{PREFIX}{self.vault_id}-" if self.vault_id else PREFIX
+
     def prune(self, keep_last: int) -> int:
+        """Delete this vault's oldest backups beyond keep_last. Backups of other
+        vaults sharing the folder (and pre-0.2 names without a vault id) are
+        never touched."""
         if keep_last <= 0:
             return 0
-        items = [i for i in self.list_backups() if i[0].startswith(PREFIX) and i[0].endswith(SUFFIX)]
+        pre = self.own_prefix()
+        items = [i for i in self.list_backups() if i[0].startswith(pre) and i[0].endswith(SUFFIX)]
         items.sort(key=lambda i: i[0])
         doomed = items[:-keep_last] if len(items) > keep_last else []
         for _, handle in doomed:
@@ -73,6 +85,16 @@ def _raise(resp: requests.Response, what: str) -> None:
         except Exception:
             detail = resp.text[:300]
         raise TargetError(f"{what} failed ({resp.status_code}): {detail}")
+
+
+def _refresh_token_of(r: requests.Response, who: str) -> str:
+    try:
+        tok = r.json().get("refresh_token")
+    except Exception:
+        tok = None
+    if not tok:
+        raise TargetError(f"{who} did not return a refresh token")
+    return tok
 
 
 # ============================================================ Google Drive
@@ -142,23 +164,44 @@ class GoogleDrive(Target):
             timeout=TIMEOUT,
         )
         _raise(r, "Google Drive upload start")
-        url = r.headers["Location"]
+        url = r.headers.get("Location")
+        if not url:
+            raise TargetError("Google Drive did not return an upload session")
         chunk = 32 * 256 * 1024  # 8 MiB, multiple of 256 KiB
+        failures = 0
         with open(path, "rb") as f:
             offset = 0
-            while offset < size or size == 0:
+            while True:
+                f.seek(offset)
                 data = f.read(chunk)
                 end = offset + len(data) - 1
                 rng = f"bytes {offset}-{end}/{size}" if data else f"bytes */{size}"
-                r = requests.put(url, headers={"Content-Range": rng}, data=data, timeout=300)
-                if r.status_code in (200, 201):
+                try:
+                    r = requests.put(url, headers={"Content-Range": rng}, data=data, timeout=300)
+                except requests.RequestException as exc:
+                    r, err = None, exc
+                if r is not None and r.status_code in (200, 201):
                     return
+                if r is None or r.status_code >= 500 or r.status_code == 429:
+                    failures += 1
+                    if failures > 5:
+                        if r is None:
+                            raise TargetError(f"Google Drive upload failed: {err}")
+                        _raise(r, "Google Drive upload")
+                    time.sleep(min(30, 2**failures))
+                    # ask Drive how much it has, then resume from there
+                    try:
+                        r = requests.put(url, headers={"Content-Range": f"bytes */{size}"}, timeout=60)
+                    except requests.RequestException:
+                        continue
+                    if r.status_code in (200, 201):
+                        return
                 if r.status_code != 308:
                     _raise(r, "Google Drive upload")
-                offset = end + 1
-                if size == 0:
-                    break
-        raise TargetError("Google Drive upload did not complete")
+                got = r.headers.get("Range", "")
+                offset = int(got.rsplit("-", 1)[1]) + 1 if "-" in got else 0
+                if size == 0 and not data:
+                    raise TargetError("Google Drive upload did not complete")
 
     def list_backups(self):
         h = self._h()
@@ -305,6 +348,16 @@ class Box(Target):
         )
         _raise(r, "Box upload session")
         sess = r.json()
+        try:
+            self._upload_parts(sess, path, size, h)
+        except Exception:
+            try:
+                requests.delete(sess["session_endpoints"]["abort"], headers=h, timeout=TIMEOUT)
+            except Exception:
+                pass
+            raise
+
+    def _upload_parts(self, sess: dict, path: Path, size: int, h: dict) -> None:
         part_size = sess["part_size"]
         parts, whole = [], hashlib.sha1()
         with open(path, "rb") as f:
@@ -324,15 +377,25 @@ class Box(Target):
                     data=data,
                     timeout=600,
                 )
+                if rr.status_code >= 500:
+                    time.sleep(2)
+                    rr = requests.put(rr.request.url, headers=dict(rr.request.headers), data=data, timeout=600)
                 _raise(rr, "Box upload part")
                 parts.append(rr.json()["part"])
                 offset += len(data)
-        rr = requests.post(
-            sess["session_endpoints"]["commit"],
-            headers={**h, "Digest": "sha=" + base64.b64encode(whole.digest()).decode()},
-            json={"parts": parts},
-            timeout=600,
-        )
+        for _ in range(30):
+            rr = requests.post(
+                sess["session_endpoints"]["commit"],
+                headers={**h, "Digest": "sha=" + base64.b64encode(whole.digest()).decode()},
+                json={"parts": parts},
+                timeout=600,
+            )
+            if rr.status_code != 202:
+                break
+            # Box is still assembling the parts: wait and commit again
+            time.sleep(min(60, int(rr.headers.get("Retry-After", "5") or 5)))
+        else:
+            raise TargetError("Box did not finish processing the upload")
         _raise(rr, "Box upload commit")
 
     def list_backups(self):
@@ -388,7 +451,7 @@ class Box(Target):
             timeout=TIMEOUT,
         )
         _raise(r, "Box code exchange")
-        self.config["refresh_token"] = r.json()["refresh_token"]
+        self.config["refresh_token"] = _refresh_token_of(r, "Box")
         self._save(self.config)
 
 
@@ -465,18 +528,34 @@ class SSHTarget(Target):
         client = self._connect()
         try:
             remote = posixpath.join(self._dir(), name)
+            tmp = remote + ".part"
             if self._proto() == "sftp":
                 sftp = client.open_sftp()
                 _sftp_mkdirs(sftp, self._dir())
-                tmp = remote + ".part"
-                sftp.put(str(path), tmp, confirm=True)
-                sftp.posix_rename(tmp, remote)
+                try:
+                    sftp.put(str(path), tmp, confirm=True)
+                    sftp.posix_rename(tmp, remote)
+                except Exception:
+                    try:
+                        sftp.remove(tmp)
+                    except Exception:
+                        pass
+                    raise
             else:
                 from scp import SCPClient
 
                 _exec(client, f"mkdir -p {_q(self._dir())}")
-                with SCPClient(client.get_transport(), socket_timeout=120) as scp:
-                    scp.put(str(path), remote)
+                try:
+                    with SCPClient(client.get_transport(), socket_timeout=120) as scp:
+                        scp.put(str(path), tmp)
+                    # only a complete upload gets the real backup name
+                    _exec(client, f"test $(wc -c < {_q(tmp)}) -eq {path.stat().st_size} && mv -f {_q(tmp)} {_q(remote)}")
+                except Exception:
+                    try:
+                        _exec(client, f"rm -f {_q(tmp)}")
+                    except Exception:
+                        pass
+                    raise
         finally:
             client.close()
 
@@ -492,8 +571,7 @@ class SSHTarget(Target):
         return sorted((n, n) for n in names if n.startswith(PREFIX) and n.endswith(SUFFIX))
 
     def delete(self, handle: str) -> None:
-        if "/" in handle:
-            raise TargetError("bad name")
+        _plain_name(handle)
         client = self._connect()
         try:
             remote = posixpath.join(self._dir(), handle)
@@ -505,6 +583,7 @@ class SSHTarget(Target):
             client.close()
 
     def download(self, handle: str, dest: Path) -> None:
+        _plain_name(handle)
         client = self._connect()
         try:
             remote = posixpath.join(self._dir(), handle)
@@ -517,6 +596,13 @@ class SSHTarget(Target):
                     scp.get(remote, str(dest))
         finally:
             client.close()
+
+
+def _plain_name(handle: str) -> str:
+    """Remote backup handles that are file names must be just a backup name."""
+    if not handle or "/" in handle or "\\" in handle or handle.startswith(".") or not handle.startswith(PREFIX) or not handle.endswith(SUFFIX):
+        raise TargetError("Not a ScanVault backup name")
+    return handle
 
 
 def _q(s: str) -> str:
@@ -593,10 +679,13 @@ class S3(Target):
             endpoint = S3_PRESETS[prov].format(region=region, account_id=c.get("account_id", ""))
         if not c.get("bucket"):
             raise TargetError("Bucket name is required")
+        if not c.get("access_key_id") or not c.get("secret_access_key"):
+            # never fall back to whatever credentials the host or container has
+            raise TargetError("Access key ID and secret access key are required")
         return boto3.client(
             "s3",
-            aws_access_key_id=c.get("access_key_id") or None,
-            aws_secret_access_key=c.get("secret_access_key") or None,
+            aws_access_key_id=c["access_key_id"],
+            aws_secret_access_key=c["secret_access_key"],
             region_name=region,
             endpoint_url=endpoint or None,
             config=Config(
@@ -626,7 +715,11 @@ class S3(Target):
         self._wrap("bucket check", lambda: cl.head_bucket(Bucket=b))
         k = self._key(".scanvault-write-test")
         self._wrap("write test", lambda: cl.put_object(Bucket=b, Key=k, Body=b"ok"))
-        self._wrap("delete test", lambda: cl.delete_object(Bucket=b, Key=k))
+        try:
+            cl.delete_object(Bucket=b, Key=k)
+        except Exception:
+            return (f"Connected. Backups go to s3://{b}/{self._key('')}. These keys can't delete objects, so ScanVault "
+                    "can't remove old backups: set 'Keep last' to 0 and use a bucket lifecycle rule instead.")
         return f"Connected. Backups go to s3://{b}/{self._key('')}"
 
     def upload(self, path: Path, name: str) -> None:
@@ -653,10 +746,16 @@ class S3(Target):
         return sorted(out)
 
     def delete(self, handle: str) -> None:
+        self._own_key(handle)
         cl = self._client()
         self._wrap("delete", lambda: cl.delete_object(Bucket=self.config["bucket"], Key=handle))
 
+    def _own_key(self, handle: str) -> None:
+        if not handle.startswith(self._key(PREFIX)) or not handle.endswith(SUFFIX) or ".." in handle:
+            raise TargetError("Not a ScanVault backup in this bucket folder")
+
     def download(self, handle: str, dest: Path) -> None:
+        self._own_key(handle)
         cl = self._client()
         self._wrap("download", lambda: cl.download_file(self.config["bucket"], handle, str(dest)))
 
@@ -757,7 +856,7 @@ class Dropbox(Target):
     def exchange_code(self, code: str, redirect_uri: str) -> None:
         r = requests.post(self.TOKEN, data={"grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri}, auth=(self.config.get("app_key", ""), self.config.get("app_secret", "")), timeout=TIMEOUT)
         _raise(r, "Dropbox code exchange")
-        self.config["refresh_token"] = r.json()["refresh_token"]
+        self.config["refresh_token"] = _refresh_token_of(r, "Dropbox")
         self._save(self.config)
 
 
@@ -769,7 +868,9 @@ class OneDrive(Target):
     type = "onedrive"
     secret_fields = ("client_secret", "refresh_token")
     GRAPH = "https://graph.microsoft.com/v1.0"
-    SCOPE = "offline_access Files.ReadWrite"
+    # App folder only (/Apps/<app name>): the token cannot read the rest of the drive.
+    SCOPE = "offline_access Files.ReadWrite.AppFolder"
+    ROOT = "/me/drive/special/approot"
     CHUNK = 320 * 1024 * 32  # 10 MiB, must be a multiple of 320 KiB
 
     def _tenant(self) -> str:
@@ -798,20 +899,20 @@ class OneDrive(Target):
         p = "/".join(x for x in (self._folder(), name) if x)
         from urllib.parse import quote
 
-        return f"{self.GRAPH}/me/drive/root:/{quote(p)}:" if p else f"{self.GRAPH}/me/drive/root"
+        return f"{self.GRAPH}{self.ROOT}:/{quote(p)}:" if p else f"{self.GRAPH}{self.ROOT}"
 
     def test(self) -> str:
         h = {"Authorization": f"Bearer {self._token()}"}
-        d = requests.get(f"{self.GRAPH}/me/drive", headers=h, timeout=TIMEOUT)
-        _raise(d, "OneDrive drive lookup")
+        d = requests.get(f"{self.GRAPH}{self.ROOT}", headers=h, timeout=TIMEOUT)
+        _raise(d, "OneDrive app folder lookup")
         r = requests.get(self._item(), headers=h, timeout=TIMEOUT)
         if r.status_code == 404:
             parent, _, leaf = self._folder().rpartition("/")
-            base = f"{self.GRAPH}/me/drive/root" + (f":/{parent}:" if parent else "")
+            base = f"{self.GRAPH}{self.ROOT}" + (f":/{parent}:" if parent else "")
             r = requests.post(f"{base}/children", headers=h, json={"name": leaf, "folder": {}, "@microsoft.graph.conflictBehavior": "replace"}, timeout=TIMEOUT)
         _raise(r, "OneDrive folder")
-        owner = (d.json().get("owner") or {}).get("user", {}).get("displayName", "")
-        return f"Connected{(' as ' + owner) if owner else ''}. Backups go to /{self._folder()}"
+        app_dir = d.json().get("name") or "the app folder"
+        return f"Connected. Backups go to Apps/{app_dir}/{self._folder()}"
 
     def upload(self, path: Path, name: str) -> None:
         h = {"Authorization": f"Bearer {self._token()}"}
@@ -869,65 +970,135 @@ class OneDrive(Target):
             timeout=TIMEOUT,
         )
         _raise(r, "OneDrive code exchange")
+        if not r.json().get("refresh_token"):
+            raise TargetError("OneDrive did not return a refresh token (is offline_access allowed?)")
         self.config["refresh_token"] = r.json()["refresh_token"]
         self._save(self.config)
 
 
 # ============================================================ WebDAV / Nextcloud
+class _PinnedAdapter(requests.adapters.HTTPAdapter):
+    """Accept exactly one (self-signed) certificate, identified by its SHA-256
+    fingerprint. urllib3 checks it during the TLS handshake, before any
+    request (or password) is sent."""
+
+    def __init__(self, fingerprint: str, **kw):
+        self._fp = fingerprint.replace(":", "").lower()
+        super().__init__(**kw)
+
+    def init_poolmanager(self, *a, **kw):
+        kw["assert_fingerprint"] = self._fp
+        kw["cert_reqs"] = "CERT_NONE"
+        return super().init_poolmanager(*a, **kw)
+
+
+def _cert_fingerprint(url: str) -> str:
+    import ssl
+    from urllib.parse import urlparse
+
+    u = urlparse(url)
+    pem = ssl.get_server_certificate((u.hostname, u.port or 443), timeout=15)
+    der = ssl.PEM_cert_to_DER_cert(pem)
+    h = hashlib.sha256(der).hexdigest().upper()
+    return ":".join(h[i : i + 2] for i in range(0, len(h), 2))
+
+
 class WebDAV(Target):
-    """Any WebDAV server: Nextcloud, ownCloud, Synology WebDAV Server, QNAP,
-    Apache/nginx, Koofr, pCloud, Seafile, 4shared..."""
+    """Any WebDAV server over HTTPS: Nextcloud, ownCloud, Synology WebDAV
+    Server, QNAP, Apache/nginx, Koofr, pCloud, Seafile, 4shared...
+
+    A self-signed certificate is pinned by fingerprint on the first Test (like
+    an SSH host key) instead of turning certificate checks off."""
 
     type = "webdav"
     secret_fields = ("password",)
 
+    @classmethod
+    def validate(cls, config: dict) -> None:
+        from urllib.parse import urlparse
+
+        url = (config.get("url") or "").strip()
+        if not url:
+            return
+        u = urlparse(url)
+        if u.scheme != "https":
+            raise TargetError("WebDAV URL must start with https:// (the password would otherwise be sent in clear)")
+        if u.username or u.password or "@" in u.netloc:
+            raise TargetError("Put the user name and password in their own fields, not in the URL")
+        if not u.hostname:
+            raise TargetError("WebDAV URL is missing the server name")
+
     def _base(self) -> str:
+        self.validate(self.config)
         url = (self.config.get("url") or "").rstrip("/")
-        if not url.startswith(("https://", "http://")):
-            raise TargetError("WebDAV URL must start with https://")
+        if not url:
+            raise TargetError("Enter the WebDAV URL")
         folder = (self.config.get("folder") or "").strip("/")
         return f"{url}/{folder}" if folder else url
 
     def _auth(self):
         return (self.config.get("username", ""), self.config.get("password", ""))
 
-    def _verify(self):
-        return not self.config.get("insecure_tls")
+    def _session(self) -> requests.Session:
+        s = requests.Session()
+        fp = (self.config.get("tls_fingerprint") or "").strip()
+        if self.config.get("self_signed") or self.config.get("insecure_tls"):
+            if not fp:
+                fp = _cert_fingerprint(self._base())
+                self.config["tls_fingerprint"] = fp
+                self.config.pop("insecure_tls", None)
+                self.config["self_signed"] = True
+                self._save(self.config)
+            s.mount("https://", _PinnedAdapter(fp))
+            s.verify = False  # the CA chain is replaced by the exact fingerprint check
+        return s
 
     def _req(self, method, url, **kw):
         try:
-            return requests.request(method, url, auth=self._auth(), verify=self._verify(), timeout=kw.pop("timeout", TIMEOUT), **kw)
+            with self._session() as s:
+                # verify passed per request: requests replaces a session-level False with REQUESTS_CA_BUNDLE
+                return s.request(method, url, auth=self._auth(), allow_redirects=False, verify=s.verify, timeout=kw.pop("timeout", TIMEOUT), **kw)
+        except requests.exceptions.SSLError as exc:
+            if "fingerprint" in str(exc).lower():
+                raise TargetError("The WebDAV server's certificate changed since it was pinned. Possible MITM; refusing to connect. "
+                                  "If you replaced the certificate on purpose, clear the pinned fingerprint and Test again.") from exc
+            raise TargetError("The WebDAV server's certificate is not trusted. If it is self-signed, tick 'self-signed certificate' to pin it.") from exc
         except requests.RequestException as exc:
-            raise TargetError(f"WebDAV {method} failed: {exc}") from exc
+            raise TargetError(f"WebDAV {method} failed: {exc.__class__.__name__}") from exc
+
+    @staticmethod
+    def _check(r: requests.Response, what: str, ok: tuple[int, ...]) -> None:
+        if r.status_code not in ok:
+            # Only the status is reported: the body of an arbitrary URL is not echoed back.
+            raise TargetError(f"{what} failed (HTTP {r.status_code})")
 
     def _mkdirs(self) -> None:
         url = (self.config.get("url") or "").rstrip("/")
         for part in [p for p in (self.config.get("folder") or "").strip("/").split("/") if p]:
             url += "/" + requests.utils.quote(part)
             r = self._req("MKCOL", url + "/")
-            if r.status_code not in (201, 405, 301, 302):  # 405 = exists
-                _raise(r, "WebDAV create folder")
+            self._check(r, "WebDAV create folder", (201, 405, 301, 302))  # 405 = exists
 
     def test(self) -> str:
         self._mkdirs()
         r = self._req("PROPFIND", self._base() + "/", headers={"Depth": "0"})
-        if r.status_code not in (207, 200):
-            _raise(r, "WebDAV folder check")
+        self._check(r, "WebDAV folder check", (207,))
         probe = self._base() + "/.scanvault-write-test"
-        _raise(self._req("PUT", probe, data=b"ok"), "WebDAV write test")
+        self._check(self._req("PUT", probe, data=b"ok"), "WebDAV write test", (200, 201, 204))
         self._req("DELETE", probe)
-        return f"Connected. Backups go to {self._base()}/"
+        pin = self.config.get("tls_fingerprint")
+        return f"Connected. Backups go to {self._base()}/" + (f" Certificate pinned: {pin}" if pin and self.config.get("self_signed") else "")
 
     def upload(self, path: Path, name: str) -> None:
         self._mkdirs()
         tmp = f"{self._base()}/{name}.part"
         with open(path, "rb") as f:
             r = self._req("PUT", tmp, data=f, headers={"Content-Type": "application/octet-stream", "Content-Length": str(path.stat().st_size)}, timeout=3600)
-        if r.status_code not in (200, 201, 204):
-            _raise(r, "WebDAV upload")
+        self._check(r, "WebDAV upload", (200, 201, 204))
         r = self._req("MOVE", tmp, headers={"Destination": f"{self._base()}/{name}", "Overwrite": "F"})
         if r.status_code not in (201, 204):
-            _raise(r, "WebDAV rename")
+            self._req("DELETE", tmp)
+            self._check(r, "WebDAV rename", (201, 204))
 
     def list_backups(self):
         import xml.etree.ElementTree as ET
@@ -937,10 +1108,13 @@ class WebDAV(Target):
                       data=b'<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>')
         if r.status_code == 404:
             return []
-        if r.status_code != 207:
-            _raise(r, "WebDAV list")
+        self._check(r, "WebDAV list", (207,))
         out = []
-        for resp in ET.fromstring(r.content).iter("{DAV:}response"):
+        try:
+            root = ET.fromstring(r.content)
+        except ET.ParseError as exc:
+            raise TargetError("WebDAV list returned something that is not WebDAV XML") from exc
+        for resp in root.iter("{DAV:}response"):
             href = resp.findtext("{DAV:}href") or ""
             name = unquote(urlparse(href).path.rstrip("/").rsplit("/", 1)[-1])
             if name.startswith(PREFIX) and name.endswith(SUFFIX):
@@ -948,15 +1122,14 @@ class WebDAV(Target):
         return sorted(out)
 
     def delete(self, handle: str) -> None:
-        if "/" in handle:
-            raise TargetError("bad name")
+        _plain_name(handle)
         r = self._req("DELETE", f"{self._base()}/{handle}")
-        if r.status_code not in (200, 204, 404):
-            _raise(r, "WebDAV delete")
+        self._check(r, "WebDAV delete", (200, 204, 404))
 
     def download(self, handle: str, dest: Path) -> None:
+        _plain_name(handle)
         r = self._req("GET", f"{self._base()}/{handle}", stream=True, timeout=3600)
-        _raise(r, "WebDAV download")
+        self._check(r, "WebDAV download", (200,))
         with open(dest, "wb") as f:
             for b in r.iter_content(1 << 20):
                 f.write(b)
@@ -964,8 +1137,8 @@ class WebDAV(Target):
 
 # ============================================================ SMB / Windows share
 class SMB(Target):
-    """SMB2/3 share: Windows, Synology/QNAP/TrueNAS shares, Samba. Uses SMB3
-    encryption when the server supports it."""
+    """SMB2/3 share: Windows, Synology/QNAP/TrueNAS shares, Samba. SMB3
+    encryption is required unless it is explicitly turned off."""
 
     type = "smb"
     secret_fields = ("password",)
@@ -976,6 +1149,8 @@ class SMB(Target):
         if not host or not share:
             raise TargetError("Server and share name are required")
         folder = (c.get("folder") or "").strip("\\/").replace("/", "\\")
+        if ".." in folder.split("\\"):
+            raise TargetError("The folder can't contain '..'")
         return f"\\\\{host}\\{share}" + (f"\\{folder}" if folder else "")
 
     def _session(self):
@@ -985,7 +1160,7 @@ class SMB(Target):
         try:
             smbclient.register_session(
                 c["host"].strip(), username=c.get("username") or None, password=c.get("password") or None,
-                port=int(c.get("port") or 445), encrypt=bool(c.get("require_encryption")), connection_timeout=20,
+                port=int(c.get("port") or 445), encrypt=c.get("require_encryption") is not False, connection_timeout=20,
             )
         except Exception as exc:
             raise TargetError(f"SMB connection failed: {exc}") from exc
@@ -1011,7 +1186,8 @@ class SMB(Target):
             sc.remove(probe)
 
         self._wrap("write test", w)
-        return f"Connected. Backups go to {root}"
+        enc = "encrypted (SMB3)" if self.config.get("require_encryption") is not False else "NOT encrypted in transit"
+        return f"Connected, {enc}. Backups go to {root}"
 
     def upload(self, path: Path, name: str) -> None:
         sc = self._session()
@@ -1020,9 +1196,16 @@ class SMB(Target):
         def up():
             sc.makedirs(root, exist_ok=True)
             tmp, dst = f"{root}\\{name}.part", f"{root}\\{name}"
-            with open(path, "rb") as src, sc.open_file(tmp, mode="wb") as out:
-                shutil.copyfileobj(src, out, 4 * 1024 * 1024)
-            sc.rename(tmp, dst)
+            try:
+                with open(path, "rb") as src, sc.open_file(tmp, mode="wb") as out:
+                    shutil.copyfileobj(src, out, 4 * 1024 * 1024)
+                sc.rename(tmp, dst)
+            except Exception:
+                try:
+                    sc.remove(tmp)
+                except Exception:
+                    pass
+                raise
 
         self._wrap("upload", up)
 
@@ -1037,12 +1220,12 @@ class SMB(Target):
         return sorted((n, n) for n in names if n.startswith(PREFIX) and n.endswith(SUFFIX))
 
     def delete(self, handle: str) -> None:
-        if "\\" in handle or "/" in handle:
-            raise TargetError("bad name")
+        _plain_name(handle)
         sc = self._session()
         self._wrap("delete", lambda: sc.remove(f"{self._root()}\\{handle}"))
 
     def download(self, handle: str, dest: Path) -> None:
+        _plain_name(handle)
         sc = self._session()
 
         def dl():
@@ -1054,26 +1237,43 @@ class SMB(Target):
 
 # ============================================================ Local folder (USB / NFS / mounted disk)
 class LocalFolder(Target):
-    """A folder inside the container: mount a USB disk, a second internal
-    drive or an NFS/CIFS mount from the host to /backups (see docker-compose)."""
+    """A folder inside the container under /backups: mount a USB disk, a second
+    internal drive or an NFS/CIFS mount from the host there (see
+    docker-compose). Paths outside that root are refused."""
 
     type = "local"
     secret_fields = ()
-    ROOT = Path(os.environ.get("SCANVAULT_LOCAL_BACKUP_ROOT", "/backups"))
 
-    def _dir(self) -> Path:
-        p = Path(self.config.get("path") or str(self.ROOT)).expanduser()
+    @staticmethod
+    def root() -> Path:
+        return Path(os.environ.get("SCANVAULT_LOCAL_BACKUP_ROOT", "/backups")).resolve()
+
+    @classmethod
+    def validate(cls, config: dict) -> None:
+        cls._resolve(config.get("path"))
+
+    @classmethod
+    def _resolve(cls, raw) -> Path:
+        root = cls.root()
+        p = Path(str(raw or root)).expanduser()
         if not p.is_absolute():
-            p = self.ROOT / p
+            p = root / p
         p = p.resolve()
+        if p != root and root not in p.parents:
+            raise TargetError(f"Backups must go to a folder under {root} (mount the disk there)")
         data = Path(os.environ.get("SCANVAULT_DATA", "/data")).resolve()
-        if p == data or data in p.parents:
+        if p == data or data in p.parents or p in data.parents:
             raise TargetError("Pick a folder outside the vault's own data folder")
         return p
 
+    def _dir(self) -> Path:
+        return self._resolve(self.config.get("path"))
+
     def test(self) -> str:
         d = self._dir()
-        if self.config.get("require_mount") and _mount_root(d) == Path("/"):
+        # Default on: without a mounted disk the "backup" would land on the
+        # container's own filesystem and silently fill the NAS system drive.
+        if self.config.get("require_mount") is not False and _mount_root(d) == Path("/"):
             raise TargetError(f"{d} is not on a mounted disk. Is the USB drive plugged in and mounted into the container?")
         try:
             d.mkdir(parents=True, exist_ok=True)
@@ -1105,13 +1305,11 @@ class LocalFolder(Target):
         return sorted((p.name, p.name) for p in d.iterdir() if p.is_file() and p.name.startswith(PREFIX) and p.name.endswith(SUFFIX))
 
     def delete(self, handle: str) -> None:
-        if "/" in handle or handle.startswith("."):
-            raise TargetError("bad name")
+        _plain_name(handle)
         (self._dir() / handle).unlink(missing_ok=True)
 
     def download(self, handle: str, dest: Path) -> None:
-        if "/" in handle:
-            raise TargetError("bad name")
+        _plain_name(handle)
         shutil.copyfile(self._dir() / handle, dest)
 
 
@@ -1154,8 +1352,7 @@ def needs_connect(type_: str, cfg: dict) -> bool:
     return mode == "oauth" and not cfg.get("refresh_token")
 
 
-
-def make(type_: str, config: dict, save: Callable[[dict], None] | None = None) -> Target:
+def make(type_: str, config: dict, save: Callable[[dict], None] | None = None, vault_id: str = "") -> Target:
     if type_ not in TYPES:
         raise TargetError(f"Unknown target type {type_}")
-    return TYPES[type_](config, save)
+    return TYPES[type_](config, save, vault_id)

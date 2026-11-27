@@ -151,11 +151,14 @@ async function req(method, path, body) {
   await wait();
   const url = path.split("?")[0];
   let m;
-  if (url === "/api/status") return { setup_complete: state.setup, unlocked: state.unlocked, authenticated: state.authed, username: state.authed ? "ryan" : null, vault_id: state.vault_id, fingerprint: state.authed ? state.fp : null, recovery_key_saved: state.saved, version: "0.1.0 (preview)" };
+  if (url === "/api/status") return { setup_complete: state.setup, unlocked: state.unlocked, authenticated: state.authed, username: state.authed ? "ryan" : null, vault_id: state.vault_id, fingerprint: state.authed ? state.fp : null, recovery_key_saved: state.authed ? state.saved : null, passphrase_restore: state.authed ? !!state.pr : null, secure: true, setup_code_required: !state.setup, version: "0.2.0 (preview)" };
   if (url === "/api/setup") { await wait(700); state.setup = state.authed = state.unlocked = true; state.passphrase = body.passphrase; state.recovery = recoveryText(); return { token: "demo", recovery_key: state.recovery, fingerprint: state.fp, vault_id: state.vault_id }; }
   if (url === "/api/auth/login") { state.authed = true; return { token: "demo", unlocked: state.unlocked }; }
   if (url === "/api/auth/logout") { state.authed = false; return { ok: true }; }
   if (url === "/api/auth/password") return { ok: true };
+  if (url === "/api/auth/logout-others") return { ok: true, signed_out: 0 };
+  if (url === "/api/vault/settings") { if (method === "PUT") state.pr = !!body.passphrase_restore; return { passphrase_restore: !!state.pr }; }
+  if (url === "/api/vault/rekey") { if (state.passphrase && body.passphrase !== state.passphrase) err(400, "Wrong encryption key"); await wait(900); state.recovery = recoveryText(); state.saved = false; return { ok: true, fingerprint: state.fp, recovery_key: state.recovery }; }
   if (url === "/api/vault/unlock") {
     if (body.recovery_key) { if (!/BEGIN SCANVAULT RECOVERY KEY/i.test(body.recovery_key)) err(400, "That file isn't a ScanVault recovery key"); }
     else if (state.passphrase && body.passphrase !== state.passphrase) err(400, "Wrong encryption key");

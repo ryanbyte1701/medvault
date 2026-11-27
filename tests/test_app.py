@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from conftest import ROOT, make_dicom
+from conftest import ROOT, SETUP, make_dicom
 
 from app import main  # noqa: E402
 
@@ -25,7 +25,7 @@ def client():
 
 @pytest.fixture(scope="module")
 def setup(client):
-    r = client.post("/api/setup", json={"username": "ryan", "password": "pw-1234567890", "passphrase": PASS}, headers=H)
+    r = client.post("/api/setup", json={"username": "ryan", "password": "pw-1234567890", "passphrase": PASS}, headers=SETUP)
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -191,7 +191,7 @@ def test_fresh_install_restore(tmp_path, client, setup):
             "/api/setup/restore",
             files={"backup_file": ("b.svb", svb)},
             data={"username": "newadmin", "password": "pw-0987654321", "recovery_key": setup["recovery_key"]},
-            headers=H,
+            headers=SETUP,
         )
         assert r.status_code == 200, r.text
         assert r.json()["patients"] == 2

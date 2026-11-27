@@ -6,3 +6,4 @@ data/
 *recovery-key*.txt
 scanvault_passphrase.txt
 .env
+preview/

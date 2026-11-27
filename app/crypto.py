@@ -37,7 +37,7 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 MAGIC = b"SVE1"
 CHUNK = 1024 * 1024
-SCRYPT_N = 2**15
+SCRYPT_N = 2**17  # OWASP 2024+: N>=2^17, r=8, p=1 (128 MiB)
 SCRYPT_R = 8
 SCRYPT_P = 1
 RECOVERY_BEGIN = "-----BEGIN SCANVAULT RECOVERY KEY-----"
@@ -66,7 +66,7 @@ def new_master_key() -> bytes:
 def wrap_master_key(master_key: bytes, passphrase: str, vault_id: str) -> dict:
     salt = secrets.token_bytes(16)
     nonce = secrets.token_bytes(12)
-    wrapped = AESGCM(_kek(passphrase, salt)).encrypt(nonce, master_key, b"scanvault-mk:" + vault_id.encode())
+    wrapped = AESGCM(_kek(passphrase, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P)).encrypt(nonce, master_key, b"scanvault-mk:" + vault_id.encode())
     return {
         "version": 1,
         "vault_id": vault_id,
@@ -77,9 +77,21 @@ def wrap_master_key(master_key: bytes, passphrase: str, vault_id: str) -> dict:
     }
 
 
+def keystore_outdated(keystore: dict) -> bool:
+    """True if the keystore was wrapped with weaker KDF settings than today's."""
+    kdf = keystore.get("kdf", {})
+    return kdf.get("name") != "scrypt" or int(kdf.get("n", 0)) < SCRYPT_N
+
+
 def unwrap_master_key(keystore: dict, passphrase: str) -> bytes:
     kdf = keystore["kdf"]
-    kek = _kek(passphrase, _unb64(kdf["salt"]), kdf["n"], kdf["r"], kdf["p"])
+    if not isinstance(passphrase, str):
+        raise CryptoError("Wrong passphrase")
+    n, r, p = int(kdf["n"]), int(kdf["r"]), int(kdf["p"])
+    # Refuse attacker-chosen KDF parameters (e.g. a tampered backup header).
+    if not (2**14 <= n <= 2**20 and 1 <= r <= 16 and 1 <= p <= 4):
+        raise CryptoError("Unsupported key derivation parameters")
+    kek = _kek(passphrase, _unb64(kdf["salt"]), n, r, p)
     try:
         mk = AESGCM(kek).decrypt(
             _unb64(keystore["nonce"]),
@@ -107,7 +119,7 @@ def recovery_file_text(master_key: bytes, vault_id: str, created: str) -> str:
             f"Created:          {created}",
             "",
             "This file can decrypt EVERY ScanVault backup of this vault, including",
-            "backups stored on Google Drive, Box or SFTP servers. Anyone who holds it",
+            "backups stored in the cloud, on servers or on USB disks. Anyone who holds it",
             "can read the medical records inside. Print it or store it offline",
             "(password manager, safe, USB key in a drawer). Do not email it and do not",
             "store it in the same cloud account as your backups.",
@@ -228,6 +240,64 @@ def decrypt_stream_iter(master_key: bytes, src: BinaryIO, aad: bytes = b"") -> I
             return
 
 
+class StreamEncryptor:
+    """File-like writer producing the same SVE1 format as encrypt_stream.
+    Lets tarfile ("w|") stream straight into an encrypted file, so no
+    plaintext archive is ever written to disk."""
+
+    def __init__(self, master_key: bytes, dst: BinaryIO, aad: bytes = b""):
+        salt = secrets.token_bytes(16)
+        self._aes = AESGCM(_subkey(master_key, salt, b"scanvault-stream-v1"))
+        self._dst, self._aad = dst, aad
+        self._buf = bytearray()
+        self._counter = 0
+        self.total = 0
+        dst.write(MAGIC + salt)
+
+    def _emit(self, chunk: bytes, final: bool) -> None:
+        ct = self._aes.encrypt(_nonce(self._counter, final), chunk, self._aad)
+        self._dst.write(struct.pack(">I", len(ct)) + ct)
+        self._counter += 1
+
+    def write(self, data) -> int:
+        self._buf += data
+        self.total += len(data)
+        # keep at least one full chunk back: the last chunk must carry the final flag
+        while len(self._buf) > CHUNK:
+            self._emit(bytes(self._buf[:CHUNK]), False)
+            del self._buf[:CHUNK]
+        return len(data)
+
+    def close(self) -> None:
+        if self._buf is not None:
+            self._emit(bytes(self._buf), True)
+            self._buf = None  # type: ignore[assignment]
+
+    def flush(self) -> None:
+        pass
+
+
+class StreamDecryptor:
+    """File-like reader over an SVE1 stream (for tarfile "r|")."""
+
+    def __init__(self, master_key: bytes, src: BinaryIO, aad: bytes = b""):
+        self._it = decrypt_stream_iter(master_key, src, aad)
+        self._buf = b""
+        self._eof = False
+
+    def read(self, n: int = -1) -> bytes:
+        while not self._eof and (n < 0 or len(self._buf) < n):
+            try:
+                self._buf += next(self._it)
+            except StopIteration:
+                self._eof = True
+        if n < 0:
+            out, self._buf = self._buf, b""
+        else:
+            out, self._buf = self._buf[:n], self._buf[n:]
+        return out
+
+
 def decrypt_stream(master_key: bytes, src: BinaryIO, dst: BinaryIO, aad: bytes = b"") -> int:
     total = 0
     for pt in decrypt_stream_iter(master_key, src, aad):
@@ -264,11 +334,25 @@ def random_id() -> str:
 
 def hash_password(password: str) -> str:
     salt = os.urandom(16)
-    h = Scrypt(salt=salt, length=32, n=2**14, r=8, p=1).derive(password.encode())
-    return f"scrypt$16384$8$1${_b64(salt)}${_b64(h)}"
+    h = Scrypt(salt=salt, length=32, n=2**15, r=8, p=1).derive(password.encode())
+    return f"scrypt$32768$8$1${_b64(salt)}${_b64(h)}"
+
+
+# Checked when the username does not exist, so a miss costs the same time as a hit.
+DUMMY_PASSWORD_HASH = "scrypt$32768$8$1$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+
+def file_mac(master_key: bytes, sha256_hex: str) -> str:
+    """Keyed digest stored in the database for duplicate detection. Unlike a
+    plain SHA-256 it cannot be used to confirm that a known document is in
+    the vault without the master key."""
+    key = _subkey(master_key, b"", b"scanvault-file-mac-v1")
+    return "h1:" + hmac.new(key, sha256_hex.encode(), hashlib.sha256).hexdigest()
 
 
 def verify_password(password: str, stored: str) -> bool:
+    if not isinstance(password, str):
+        return False
     try:
         _, n, r, p, salt, h = stored.split("$")
         calc = Scrypt(salt=_unb64(salt), length=32, n=int(n), r=int(r), p=int(p)).derive(password.encode())

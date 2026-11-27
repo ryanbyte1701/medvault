@@ -10,6 +10,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 _DATA = tempfile.mkdtemp(prefix="sv-test-")
 os.environ["SCANVAULT_DATA"] = _DATA
+os.environ["SCANVAULT_SETUP_CODE"] = "TEST-CODE-0001"
+os.environ.setdefault("SCANVAULT_LOCAL_BACKUP_ROOT", tempfile.mkdtemp(prefix="sv-usb-"))
+SETUP = {"X-Setup-Code": "TEST-CODE-0001"}
 
 
 def make_dicom(path: Path, study_uid: str = "1.2.3.4.5", instance: int = 1, modality: str = "MR"):
