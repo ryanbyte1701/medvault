@@ -34,7 +34,18 @@ fun ScanVaultNavHost(container: AppContainer) {
     val session by container.session.collectAsStateWithLifecycle()
     val startDestination = remember { if (session == SessionState.SignedOut) "login" else "patients" }
 
+    // Single sign-on comes back from the browser; finish it wherever the user is.
+    val ssoCallback by container.ssoCallbacks.collectAsStateWithLifecycle()
+    LaunchedEffect(ssoCallback) {
+        val result = ssoCallback ?: return@LaunchedEffect
+        container.ssoCallbacks.value = null
+        container.completeSso(result)
+    }
+
     LaunchedEffect(session) {
+        if (session != SessionState.SignedOut && nav.currentDestination?.route == "login") {
+            nav.navigate("patients") { popUpTo("login") { inclusive = true } }
+        }
         if (session == SessionState.Ready) container.syncThemeFromServer()
         if (session == SessionState.SignedOut && nav.currentDestination?.route != "login") {
             nav.navigate("login") { popUpTo(0) { inclusive = true } }

@@ -8,6 +8,9 @@ import coil.disk.DiskCache
 import com.scanvault.android.data.crypto.FileVault
 import com.scanvault.android.data.crypto.SecureFileProvider
 import com.scanvault.android.data.net.HttpClients
+import com.scanvault.android.data.net.InsecureConnectionException
+import com.scanvault.android.ui.components.userMessage
+import java.security.MessageDigest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -33,12 +36,84 @@ class DeviceStorageException(cause: Throwable) :
  * Simple manual dependency container: holds the secure store, the HTTP client and the
  * current API client, and tracks whether the user is signed in and the vault unlocked.
  */
+private const val SSO_FAILED = "Single sign-on didn't complete. Please try again."
+
 class AppContainer(val context: Context) {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val main = Handler(Looper.getMainLooper())
 
     val store = SecureStore(context)
     val vault = FileVault(context)
+    val pendingSso = PendingSsoStore(context)
+
+    /** A scanvault://sso callback that matched the sign-in in progress, consumed by [completeSso]. */
+    val ssoCallbacks = MutableStateFlow<SsoResult?>(null)
+
+    /** Message to show on the sign-in screen when SSO fails. */
+    val ssoError = MutableStateFlow<String?>(null)
+
+    /**
+     * Starts SSO with [provider] on [server]: makes a PKCE pair and state, remembers them
+     * (encrypted) and opens the server's start URL in a Custom Tab. https servers only.
+     */
+    fun startSso(activityContext: Context, server: String, provider: SsoProvider) {
+        val base = ApiClient.normalizeBaseUrl(server)
+        if (!base.isHttps) throw InsecureConnectionException("Single sign-on needs an https server address.")
+        val verifier = Pkce.randomToken()
+        val state = Pkce.randomToken()
+        pendingSso.save(PendingSso(base.toString(), provider.name, state, verifier, System.currentTimeMillis()))
+        ssoError.value = null
+        val url = clientFor(base.toString()).ssoStartUrl(provider.id, PendingSso.REDIRECT, state, Pkce.challenge(verifier))
+        appLock.expectExternalTrip()
+        androidx.browser.customtabs.CustomTabsIntent.Builder()
+            .setShowTitle(true)
+            .build()
+            .launchUrl(activityContext, android.net.Uri.parse(url))
+    }
+
+    /**
+     * Called for every scanvault://sso link that reaches the app. Any app or web page can open
+     * that link, so it is accepted only while a sign-in this app started is pending and its
+     * state matches; anything else is ignored and leaves the pending sign-in untouched.
+     */
+    fun offerSsoCallback(result: SsoResult) {
+        val pending = pendingSso.load() ?: return
+        val state = result.state ?: return
+        if (!MessageDigest.isEqual(state.toByteArray(), pending.state.toByteArray())) return
+        ssoCallbacks.value = result
+    }
+
+    /** Finishes SSO from a matching redirect: exchanges the ticket and signs in. */
+    suspend fun completeSso(result: SsoResult) {
+        val pending = pendingSso.load() ?: return
+        if (result.state != pending.state) return
+        pendingSso.clear()
+        val outcome = runCatching {
+            when (result) {
+                is SsoResult.Cancelled -> return
+                is SsoResult.Failed -> error(SSO_FAILED)
+                is SsoResult.Ticket -> Unit
+            }
+            if (pending.expired) error("Single sign-on took too long. Please try again.")
+            // Errors here come from the user's own server (the one the sign-in started on).
+            val login = clientFor(pending.server).ssoExchange((result as SsoResult.Ticket).ticket, pending.verifier)
+            val status = runCatching { clientFor(pending.server, login.token).status() }.getOrNull()
+            onSignedIn(
+                pending.server,
+                status?.username ?: pending.providerName,
+                login.token,
+                unlocked = login.unlocked ?: status?.unlocked ?: false,
+                expiresAt = login.expiresAt,
+            )
+        }
+        outcome.onFailure { e ->
+            ssoError.value = when (e) {
+                is DeviceStorageException, is IllegalStateException -> e.message
+                else -> e.userMessage()
+            } ?: SSO_FAILED
+        }
+    }
+
     val pendingUploads = PendingUploads(context, vault)
     val appLock = AppLock { store.lockTimeoutMinutes }
 
