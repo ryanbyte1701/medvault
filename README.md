@@ -4,6 +4,34 @@ Native Android client (Kotlin + Jetpack Compose) for a self-hosted
 [ScanVault](https://github.com/ryanbyte1701/scanvault) server, the vault for local copies of
 imaging files and reports from imaging centers.
 
+## Screenshots
+
+The real app in the default dark theme (Teal night), showing a fictional sample vault: no real
+patient data. They are rendered by the screenshot tests described under [Building](#building).
+
+<table>
+<tr>
+<td width="33%"><img src="docs/screenshots/patients.png" alt="Patients list"></td>
+<td width="33%"><img src="docs/screenshots/patient.png" alt="A patient's studies"></td>
+<td width="33%"><img src="docs/screenshots/study.png" alt="A CT study with report and DICOM thumbnails"></td>
+</tr>
+<tr>
+<td><sub><b>Patients.</b> Everyone in the vault, with search.</sub></td>
+<td><sub><b>Patient.</b> Studies, newest first.</sub></td>
+<td><sub><b>Study.</b> Reports and images, plus camera and file upload.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/viewer.png" alt="DICOM viewer showing a chest CT at level -600, window 1500"></td>
+<td><img src="docs/screenshots/settings.png" alt="Settings with theme and dark color presets"></td>
+<td><img src="docs/screenshots/sign-in.png" alt="Sign-in screen"></td>
+</tr>
+<tr>
+<td><sub><b>DICOM viewer.</b> Server-side window/level in HU, CT presets.</sub></td>
+<td><sub><b>Settings.</b> Same theme and dark colors as the web app.</sub></td>
+<td><sub><b>Sign in.</b> Password or single sign-on.</sub></td>
+</tr>
+</table>
+
 ## What it does
 
 - Sign in to your ScanVault server (`https://…`; `http://` only on your own LAN, if you allow it) with a password
@@ -98,6 +126,20 @@ install it.
 
 Pull requests also get a debug APK (`scanvault-debug-apk`) for testing. Don't use it for real
 records: debug builds trust user-installed CA certificates and can be inspected with a debugger.
+
+**Screenshots.** The images above come from Robolectric tests in
+`app/src/test/java/com/scanvault/android/screenshots/` that run the real app against a stand-in
+server with the same fictional sample vault as the web demo, in the dark theme. The normal test
+run skips them. To render them:
+
+```sh
+./gradlew testDebugUnitTest -Pscreenshots --tests 'com.scanvault.android.screenshots.*'
+# PNGs: app/build/screenshots/
+```
+
+The *README screenshots* workflow does the same on pull requests that touch those tests (or on
+demand) and uploads the images as the `readme-screenshots` artifact. Copy them into
+`docs/screenshots/` to update the README.
 
 CI actions are pinned to commit SHAs and the Gradle wrapper jar is checked against Gradle's
 published checksums.
