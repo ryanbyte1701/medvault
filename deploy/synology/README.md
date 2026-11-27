@@ -88,6 +88,15 @@ Inside ScanVault › Backups, add destinations. Good Synology-friendly setups:
   backup folder, and use key auth. The host key is pinned on first test.
 - **Google Drive / Box**: encrypted before upload, so the providers only hold
   ciphertext.
+- **Synology C2 Object Storage, Backblaze B2 or Wasabi**: choose *S3 /
+  object storage* and pick the provider. These are cheap, off-site, and
+  support object lock against ransomware.
+- **USB drive on the NAS**: uncomment the `/volumeUSB1/usbshare:/backups/usb1`
+  line in the compose file, rebuild the project, then add a *USB / local disk*
+  destination at `/backups/usb1/scanvault`. Keep "Fail if the disk isn't
+  mounted" on, so an unplugged drive doesn't silently fill `/volume1`.
+- **A share on another NAS or PC**: use *Network share (SMB)* with SMB3
+  encryption, or *WebDAV* (Synology's WebDAV Server package, Nextcloud).
 - **Hyper Backup / Snapshot Replication** can also back up
   `/volume1/docker/scanvault/data`. Everything in it is already encrypted, but
   a restore from it still needs your encryption key or recovery key file.

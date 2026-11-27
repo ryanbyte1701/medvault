@@ -8,6 +8,9 @@ services:
       - "8080:8080"
     volumes:
       - scanvault-data:/data
+      # Optional "USB / local disk" backup destination: map a mounted disk or an
+      # NFS mount from the host into /backups, e.g.
+      # - /mnt/usb-backup:/backups/usb1
     environment:
       # Public URL the browser uses, needed for Google/Box OAuth redirects
       # when you are not on http://localhost:8080 (e.g. https://scans.example.com)

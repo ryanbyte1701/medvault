@@ -227,3 +227,25 @@ def test_render_window_and_prefs(client, setup, tmp_path):
     assert client.put("/api/prefs", json={"theme": "dark", "dark_color": "#1A1033"}, headers=B).json() == {"theme": "dark", "dark_color": "#1a1033"}
     assert client.put("/api/prefs", json={"dark_color": "red; x"}, headers=B).status_code == 400
     assert client.get("/api/prefs", headers=B).json()["dark_color"] == "#1a1033"
+
+
+def test_all_target_types_via_api(client, setup):
+    B = {"Authorization": f"Bearer {setup['token']}"}
+    cfgs = {
+        "dropbox": {"app_key": "k", "app_secret": "s"},
+        "onedrive": {"client_id": "c", "client_secret": "s", "tenant": "consumers"},
+        "s3": {"provider": "b2", "bucket": "b", "region": "us-west-004", "access_key_id": "a", "secret_access_key": "SECRET"},
+        "webdav": {"url": "https://cloud.example.com/remote.php/dav/files/u", "username": "u", "password": "SECRET"},
+        "smb": {"host": "nas", "share": "backup", "username": "u", "password": "SECRET"},
+        "local": {"path": "usb1"},
+    }
+    for t, cfg in cfgs.items():
+        r = client.post("/api/backups/targets", json={"type": t, "config": cfg}, headers=B)
+        assert r.status_code == 200, (t, r.text)
+        out = r.json()
+        assert "SECRET" not in r.text and "app_secret" not in out["config"]
+        assert out["connected"] is (t not in ("dropbox", "onedrive")), t
+        if t in ("dropbox", "onedrive"):
+            loc = client.get(f"/api/oauth/{t}/start?target_id={out['id']}", headers=B, follow_redirects=False).headers["location"]
+            assert loc.startswith({"dropbox": "https://www.dropbox.com/oauth2/authorize", "onedrive": "https://login.microsoftonline.com/consumers/"}[t])
+    assert client.post("/api/backups/targets", json={"type": "ftp", "config": {}}, headers=B).status_code == 400

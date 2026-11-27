@@ -14,6 +14,10 @@ services:
       # Encrypted vault: database, keystore, encrypted files. Nothing in here is
       # readable without your encryption key or recovery key file.
       - /volume1/docker/scanvault/data:/data
+      # Optional "USB / local disk" backup destination (USB drive plugged into
+      # the NAS, or a second volume). Pick it in ScanVault as /backups/usb1.
+      # - /volumeUSB1/usbshare:/backups/usb1
+      # - /volume2/backup:/backups/volume2
     environment:
       # Owner of /volume1/docker/scanvault/data. Find it over SSH with
       # `id <your DSM user>`; the first DSM admin is usually 1026, group users = 100.
