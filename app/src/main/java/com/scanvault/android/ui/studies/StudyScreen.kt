@@ -74,6 +74,7 @@ import com.scanvault.android.data.SessionState
 import com.scanvault.android.data.Study
 import com.scanvault.android.data.UploadPart
 import com.scanvault.android.data.VaultFile
+import com.scanvault.android.data.PendingUpload
 import com.scanvault.android.data.kindFor
 import com.scanvault.android.data.uploadPartFor
 import com.scanvault.android.ui.components.EmptyState
@@ -94,11 +95,23 @@ data class StudyDetail(val study: Study, val files: List<VaultFile>)
 
 data class UploadProgress(val done: Int, val total: Int, val current: String)
 
-data class UploadSummary(val uploaded: Int, val duplicates: Int) {
+data class UploadSummary(val uploaded: Int, val duplicates: Int, val skipped: Int = 0) {
     override fun toString(): String = buildString {
         append("Uploaded $uploaded file(s)")
         if (duplicates > 0) append(", $duplicates already in this study")
+        if (skipped > 0) append(", $skipped skipped")
     }
+}
+
+/** MIME types the app will hand to another app as-is; anything else is offered as a generic file. */
+private val SHAREABLE_TYPES = setOf(
+    "application/pdf", "text/plain", "application/dicom", "application/zip",
+    "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+)
+
+fun safeViewType(contentType: String): String {
+    val t = contentType.substringBefore(';').trim().lowercase()
+    return if (t in SHAREABLE_TYPES || (t.startsWith("image/") && !t.contains("svg"))) t else "application/octet-stream"
 }
 
 class StudyViewModel(private val container: AppContainer, private val studyId: String) : ViewModel() {
@@ -106,6 +119,8 @@ class StudyViewModel(private val container: AppContainer, private val studyId: S
     val state = _state.asStateFlow()
     private val _upload = MutableStateFlow<UploadProgress?>(null)
     val upload = _upload.asStateFlow()
+    /** One-off messages for the snackbar; survives rotation because it lives in the ViewModel. */
+    val messages = kotlinx.coroutines.channels.Channel<String>(kotlinx.coroutines.channels.Channel.BUFFERED)
 
     fun load() {
         if (_state.value !is Loadable.Loaded) _state.value = Loadable.Loading
@@ -116,21 +131,44 @@ class StudyViewModel(private val container: AppContainer, private val studyId: S
         }
     }
 
+    /**
+     * Uploads in the ViewModel's scope, so rotating the phone or leaving the screen doesn't
+     * cancel it, and progress is always cleared at the end.
+     */
+    fun startUpload(parts: List<UploadPart>, kind: String? = null) {
+        if (_upload.value != null) return
+        viewModelScope.launch {
+            uploadAll(parts, kind)
+                .onSuccess { messages.trySend(it.toString()) }
+                .onFailure { messages.trySend("Upload failed: ${it.userMessage()}") }
+        }
+    }
+
     /** Uploads files one at a time so each gets its own kind and the user sees progress. */
-    suspend fun uploadAll(parts: List<UploadPart>, forcedKind: String? = null): Result<UploadSummary> {
+    private suspend fun uploadAll(parts: List<UploadPart>, forcedKind: String? = null): Result<UploadSummary> {
         var uploaded = 0
         var duplicates = 0
+        var skipped = 0
         var failure: Throwable? = null
-        for ((i, part) in parts.withIndex()) {
-            _upload.value = UploadProgress(i, parts.size, part.filename)
-            container.call { it.upload(studyId, listOf(part), forcedKind ?: kindFor(part)) }
-                .onSuccess { files -> if (files.isNotEmpty() && files.all { it.duplicate }) duplicates++ else uploaded++ }
-                .onFailure { failure = it }
-            if (failure != null) break
+        try {
+            for ((i, part) in parts.withIndex()) {
+                _upload.value = UploadProgress(i, parts.size, part.filename)
+                container.call { it.upload(studyId, listOf(part), forcedKind ?: kindFor(part)) }
+                    .onSuccess { files ->
+                        // A zip expands server-side into many files, or none if all were skipped.
+                        if (files.isEmpty()) skipped++
+                        duplicates += files.count { it.duplicate }
+                        uploaded += files.count { !it.duplicate }
+                    }
+                    .onFailure { failure = it }
+                if (failure != null) break
+            }
+        } finally {
+            _upload.value = null
         }
-        _upload.value = null
         load()
-        return failure?.let { Result.failure<UploadSummary>(it) } ?: Result.success(UploadSummary(uploaded, duplicates))
+        return failure?.let { Result.failure<UploadSummary>(it) }
+            ?: Result.success(UploadSummary(uploaded, duplicates, skipped))
     }
 
     suspend fun delete(file: VaultFile): Result<Unit> =
@@ -143,32 +181,61 @@ class StudyViewModel(private val container: AppContainer, private val studyId: S
      * through [SecureFileProvider]; no decrypted copy is written to storage.
      */
     suspend fun downloadForSharing(file: VaultFile): Result<Uri> = container.call { api ->
+        withContext(Dispatchers.IO) { container.vault.pruneShared(maxAgeMillis = 60 * 60_000L) }
         var entry: FileVault.Entry? = null
         api.download(file.id) { input -> entry = container.vault.store(input) }
         val safeName = file.filename.replace(Regex("""[^\w.\- ]"""), "_").ifBlank { "file" }
-        SecureFileProvider.share(container.context, entry!!, safeName, file.contentType)
+        SecureFileProvider.share(container.context, entry!!, safeName, safeViewType(file.contentType))
     }
 
     /**
-     * Moves a camera photo into the encrypted vault right away, deletes the camera's plain copy,
-     * and uploads from the vault. The encrypted copy is deleted once the upload finishes.
+     * The camera returned a photo: encrypt it into the vault's pending area right away, delete
+     * the camera's plain copy, then upload. If the upload fails the encrypted photo is kept and
+     * the study shows Retry / Discard, so a photo is never lost to a bad connection.
      */
-    suspend fun uploadCapture(photo: File): Result<UploadSummary> {
-        val entry = withContext(Dispatchers.IO) {
-            try {
-                photo.inputStream().use { container.vault.store(it) }
-            } finally {
-                photo.delete()
+    fun captureReturned(photo: File) {
+        viewModelScope.launch {
+            val stored = withContext(Dispatchers.IO) {
+                runCatching { photo.inputStream().use { container.vault.store(it, FileVault.Area.PENDING) } }
             }
-        }
-        return try {
-            val size = withContext(Dispatchers.IO) { container.vault.reader(entry).use { it.plaintextLength } }
-            val part = UploadPart(photo.name, "image/jpeg", size) { container.vault.reader(entry).inputStream() }
-            uploadAll(listOf(part), VaultFile.KIND_IMAGE)
-        } finally {
-            withContext(Dispatchers.IO) { container.vault.delete(entry) }
+            stored.onFailure {
+                // Couldn't encrypt (Keystore trouble): upload straight from the camera file instead.
+                val part = UploadPart(photo.name, "image/jpeg", photo.length(), exactSize = true) { photo.inputStream() }
+                uploadAll(listOf(part), VaultFile.KIND_IMAGE)
+                    .onSuccess { messages.trySend(it.toString()) }
+                    .onFailure { e -> messages.trySend("Upload failed: ${e.userMessage()}") }
+                withContext(Dispatchers.IO) { photo.delete() }
+                return@launch
+            }
+            val entry = stored.getOrThrow()
+            withContext(Dispatchers.IO) { photo.delete() }
+            val item = PendingUpload(entry.id, studyId, photo.name, System.currentTimeMillis())
+            container.pendingUploads.add(item)
+            retryPending(item)
         }
     }
+
+    fun retryPending(item: PendingUpload) {
+        viewModelScope.launch {
+            val entry = container.pendingUploads.entry(item) ?: run { container.pendingUploads.remove(item.id); return@launch }
+            val size = withContext(Dispatchers.IO) { runCatching { container.vault.reader(entry).use { it.plaintextLength } } }
+                .getOrElse { -1L }
+            val part = UploadPart(item.filename, "image/jpeg", size, exactSize = size >= 0) {
+                container.vault.reader(entry).inputStream()
+            }
+            uploadAll(listOf(part), VaultFile.KIND_IMAGE)
+                .onSuccess {
+                    container.pendingUploads.remove(item.id)
+                    messages.trySend(it.toString())
+                }
+                .onFailure { e ->
+                    container.pendingUploads.markFailed(item.id, e.userMessage())
+                    messages.trySend("Upload failed. The photo is saved securely on this phone; tap Retry.")
+                }
+        }
+    }
+
+    fun discardPending(item: PendingUpload) = container.pendingUploads.remove(item.id)
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -187,37 +254,29 @@ fun StudyScreen(
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     var pendingCapture by rememberSaveable { mutableStateOf<String?>(null) }
-    var toDelete by remember { mutableStateOf<VaultFile?>(null) }
+    // Dialog state survives rotation (ids, not objects, so it can be saved).
+    var toDeleteId by rememberSaveable { mutableStateOf<String?>(null) }
+    val toDelete = toDeleteId?.let { id -> (state as? Loadable.Loaded<StudyDetail>)?.value?.files?.firstOrNull { it.id == id } }
     var menu by remember { mutableStateOf(false) }
-    var confirmDeleteStudy by remember { mutableStateOf(false) }
+    var confirmDeleteStudy by rememberSaveable { mutableStateOf(false) }
+    val allPending by container.pendingUploads.items.collectAsStateWithLifecycle()
+    val pending = allPending.filter { it.studyId == studyId }
 
     LaunchedEffect(session) { if (session == SessionState.Ready) vm.load() }
-
-    fun startUpload(parts: List<UploadPart>, kind: String? = null) {
-        scope.launch {
-            vm.uploadAll(parts, kind)
-                .onSuccess { snackbar.showSnackbar(it.toString()) }
-                .onFailure { snackbar.showSnackbar("Upload failed: ${it.userMessage()}") }
-        }
-    }
+    LaunchedEffect(vm) { for (m in vm.messages) snackbar.showSnackbar(m) }
 
     val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
         val path = pendingCapture ?: return@rememberLauncherForActivityResult
         pendingCapture = null
         val file = File(path)
-        if (saved && file.length() > 0) {
-            scope.launch {
-                vm.uploadCapture(file)
-                    .onSuccess { snackbar.showSnackbar(it.toString()) }
-                    .onFailure { snackbar.showSnackbar("Upload failed: ${it.userMessage()}") }
-            }
-        } else {
-            file.delete()
-        }
+        if (saved && file.length() > 0) vm.captureReturned(file) else file.delete()
     }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isNotEmpty()) startUpload(uris.map { context.contentResolver.uploadPartFor(it) })
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        val parts = uris.mapNotNull { runCatching { context.contentResolver.uploadPartFor(it) }.getOrNull() }
+        if (parts.size < uris.size) scope.launch { snackbar.showSnackbar("Some files couldn't be read and were skipped") }
+        if (parts.isNotEmpty()) vm.startUpload(parts)
     }
 
     fun launchCamera() {
@@ -227,6 +286,7 @@ fun StudyScreen(
         pendingCapture = file.absolutePath
         val uri = FileProvider.getUriForFile(context, "${BuildConfig.APPLICATION_ID}.files", file)
         try {
+            container.appLock.expectExternalTrip()
             camera.launch(uri)
         } catch (e: ActivityNotFoundException) {
             pendingCapture = null
@@ -235,7 +295,11 @@ fun StudyScreen(
     }
 
     fun open(file: VaultFile) {
-        if (file.isImage || file.kind == VaultFile.KIND_DICOM) {
+        // TIFF (and HEIC before Android 9) can't be shown in the app's viewer; hand them to another app.
+        val t = file.contentType.lowercase()
+        val viewable = file.isImage && !t.contains("tiff") &&
+            !((t.contains("heic") || t.contains("heif")) && android.os.Build.VERSION.SDK_INT < 28)
+        if (viewable || file.kind == VaultFile.KIND_DICOM) {
             onOpenImage(file.id, file.filename, file.kind == VaultFile.KIND_DICOM)
             return
         }
@@ -246,9 +310,10 @@ fun StudyScreen(
         scope.launch {
             vm.downloadForSharing(file).onSuccess { uri ->
                 val intent = Intent(Intent.ACTION_VIEW)
-                    .setDataAndType(uri, file.contentType)
+                    .setDataAndType(uri, safeViewType(file.contentType))
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 try {
+                    container.appLock.expectExternalTrip()
                     context.startActivity(Intent.createChooser(intent, "Open ${file.filename}"))
                 } catch (e: ActivityNotFoundException) {
                     snackbar.showSnackbar("No app can open ${file.contentType}")
@@ -291,7 +356,10 @@ fun StudyScreen(
                         Text("  Camera")
                     }
                     FilledTonalButton(
-                        onClick = { picker.launch(arrayOf("image/*", "application/pdf", "application/dicom", "*/*")) },
+                        onClick = {
+                            container.appLock.expectExternalTrip()
+                            picker.launch(arrayOf("image/*", "application/pdf", "application/dicom", "*/*"))
+                        },
                         enabled = upload == null, modifier = Modifier.weight(1f),
                     ) {
                         Icon(Icons.Default.AttachFile, null)
@@ -322,6 +390,10 @@ fun StudyScreen(
                     modifier = Modifier.fillMaxSize(),
                 ) {
                     item(span = { GridItemSpan(maxLineSpan) }) { StudyHeader(detail.study) }
+                    items(pending, key = { "pending-" + it.id }, span = { GridItemSpan(maxLineSpan) }) { p ->
+                        PendingUploadCard(p, uploading = upload != null, onRetry = { vm.retryPending(p) },
+                            onDiscard = { vm.discardPending(p) })
+                    }
                     if (detail.files.isEmpty()) {
                         item(span = { GridItemSpan(maxLineSpan) }) {
                             EmptyState("No files yet. Photograph a report or CD cover, or pick images, PDFs or DICOM files.")
@@ -332,7 +404,7 @@ fun StudyScreen(
                             container, f,
                             modifier = Modifier.combinedClickable(
                                 onClick = { open(f) },
-                                onLongClick = { toDelete = f },
+                                onLongClick = { toDeleteId = f.id },
                             ),
                         )
                     }
@@ -343,18 +415,18 @@ fun StudyScreen(
 
     toDelete?.let { f ->
         AlertDialog(
-            onDismissRequest = { toDelete = null },
+            onDismissRequest = { toDeleteId = null },
             title = { Text("Delete file?") },
             text = { Text("Remove ${f.filename} from this study?") },
             confirmButton = {
                 TextButton(onClick = {
-                    toDelete = null
+                    toDeleteId = null
                     scope.launch {
                         vm.delete(f).onFailure { snackbar.showSnackbar("Delete failed: ${it.userMessage()}") }
                     }
                 }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
             },
-            dismissButton = { TextButton(onClick = { toDelete = null }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = { toDeleteId = null }) { Text("Cancel") } },
         )
     }
     if (confirmDeleteStudy) {
@@ -423,6 +495,24 @@ private fun FileTile(container: AppContainer, file: VaultFile, modifier: Modifie
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+    }
+}
+
+@Composable
+private fun PendingUploadCard(item: PendingUpload, uploading: Boolean, onRetry: () -> Unit, onDiscard: () -> Unit) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Photo not uploaded yet", style = MaterialTheme.typography.titleSmall)
+            Text(
+                (item.lastError?.let { "$it. " } ?: "") + "It's saved encrypted on this phone until it uploads.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onRetry, enabled = !uploading) { Text("Retry") }
+                TextButton(onClick = onDiscard, enabled = !uploading) { Text("Discard") }
+            }
         }
     }
 }

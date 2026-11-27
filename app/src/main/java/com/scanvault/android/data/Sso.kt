@@ -62,17 +62,24 @@ class PendingSsoStore(context: Context) {
     }
 }
 
-/** What came back to scanvault://sso. */
+/**
+ * What came back to scanvault://sso. Only the ticket and state are used: an error code from the
+ * link is never shown, because any app or page can open the link with text of its choosing.
+ */
 sealed interface SsoResult {
-    data class Ticket(val ticket: String, val state: String?) : SsoResult
-    data class Error(val message: String, val state: String?) : SsoResult
+    val state: String?
+
+    data class Ticket(val ticket: String, override val state: String?) : SsoResult
+    /** The user pressed Cancel on the server's confirmation page; return quietly. */
+    data class Cancelled(override val state: String?) : SsoResult
+    data class Failed(override val state: String?) : SsoResult
 
     companion object {
         fun parse(uri: android.net.Uri): SsoResult? {
             if (uri.scheme != "scanvault" || uri.host != "sso") return null
             val state = uri.getQueryParameter("state")
-            uri.getQueryParameter("ticket")?.let { return Ticket(it, state) }
-            return Error(uri.getQueryParameter("error") ?: "Sign-in was cancelled", state)
+            uri.getQueryParameter("ticket")?.takeIf { it.isNotBlank() }?.let { return Ticket(it, state) }
+            return if (uri.getQueryParameter("error") == "cancelled") Cancelled(state) else Failed(state)
         }
     }
 }

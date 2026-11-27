@@ -91,7 +91,8 @@ data class StudyInput(
 data class VaultFile(
     val id: String,
     @SerialName("study_id") val studyId: String,
-    val filename: String,
+    /** The server can return null for a blank name; default it so one bad file can't break a study. */
+    val filename: String = "file",
     @SerialName("content_type") val contentType: String = "application/octet-stream",
     @SerialName("size_bytes") val sizeBytes: Long = 0,
     val kind: String = KIND_OTHER,

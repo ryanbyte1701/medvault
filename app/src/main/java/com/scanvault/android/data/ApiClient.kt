@@ -1,12 +1,19 @@
 package com.scanvault.android.data
 
+import com.scanvault.android.data.net.CleartextPolicyInterceptor
+import com.scanvault.android.data.net.InsecureConnectionException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -19,6 +26,8 @@ import okhttp3.Response
 import java.io.IOException
 import java.io.InputStream
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /** Thrown for any non-2xx response from the server. */
 open class ApiException(val status: Int, message: String, val code: String? = null) : IOException(message)
@@ -34,6 +43,8 @@ class UploadPart(
     val filename: String,
     val contentType: String,
     val size: Long,
+    /** Only trust [size] as Content-Length when we know it exactly (our own files); providers can be wrong. */
+    val exactSize: Boolean = false,
     val open: () -> InputStream,
 )
 
@@ -57,6 +68,11 @@ class ApiClient(
     fun url(path: String): HttpUrl = base.newBuilder().addEncodedPathSegments(path.trimStart('/')).build()
 
     fun authHeader(): String? = tokenProvider()?.let { "Bearer $it" }
+
+    val isHttps: Boolean get() = base.isHttps
+
+    /** Same client with a long read timeout, for imports the server ingests before it replies. */
+    private val slowHttp: OkHttpClient by lazy { http.newBuilder().readTimeout(30, TimeUnit.MINUTES).build() }
 
     // --- Auth / status -------------------------------------------------------------------
 
@@ -84,9 +100,13 @@ class ApiClient(
         sendNoContent("POST", "api/auth/logout", "{}".toRequestBody(JSON))
     }
 
+    /** Sends the vault passphrase or recovery key. Refused over http: these also decrypt the backups. */
     suspend fun unlock(passphrase: String? = null, recoveryKey: String? = null) {
+        if (!base.isHttps) {
+            throw InsecureConnectionException("The vault key is never sent over unencrypted http. Use an https address.")
+        }
         sendNoContent("POST", "api/vault/unlock",
-            jsonBody(UnlockRequest(passphrase, recoveryKey), UnlockRequest.serializer()))
+            jsonBody(UnlockRequest(passphrase, recoveryKey), UnlockRequest.serializer()), sensitive = true)
     }
 
     // --- Preferences ---------------------------------------------------------------------
@@ -108,7 +128,8 @@ class ApiClient(
     suspend fun deletePatient(id: String) = sendNoContent("DELETE", "api/patients/${seg(id)}", null)
 
     suspend fun importToPatient(patientId: String, parts: List<UploadPart>): ImportResult =
-        send("POST", "api/patients/${seg(patientId)}/import", multipart(parts, null), ImportResult.serializer())
+        send("POST", "api/patients/${seg(patientId)}/import", multipart(parts, null), ImportResult.serializer(),
+            client = slowHttp)
 
     // --- Studies -------------------------------------------------------------------------
 
@@ -131,7 +152,7 @@ class ApiClient(
     /** Uploads one or more files. The server may return the created file list or a single file. */
     suspend fun upload(studyId: String, parts: List<UploadPart>, kind: String?): List<VaultFile> =
         withContext(Dispatchers.IO) {
-            execute(request("POST", "api/studies/${seg(studyId)}/files", multipart(parts, kind))) { body ->
+            execute(request("POST", "api/studies/${seg(studyId)}/files", multipart(parts, kind)), slowHttp) { body ->
                 val element = json.parseToJsonElement(body)
                 if (element is JsonArray) {
                     json.decodeFromJsonElement(ListSerializer(VaultFile.serializer()), element)
@@ -159,12 +180,12 @@ class ApiClient(
             }.build()
             val builder = Request.Builder().url(url).header("Accept", "image/jpeg")
             authHeader()?.let { builder.header("Authorization", it) }
-            http.newCall(builder.build()).execute().use { r ->
+            http.newCall(builder.build()).await().use { r ->
                 if (!r.isSuccessful) throw errorFor(r)
                 fun d(name: String) = r.header(name)?.toDoubleOrNull()
                 fun i(name: String) = r.header(name)?.toIntOrNull()
                 RenderedImage(
-                    bytes = r.body!!.bytes(),
+                    bytes = readBounded(r, MAX_RENDER_BYTES).let { buf -> buf.readByteArray() },
                     center = d("X-Window-Center") ?: center ?: 0.0,
                     width = d("X-Window-Width") ?: width ?: 1.0,
                     defaultCenter = d("X-Default-Center"),
@@ -188,7 +209,7 @@ class ApiClient(
 
     /** Streams a file's decrypted content into [sink]. */
     suspend fun download(fileId: String, sink: (InputStream) -> Unit) = withContext(Dispatchers.IO) {
-        val response = http.newCall(request("GET", "api/files/${seg(fileId)}/content", null)).execute()
+        val response = http.newCall(request("GET", "api/files/${seg(fileId)}/content", null)).await()
         response.use {
             if (!it.isSuccessful) throw errorFor(it)
             sink(it.body!!.byteStream())
@@ -211,8 +232,15 @@ class ApiClient(
         return builder.build()
     }
 
-    private fun request(method: String, path: String, body: RequestBody?, authenticated: Boolean = true): Request {
+    private fun request(
+        method: String,
+        path: String,
+        body: RequestBody?,
+        authenticated: Boolean = true,
+        sensitive: Boolean = false,
+    ): Request {
         val builder = Request.Builder().url(url(path)).header("Accept", "application/json")
+        if (sensitive) builder.header(CleartextPolicyInterceptor.SENSITIVE_HEADER, "1")
         if (authenticated) authHeader()?.let { builder.header("Authorization", it) }
         builder.method(method, body ?: if (method == "POST" || method == "PUT") ByteArray(0).toRequestBody() else null)
         return builder.build()
@@ -227,25 +255,37 @@ class ApiClient(
         body: RequestBody?,
         serializer: KSerializer<T>,
         authenticated: Boolean = true,
+        client: OkHttpClient = http,
     ): T = withContext(Dispatchers.IO) {
-        execute(request(method, path, body, authenticated)) { json.decodeFromString(serializer, it) }
+        execute(request(method, path, body, authenticated), client) { json.decodeFromString(serializer, it) }
     }
 
-    private suspend fun sendNoContent(method: String, path: String, body: RequestBody?) = withContext(Dispatchers.IO) {
-        execute(request(method, path, body)) { }
-    }
-
-    private fun <T> execute(request: Request, parse: (String) -> T): T {
-        http.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw errorFor(response)
-            return parse(response.body?.string().orEmpty())
+    private suspend fun sendNoContent(method: String, path: String, body: RequestBody?, sensitive: Boolean = false) =
+        withContext(Dispatchers.IO) {
+            execute(request(method, path, body, sensitive = sensitive)) { }
         }
+
+    /** Runs a call that is cancelled (aborting the transfer) if the calling coroutine is cancelled. */
+    private suspend fun <T> execute(request: Request, client: OkHttpClient = http, parse: (String) -> T): T {
+        client.newCall(request).await().use { response ->
+            if (!response.isSuccessful) throw errorFor(response)
+            return withContext(Dispatchers.IO) { parse(readBounded(response, MAX_JSON_BYTES).readUtf8()) }
+        }
+    }
+
+    /** Reads a response body but refuses one larger than [max], so a hostile server can't exhaust memory. */
+    private fun readBounded(response: Response, max: Long): okio.Buffer {
+        val body = response.body ?: return okio.Buffer()
+        if (body.contentLength() > max) throw ApiException(response.code, "The server sent an unexpectedly large reply.")
+        val source = body.source()
+        if (source.request(max + 1)) throw ApiException(response.code, "The server sent an unexpectedly large reply.")
+        return source.buffer
     }
 
     private fun errorFor(response: Response): ApiException {
         val raw = runCatching { response.body?.string() }.getOrNull().orEmpty()
         val parsed = runCatching { json.decodeFromString(ErrorBody.serializer(), raw) }.getOrNull()
-        val message = parsed?.error ?: response.message.ifBlank { "HTTP ${response.code}" }
+        val message = parsed?.error ?: detailMessage(raw) ?: response.message.ifBlank { "HTTP ${response.code}" }
         return when {
             response.code == 423 || parsed?.code == "locked" -> VaultLockedException(message)
             response.code == 401 -> UnauthorizedException(message)
@@ -260,9 +300,19 @@ class ApiClient(
         }
     }
 
+    /** FastAPI-style {"detail": "..."} or {"detail": [{"msg": "..."}]} bodies. */
+    private fun detailMessage(raw: String): String? = runCatching {
+        when (val d = json.parseToJsonElement(raw).jsonObject["detail"]) {
+            is JsonPrimitive -> d.content
+            is JsonArray -> d.mapNotNull { (it as? JsonObject)?.get("msg")?.let { m -> (m as? JsonPrimitive)?.content } }
+                .joinToString("; ").ifBlank { null }
+            else -> null
+        }
+    }.getOrNull()
+
     private class StreamingBody(private val part: UploadPart) : RequestBody() {
         override fun contentType() = part.contentType.toMediaType()
-        override fun contentLength() = if (part.size > 0) part.size else -1L
+        override fun contentLength() = if (part.exactSize && part.size >= 0) part.size else -1L
         override fun writeTo(sink: okio.BufferedSink) {
             part.open().use { input ->
                 val buffer = ByteArray(64 * 1024)
@@ -277,12 +327,29 @@ class ApiClient(
 
     companion object {
         private val JSON = "application/json; charset=utf-8".toMediaType()
+        private const val MAX_JSON_BYTES = 32L * 1024 * 1024
+        private const val MAX_RENDER_BYTES = 256L * 1024 * 1024
 
+        /** Plain client for tests; the app uses [com.scanvault.android.data.net.HttpClients.create]. */
         fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .followRedirects(false)
+            .followSslRedirects(false)
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(5, TimeUnit.MINUTES)
             .writeTimeout(10, TimeUnit.MINUTES)
             .build()
+
+        private suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
+            cont.invokeOnCancellation { runCatching { cancel() } }
+            enqueue(object : Callback {
+                override fun onResponse(call: Call, response: Response) {
+                    if (cont.isActive) cont.resume(response) else response.close()
+                }
+                override fun onFailure(call: Call, e: IOException) {
+                    if (cont.isActive) cont.resumeWithException(e)
+                }
+            })
+        }
 
         /** Accepts "nas.local:8080", "https://host/" or "https://host/scanvault" and returns a URL ending in "/". */
         fun normalizeBaseUrl(input: String): HttpUrl {
