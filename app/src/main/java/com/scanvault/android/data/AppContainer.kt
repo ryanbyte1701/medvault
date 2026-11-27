@@ -147,7 +147,7 @@ class AppContainer(val context: Context) {
     }
 
     /** One client for API and images: system CAs + user-approved pins, LAN-only opt-in http, no redirects. */
-    private val baseHttp: OkHttpClient = HttpClients.create({ store.allowLanHttp }, { store.certPins })
+    private val baseHttp: OkHttpClient = HttpClients.create({ store.allowsLanHttp(it) }, { store.certPins })
 
     private val _session = MutableStateFlow<SessionState>(
         if (store.serverUrl != null && store.token != null && !store.tokenExpired) SessionState.Ready
@@ -225,9 +225,22 @@ class AppContainer(val context: Context) {
         val url = store.serverUrl
         val token = store.token
         if (url != null && token != null) {
-            appScope.launch { runCatching { clientFor(url, token).logout() } }
+            // Remembered until the server confirms, so an offline sign-out is retried at next launch.
+            runCatching { store.pendingRevocation = "$url\n$token" }
+            appScope.launch { revokePending() }
         }
         signOut()
+    }
+
+    private suspend fun revokePending() {
+        val entry = store.pendingRevocation ?: return
+        val (url, token) = entry.split("\n", limit = 2).takeIf { it.size == 2 } ?: run {
+            store.pendingRevocation = null; return
+        }
+        val result = runCatching { clientFor(url, token).logout() }
+        val e = result.exceptionOrNull()
+        // Done once the server answered (an already-invalid token answers 401); keep it on network errors.
+        if (e == null || e is ApiException || e is InsecureConnectionException) runCatching { store.pendingRevocation = null }
     }
 
     fun signOut() {
@@ -275,6 +288,7 @@ class AppContainer(val context: Context) {
         val cutoff = System.currentTimeMillis() - 60 * 60_000L
         File(context.cacheDir, "captures").listFiles()?.filter { it.lastModified() < cutoff }?.forEach { it.delete() }
         File(context.cacheDir, "shared").deleteRecursively() // plaintext copies from version 0.1.0
+        appScope.launch { revokePending() }
     }
 
     /** On sign-out: everything, including photos that never uploaded. */

@@ -11,6 +11,8 @@ class ScanVaultApp : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
+        val keyguard = getSystemService(KEYGUARD_SERVICE) as android.app.KeyguardManager
+        com.scanvault.android.data.crypto.Keystore.deviceSecure = { keyguard.isDeviceSecure }
         container = AppContainer(this)
         // Decrypted copies opened in other apps are temporary; clear any left from a previous run.
         container.cleanUpOnLaunch()

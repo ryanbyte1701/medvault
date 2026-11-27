@@ -24,7 +24,9 @@ stores the vault passphrase or recovery key.
 
 - **App lock**: the app locks when it goes to the background (after 1 minute by default; choose
   immediately, 1, 5 or 15 minutes in Settings) and opens again with your fingerprint, face or phone
-  PIN. The app warns when the phone has no screen lock. Screenshots, screen recording and the
+  PIN. While locked, no screen or dialog is shown at all. Opening the camera, a file picker or a
+  report in another app allows that one trip up to 10 minutes. The app warns when the phone has
+  no screen lock, and then cannot lock itself. Screenshots, screen recording and the
   recent-apps preview are blocked.
 - **Settings and sign-in** (server address, username, session token, appearance): every value is
   AES-256-GCM encrypted with a Keystore key before it reaches SharedPreferences, and each value is
@@ -46,13 +48,13 @@ stores the vault passphrase or recovery key.
 
 ## Network security
 
-- Servers must use **https**. A plain `http://` address works only if you turn on "Allow http on
-  my local network" and the server is on a private address (192.168.x, 10.x, 172.16–31.x,
-  100.64/10 VPN ranges, or `.local`-style LAN hosts resolving to them). The vault passphrase and
+- Servers must use **https**. A plain `http://` address works only if you allow http for that
+  one server, and only when it is reached directly (no proxy) at a private address (192.168.x,
+  10.x, 172.16–31.x, 100.64/10 VPN ranges, or LAN host names resolving to them). The vault passphrase and
   recovery key are never sent over http, even then.
 - Only the phone's system certificate authorities are trusted. For a server with a self-signed or
   private-CA certificate, the app shows the certificate's SHA-256 fingerprint the first time and
-  remembers it once you approve it (Settings → Forget approved certificates resets this).
+  remembers it, for that host and port only, once you approve it (Settings → Forget approved certificates resets this).
 - Redirects are not followed, and server replies are size-limited.
 
 ## Server API
@@ -84,14 +86,18 @@ A locked vault answers data endpoints with HTTP 423 `{"code": "locked"}`; the ap
 Requires JDK 17 and the Android SDK (API 35).
 
 ```sh
-./gradlew testDebugUnitTest assembleDebug
-# APK: app/build/outputs/apk/debug/app-debug.apk
+./gradlew testDebugUnitTest assembleRelease
+# APK: app/build/outputs/apk/release/
 ```
 
-Every push and pull request is built by GitHub Actions, and the debug APK is attached to the run
-as the `scanvault-debug-apk` artifact.
+**Install the release APK.** GitHub Actions builds a minified release APK on every push and pull
+request (`scanvault-release-apk` artifact). It is signed when the repository has these Actions
+secrets: `SCANVAULT_KEYSTORE_BASE64` (base64 of the .jks file), `SCANVAULT_KEYSTORE_PASSWORD`,
+`SCANVAULT_KEY_ALIAS` and `SCANVAULT_KEY_PASSWORD`. Without them it is unsigned and Android won't
+install it.
 
-The workflow also builds a minified release APK (`scanvault-release-apk`). It is signed when the
-repository has these Actions secrets: `SCANVAULT_KEYSTORE_BASE64` (base64 of the .jks file),
-`SCANVAULT_KEYSTORE_PASSWORD`, `SCANVAULT_KEY_ALIAS` and `SCANVAULT_KEY_PASSWORD`; otherwise the
-release APK is unsigned.
+Pull requests also get a debug APK (`scanvault-debug-apk`) for testing. Don't use it for real
+records: debug builds trust user-installed CA certificates and can be inspected with a debugger.
+
+CI actions are pinned to commit SHAs and the Gradle wrapper jar is checked against Gradle's
+published checksums.

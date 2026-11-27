@@ -140,7 +140,7 @@ fun ImageViewerScreen(
                 val result = container.call { it.render(fileId, c, w, f.takeIf { it >= 0 }) }
                     .mapCatching { info ->
                         val bmp = withContext(Dispatchers.Default) {
-                            BitmapFactory.decodeByteArray(info.bytes, 0, info.bytes.size)
+                            decodeBounded(info.bytes)
                         } ?: error("Couldn't decode the rendered image")
                         DicomFrame(bmp.asImageBitmap(), info)
                     }
@@ -455,4 +455,14 @@ private fun LabeledSlider(
         Text(display(), color = Color.White, style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.width(56.dp).padding(start = 8.dp))
     }
+}
+
+/** Decodes a rendered frame, downsampling anything over 4096 px a side so it can't exhaust memory. */
+private fun decodeBounded(bytes: ByteArray, maxSide: Int = 4096): android.graphics.Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sample = 1
+    while (maxOf(bounds.outWidth, bounds.outHeight) / sample > maxSide) sample *= 2
+    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
 }

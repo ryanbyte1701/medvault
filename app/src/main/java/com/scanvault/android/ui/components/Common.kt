@@ -89,3 +89,13 @@ fun formatBytes(bytes: Long): String {
     while (value >= 1024 && i < units.lastIndex) { value /= 1024; i++ }
     return DecimalFormat(if (i == 0) "0" else "0.#").format(value) + " " + units[i]
 }
+
+/**
+ * Dialogs are separate windows, so the main window's tapjacking filter doesn't cover them.
+ * Call inside a dialog to drop touches that arrive while another app's overlay is drawn over it.
+ */
+@androidx.compose.runtime.Composable
+fun GuardDialogTouches() {
+    val view = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.SideEffect { view.rootView.filterTouchesWhenObscured = true }
+}

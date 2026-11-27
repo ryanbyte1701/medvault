@@ -1,5 +1,6 @@
 package com.scanvault.android.ui.studies
 
+import com.scanvault.android.ui.components.GuardDialogTouches
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
@@ -416,7 +417,7 @@ fun StudyScreen(
     toDelete?.let { f ->
         AlertDialog(
             onDismissRequest = { toDeleteId = null },
-            title = { Text("Delete file?") },
+            title = { GuardDialogTouches(); Text("Delete file?") },
             text = { Text("Remove ${f.filename} from this study?") },
             confirmButton = {
                 TextButton(onClick = {
@@ -432,7 +433,7 @@ fun StudyScreen(
     if (confirmDeleteStudy) {
         AlertDialog(
             onDismissRequest = { confirmDeleteStudy = false },
-            title = { Text("Delete study?") },
+            title = { GuardDialogTouches(); Text("Delete study?") },
             text = { Text("This removes the study and all of its files from the vault.") },
             confirmButton = {
                 TextButton(onClick = {
