@@ -1165,14 +1165,14 @@ async function restoreDialog({ file, targets }) {
 
 // ------------------------------------------------------------------ settings
 // ------------------------------------------------------------------ activity log
-const ACT_ICON = { auth: I.key, vault: I.lock, patient: I.users, study: I.scan, file: I.file, backup: I.cloud, sso: I.shield, activity: I.activity, ai: I.info };
+const ACT_ICON = { auth: I.key, vault: I.lock, patient: I.users, study: I.scan, file: I.file, backup: I.cloud, sso: I.shield, activity: I.activity, ai: I.info, lab: I.pdf };
 const CLIENT = { web: "Web", android: "Android app", api: "API", system: "ScanVault" };
 const DETAIL_LABELS = { method: "Method", reason: "Reason", attempted_username: "Username tried", provider: "Provider", email: "Account", filename: "File", previous_filename: "Was named",
   filenames: "Files", files: "Files", bytes: "Size", duplicates: "Already in vault", skipped: "Skipped", how: "How", new_study: "New study", changed: "Changed fields", previous_name: "Was named",
   studies: "Studies", target_name: "Destination", target_type: "Type", trigger: "Trigger", message: "Result", mode: "Mode", source: "Source", backup_created: "Backup from",
   setting: "Setting", value: "Value", fingerprint: "New key fingerprint", format: "Format", entries: "Entries", problems: "Problems", from_study_title: "From study", idle_minutes: "Idle minutes",
-  signed_out: "Sessions signed out", patients: "Patients", model: "Model", path: "Where" };
-const HIDE_DETAILS = new Set(["file_id", "file_ids", "target_id", "provider_id", "from_study_id", "app", "vault_id", "filters", "other_study_id"]);
+  signed_out: "Sessions signed out", patients: "Patients", model: "Model", path: "Where", lab: "Lab", results: "Results" };
+const HIDE_DETAILS = new Set(["report_id", "file_id", "file_ids", "target_id", "provider_id", "from_study_id", "app", "vault_id", "filters", "other_study_id"]);
 function actTarget(e) {
   const d = e.details || {};
   const bits = [e.patient_name, e.study_title];

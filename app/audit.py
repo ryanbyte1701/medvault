@@ -111,6 +111,12 @@ LABELS = {
     "sso.provider_update": "Changed a sign-in provider",
     "sso.provider_delete": "Removed a sign-in provider",
     "sso.settings": "Changed sign-in settings",
+    "lab.upload": "Uploaded a lab report",
+    "lab.create": "Added lab results",
+    "lab.save": "Saved reviewed lab results",
+    "lab.update": "Edited lab results",
+    "lab.delete": "Deleted lab results",
+    "lab.export": "Exported lab results",
     "activity.export": "Exported the activity log",
     "activity.verify": "Checked the activity log",
 }
@@ -125,6 +131,7 @@ CATEGORIES = {
     "sso": "Sign-in settings",
     "activity": "Activity log",
     "ai": "AI",
+    "lab": "Labs",
 }
 
 
