@@ -41,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -87,16 +88,29 @@ class PatientDetailViewModel(private val container: AppContainer, private val pa
     suspend fun delete(): Result<Unit> = container.call { it.deletePatient(patientId) }
 
     /** Sends DICOM files or a zipped imaging-CD export; the server groups them into studies. */
-    suspend fun importFiles(parts: List<com.scanvault.android.data.UploadPart>): Result<String> {
+    val messages = kotlinx.coroutines.channels.Channel<String>(kotlinx.coroutines.channels.Channel.BUFFERED)
+
+    /**
+     * Imports in the ViewModel's scope so a rotation doesn't cancel it, and always clears the
+     * progress bar when done.
+     */
+    fun importFiles(parts: List<com.scanvault.android.data.UploadPart>) {
+        if (_importing.value) return
         _importing.value = true
-        val result = container.call { it.importToPatient(patientId, parts) }
-        _importing.value = false
-        load()
-        return result.map { r ->
-            buildString {
-                append("Imported ${r.files.size} file(s) into ${r.studies.size} study(ies)")
-                if (r.skipped.isNotEmpty()) append(", skipped ${r.skipped.size}")
+        viewModelScope.launch {
+            val result = try {
+                container.call { it.importToPatient(patientId, parts) }
+            } finally {
+                _importing.value = false
             }
+            load()
+            result.map { r ->
+                buildString {
+                    append("Imported ${r.files.size} file(s) into ${r.studies.size} study(ies)")
+                    if (r.skipped.isNotEmpty()) append(", skipped ${r.skipped.size}")
+                }
+            }.onSuccess { messages.trySend(it) }
+                .onFailure { messages.trySend("Import failed: ${it.userMessage()}") }
         }
     }
 }
@@ -116,21 +130,19 @@ fun PatientDetailScreen(
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val resolver = LocalContext.current.contentResolver
-    var showAdd by remember { mutableStateOf(false) }
+    var showAdd by rememberSaveable { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
-    var confirmDelete by remember { mutableStateOf(false) }
+    var confirmDelete by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(session) { if (session == SessionState.Ready) vm.load() }
 
     val importPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
-        scope.launch {
-            val parts = uris.map { resolver.uploadPartFor(it) }
-            vm.importFiles(parts)
-                .onSuccess { snackbar.showSnackbar(it) }
-                .onFailure { snackbar.showSnackbar("Import failed: ${it.userMessage()}") }
-        }
+        val parts = uris.mapNotNull { runCatching { resolver.uploadPartFor(it) }.getOrNull() }
+        if (parts.isNotEmpty()) vm.importFiles(parts)
+        else scope.launch { snackbar.showSnackbar("Those files couldn't be read") }
     }
+    LaunchedEffect(vm) { for (m in vm.messages) snackbar.showSnackbar(m) }
 
     Scaffold(
         topBar = {
@@ -145,6 +157,7 @@ fun PatientDetailScreen(
                             leadingIcon = { Icon(Icons.Default.FolderZip, null) },
                             onClick = {
                                 menu = false
+                                container.appLock.expectExternalTrip()
                                 importPicker.launch(arrayOf("application/zip", "application/dicom", "application/octet-stream", "*/*"))
                             },
                         )
@@ -234,11 +247,11 @@ private fun PatientHeader(p: Patient) {
 
 @Composable
 private fun AddStudyDialog(onDismiss: () -> Unit, onSave: suspend (StudyInput) -> Result<Unit>) {
-    var title by remember { mutableStateOf("") }
-    var modality by remember { mutableStateOf("") }
-    var date by remember { mutableStateOf("") }
-    var facility by remember { mutableStateOf("") }
-    var description by remember { mutableStateOf("") }
+    var title by rememberSaveable { mutableStateOf("") }
+    var modality by rememberSaveable { mutableStateOf("") }
+    var date by rememberSaveable { mutableStateOf("") }
+    var facility by rememberSaveable { mutableStateOf("") }
+    var description by rememberSaveable { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()

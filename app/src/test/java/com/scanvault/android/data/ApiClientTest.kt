@@ -147,14 +147,49 @@ class ApiClientTest {
         assertTrue(body.contains("\"theme\":\"light\""))
     }
 
-    @Test fun unlockPostsRecoveryKey() = runTest {
-        server.enqueue(json("""{"unlocked":true}"""))
-        api.unlock(recoveryKey = "AAAA-BBBB")
-        val req = server.takeRequest()
+    @Test fun nullFilenameDoesNotBreakTheFileList() = runTest {
+        server.enqueue(json("""[{"id":"f1","study_id":"s1","filename":null,"content_type":"image/jpeg"},
+            {"id":"f2","study_id":"s1","filename":"ok.jpg"}]"""))
+        val files = api.files("s1")
+        assertEquals(listOf("file", "ok.jpg"), files.map { it.filename })
+    }
+
+    @Test fun fastApiDetailErrorsAreReadable() = runTest {
+        server.enqueue(json("""{"detail":"Patient not found"}""", 404))
+        server.enqueue(json("""{"detail":[{"loc":["body","file"],"msg":"Field required"}]}""", 422))
+        try { api.patient("x"); fail() } catch (e: ApiException) { assertEquals("Patient not found", e.message) }
+        try { api.patients(); fail() } catch (e: ApiException) { assertEquals("Field required", e.message) }
+    }
+
+    @Test fun oversizedReplyIsRefused() = runTest {
+        server.enqueue(json("[" + "1,".repeat(17 * 1024 * 1024) + "1]"))
+        try { api.patients(); fail() } catch (e: ApiException) { assertTrue(e.message!!.contains("large")) }
+    }
+
+    @Test fun unlockPostsRecoveryKeyOverHttps() = runTest {
+        val cert = okhttp3.tls.HeldCertificate.Builder().addSubjectAlternativeName("localhost").build()
+        val serverCerts = okhttp3.tls.HandshakeCertificates.Builder().heldCertificate(cert).build()
+        val clientCerts = okhttp3.tls.HandshakeCertificates.Builder().addTrustedCertificate(cert.certificate).build()
+        val tls = MockWebServer().apply { useHttps(serverCerts.sslSocketFactory(), false); start() }
+        val client = okhttp3.OkHttpClient.Builder()
+            .sslSocketFactory(clientCerts.sslSocketFactory(), clientCerts.trustManager)
+            .addNetworkInterceptor(com.scanvault.android.data.net.CleartextPolicyInterceptor { false })
+            .build()
+        val httpsApi = ApiClient(tls.url("/").newBuilder().host("localhost").build().toString(), { "tok" }, client)
+        tls.enqueue(json("""{"unlocked":true}"""))
+        httpsApi.unlock(recoveryKey = "AAAA-BBBB")
+        val req = tls.takeRequest()
+        assertEquals(null, req.getHeader("X-ScanVault-Sensitive"))
         assertEquals("/api/vault/unlock", req.path)
         val body = req.body.readUtf8()
         assertTrue(body.contains("\"recovery_key\":\"AAAA-BBBB\""))
         assertTrue(!body.contains("passphrase"))
+        tls.shutdown()
+    }
+
+    @Test fun unlockIsRefusedOverHttp() = runTest {
+        try { api.unlock(passphrase = "p"); fail() } catch (e: com.scanvault.android.data.net.InsecureConnectionException) { }
+        assertEquals(0, server.requestCount)
     }
 
     @Test fun idsArePathEncoded() = runTest {

@@ -2,6 +2,7 @@ package com.scanvault.android.ui.login
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
@@ -18,6 +19,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Switch
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -34,6 +37,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.scanvault.android.data.ApiClient
 import com.scanvault.android.data.AppContainer
+import com.scanvault.android.data.net.HttpClients
+import com.scanvault.android.data.net.UntrustedCertificateException
 import com.scanvault.android.ui.components.userMessage
 import kotlinx.coroutines.launch
 
@@ -47,6 +52,9 @@ fun LoginScreen(container: AppContainer, onOpenSettings: () -> Unit, onSignedIn:
     val scope = rememberCoroutineScope()
 
     val insecure = server.trim().startsWith("http://", ignoreCase = true)
+    var allowLanHttp by remember { mutableStateOf(container.store.allowLanHttp) }
+    // A self-signed certificate the user is being asked to approve (trust on first use).
+    var untrusted by remember { mutableStateOf<UntrustedCertificateException?>(null) }
 
     fun signIn() {
         if (busy) return
@@ -56,15 +64,48 @@ fun LoginScreen(container: AppContainer, onOpenSettings: () -> Unit, onSignedIn:
                 ApiClient.normalizeBaseUrl(server)
                 val login = container.clientFor(server).login(username.trim(), password)
                 val status = runCatching { container.clientFor(server, login.token).status() }.getOrNull()
-                login.token to (status?.unlocked ?: true)
+                container.onSignedIn(
+                    server, username.trim(), login.token,
+                    unlocked = login.unlocked ?: status?.unlocked ?: true,
+                    expiresAt = login.expiresAt,
+                )
             }
             busy = false
-            result.onSuccess { (token, unlocked) ->
+            result.onSuccess {
                 password = ""
-                container.onSignedIn(server, username.trim(), token, unlocked)
                 onSignedIn()
-            }.onFailure { error = it.userMessage() }
+            }.onFailure { e ->
+                val cert = HttpClients.untrustedCertificate(e)
+                if (cert != null) untrusted = cert else error = e.userMessage()
+            }
         }
+    }
+
+    untrusted?.let { cert ->
+        AlertDialog(
+            onDismissRequest = { untrusted = null },
+            title = { Text("Trust this server's certificate?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Your phone doesn't recognise the certificate this server uses. That's normal for a " +
+                        "self-signed certificate on a home server, but it's also what an attacker's would look like.")
+                    Text("Only trust it if this SHA-256 fingerprint matches the one your server shows " +
+                        "(for example in DSM under Security → Certificate):")
+                    Text(cert.fingerprint, style = MaterialTheme.typography.bodySmall.copy(
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace))
+                    Text(cert.subject, style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    container.store.addPin(cert.fingerprint)
+                    untrusted = null
+                    signIn()
+                }) { Text("Trust and sign in") }
+            },
+            dismissButton = { TextButton(onClick = { untrusted = null }) { Text("Cancel") } },
+        )
     }
 
     Scaffold { padding ->
@@ -94,11 +135,25 @@ fun LoginScreen(container: AppContainer, onOpenSettings: () -> Unit, onSignedIn:
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
                 supportingText = if (insecure) {
-                    { Text("Unencrypted http: only use this on a trusted home network or VPN.",
+                    { Text("Unencrypted http: anyone on the network can read your password and records.",
                         color = MaterialTheme.colorScheme.error) }
                 } else null,
                 modifier = Modifier.fillMaxWidth(),
             )
+            if (insecure) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        "Allow unencrypted http on my local network (home Wi-Fi or VPN only). " +
+                            "The vault key is never sent over http.",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Switch(checked = allowLanHttp, onCheckedChange = {
+                        allowLanHttp = it
+                        container.store.allowLanHttp = it
+                    })
+                }
+            }
             OutlinedTextField(
                 value = username,
                 onValueChange = { username = it },

@@ -1,5 +1,8 @@
 package com.scanvault.android.ui.components
 
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -35,19 +38,18 @@ fun UnlockDialog(container: AppContainer) {
     var secret by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var reveal by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val overHttp = remember { runCatching { !container.api.isHttps }.getOrDefault(false) }
 
     fun submit() {
         if (secret.isBlank() || busy) return
         busy = true; error = null
         scope.launch {
-            val result = runCatching {
-                if (useRecoveryKey) container.api.unlock(recoveryKey = secret.trim())
-                else container.api.unlock(passphrase = secret)
-            }
+            val result = if (useRecoveryKey) container.unlockVault(recoveryKey = secret.trim())
+                else container.unlockVault(passphrase = secret)
             busy = false
-            result.onSuccess { secret = ""; container.markUnlocked() }
-                .onFailure { error = it.userMessage() }
+            result.onSuccess { secret = "" }.onFailure { error = it.userMessage() }
         }
     }
 
@@ -58,6 +60,13 @@ fun UnlockDialog(container: AppContainer) {
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("The ScanVault server restarted and needs its encryption key before it can show records.")
+                if (overHttp) {
+                    Text(
+                        "This server uses unencrypted http, so the app won't send the vault key to it. " +
+                            "Unlock it from the web app on your network, or switch the server to https.",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(selected = !useRecoveryKey, onClick = { useRecoveryKey = false },
                         label = { Text("Passphrase") })
@@ -68,21 +77,31 @@ fun UnlockDialog(container: AppContainer) {
                     value = secret,
                     onValueChange = { secret = it },
                     label = { Text(if (useRecoveryKey) "Recovery key" else "Vault passphrase") },
-                    singleLine = !useRecoveryKey,
-                    minLines = if (useRecoveryKey) 3 else 1,
-                    visualTransformation = if (useRecoveryKey) androidx.compose.ui.text.input.VisualTransformation.None
+                    singleLine = true,
+                    enabled = !overHttp,
+                    // Both are masked and use a password keyboard, so the keyboard doesn't learn them.
+                    visualTransformation = if (reveal) androidx.compose.ui.text.input.VisualTransformation.None
                         else PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(
-                        keyboardType = if (useRecoveryKey) KeyboardType.Ascii else KeyboardType.Password,
+                        keyboardType = KeyboardType.Password,
                         autoCorrectEnabled = false,
                     ),
+                    trailingIcon = {
+                        androidx.compose.material3.IconButton(onClick = { reveal = !reveal }) {
+                            androidx.compose.material3.Icon(
+                                if (reveal) Icons.Default.VisibilityOff
+                                else Icons.Default.Visibility,
+                                contentDescription = if (reveal) "Hide" else "Show",
+                            )
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth(),
                 )
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         },
         confirmButton = {
-            TextButton(onClick = ::submit, enabled = !busy && secret.isNotBlank()) {
+            TextButton(onClick = ::submit, enabled = !busy && secret.isNotBlank() && !overHttp) {
                 Text(if (busy) "Unlocking…" else "Unlock")
             }
         },

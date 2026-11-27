@@ -69,12 +69,16 @@ fun EmptyState(text: String, modifier: Modifier = Modifier) {
     }
 }
 
-fun Throwable.userMessage(): String = when (this) {
+fun Throwable.userMessage(): String = when {
+    com.scanvault.android.data.net.HttpClients.untrustedCertificate(this) != null ->
+        "This server's certificate isn't trusted by your phone."
+    else -> when (this) {
     is java.net.UnknownHostException -> "Can't find the server. Check the address and your network."
     is java.net.ConnectException -> "Can't connect to the server. Is ScanVault running?"
-    is java.net.SocketTimeoutException -> "The server took too long to respond."
     is javax.net.ssl.SSLException -> "Secure connection failed: ${message ?: "TLS error"}"
+    is java.net.SocketTimeoutException -> "The server took too long to respond."
     else -> message ?: this::class.java.simpleName
+    }
 }
 
 fun formatBytes(bytes: Long): String {

@@ -78,7 +78,7 @@ fun PatientsScreen(container: AppContainer, onOpen: (String) -> Unit, onOpenSett
     val state by vm.state.collectAsStateWithLifecycle()
     val session by container.session.collectAsStateWithLifecycle()
     var query by rememberSaveable { mutableStateOf("") }
-    var showAdd by remember { mutableStateOf(false) }
+    var showAdd by rememberSaveable { mutableStateOf(false) }
 
     // Load on entry, and again once a locked vault has been unlocked.
     LaunchedEffect(session) { if (session == SessionState.Ready) vm.load() }
@@ -102,7 +102,7 @@ fun PatientsScreen(container: AppContainer, onOpen: (String) -> Unit, onOpenSett
         },
     ) { padding ->
         LoadableContent(state, onRetry = vm::load, modifier = Modifier.padding(padding)) { patients ->
-            Column(Modifier.fillMaxSize()) {
+            Column(Modifier.fillMaxSize().padding(padding)) {
                 OutlinedTextField(
                     value = query,
                     onValueChange = { query = it },
@@ -149,11 +149,11 @@ fun PatientsScreen(container: AppContainer, onOpen: (String) -> Unit, onOpenSett
 
 @Composable
 private fun AddPatientDialog(onDismiss: () -> Unit, onSave: suspend (PatientInput) -> Result<Unit>) {
-    var name by remember { mutableStateOf("") }
-    var dob by remember { mutableStateOf("") }
-    var sex by remember { mutableStateOf("") }
-    var mrn by remember { mutableStateOf("") }
-    var notes by remember { mutableStateOf("") }
+    var name by rememberSaveable { mutableStateOf("") }
+    var dob by rememberSaveable { mutableStateOf("") }
+    var sex by rememberSaveable { mutableStateOf("") }
+    var mrn by rememberSaveable { mutableStateOf("") }
+    var notes by rememberSaveable { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()

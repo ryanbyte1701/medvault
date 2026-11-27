@@ -11,6 +11,8 @@ data class LoginRequest(val username: String, val password: String)
 data class LoginResponse(
     val token: String,
     @SerialName("expires_at") val expiresAt: String? = null,
+    /** Whether the vault is unlocked; SSO never unlocks it, so false means ask for the passphrase. */
+    val unlocked: Boolean? = null,
 )
 
 @Serializable
@@ -76,7 +78,8 @@ data class StudyInput(
 data class VaultFile(
     val id: String,
     @SerialName("study_id") val studyId: String,
-    val filename: String,
+    /** The server can return null for a blank name; default it so one bad file can't break a study. */
+    val filename: String = "file",
     @SerialName("content_type") val contentType: String = "application/octet-stream",
     @SerialName("size_bytes") val sizeBytes: Long = 0,
     val kind: String = KIND_OTHER,
