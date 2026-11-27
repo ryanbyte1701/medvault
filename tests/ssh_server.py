@@ -69,17 +69,21 @@ class _SFTP(SFTPServerInterface):
 
 
 class _Server(paramiko.ServerInterface):
-    def __init__(self, password, pubkey, root):
-        self.password, self.pubkey, self.root = password, pubkey, root
+    def __init__(self, password, pubkey, root, owner=None):
+        self.password, self.pubkey, self.root, self.owner = password, pubkey, root, owner
         self.event = threading.Event()
 
     def check_channel_request(self, kind, chanid):
         return paramiko.OPEN_SUCCEEDED if kind == "session" else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
 
     def check_auth_password(self, u, p):
+        if self.owner:
+            self.owner.auth_attempts += 1
         return paramiko.AUTH_SUCCESSFUL if p == self.password else paramiko.AUTH_FAILED
 
     def check_auth_publickey(self, u, key):
+        if self.owner:
+            self.owner.auth_attempts += 1
         return paramiko.AUTH_SUCCESSFUL if self.pubkey and key.asbytes() == self.pubkey.asbytes() else paramiko.AUTH_FAILED
 
     def get_allowed_auths(self, u):
@@ -126,6 +130,7 @@ class SSHTestServer:
     def __init__(self, root, password="pw", pubkey=None):
         self.root = str(root)
         self.password, self.pubkey = password, pubkey
+        self.auth_attempts = 0
         self.host_key = paramiko.Ed25519Key.from_private_key_file(_hostkey_path())
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -140,15 +145,23 @@ class SSHTestServer:
                 conn, _ = self.sock.accept()
             except OSError:
                 return
-            t = paramiko.Transport(conn)
-            t.add_server_key(self.host_key)
-            sftp_root = self.root
+            # one thread per connection: a client that hangs up mid-handshake
+            # (as the host-key probe does) must not stall the next one
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
 
-            class S(_SFTP):
-                root = sftp_root
+    def _serve(self, conn):
+        t = paramiko.Transport(conn)
+        t.add_server_key(self.host_key)
+        sftp_root = self.root
 
-            t.set_subsystem_handler("sftp", SFTPServer, S)
-            t.start_server(server=_Server(self.password, self.pubkey, self.root))
+        class S(_SFTP):
+            root = sftp_root
+
+        t.set_subsystem_handler("sftp", SFTPServer, S)
+        try:
+            t.start_server(server=_Server(self.password, self.pubkey, self.root, self))
+        except Exception:
+            t.close()
 
     def close(self):
         self.sock.close()

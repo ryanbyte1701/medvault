@@ -21,7 +21,7 @@ PREVIEW_MAX = 1024
 # 16-bit 8k x 8k digital radiograph or mammogram with room to spare.
 MAX_FRAME_BYTES = int(os.environ.get("SCANVAULT_MAX_FRAME_MB", "256")) * 1024 * 1024
 MAX_IMAGE_PIXELS = 120_000_000
-MAX_INFLATED = 512 * 1024 * 1024
+MAX_INFLATED = 256 * 1024 * 1024  # fits a 1 GB container with room for the decode
 DEFLATED_TS = "1.2.840.10008.1.2.1.99"
 
 
@@ -114,7 +114,7 @@ def _check_deflated(fp: BinaryIO) -> None:
             total += len(out)
             if total > MAX_INFLATED:
                 fp.seek(0)
-                raise MediaError("Deflated DICOM expands to more than 512 MB")
+                raise MediaError("Deflated DICOM expands to more than 256 MB")
             chunk = d.unconsumed_tail
     fp.seek(0)
 

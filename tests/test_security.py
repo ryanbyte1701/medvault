@@ -523,3 +523,111 @@ def test_passphrase_file_edge_cases(vault, tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("SCANVAULT_PASSPHRASE_FILE", str(pf))
     main._auto_unlock()
     assert main.vault.unlocked
+
+
+# ------------------------------------------------------------------ fix verification
+
+def test_rekey_waits_for_running_changes(vault, monkeypatch):
+    c, B, j = vault
+    _patient(c, B, "Busy")
+    # another upload is still running: the key change gives up instead of racing it
+    monkeypatch.setattr(main, "REKEY_WAIT", 0.3)
+    main._inflight["n"] += 1
+    try:
+        r = c.post("/api/vault/rekey", json={"passphrase": PASS, "new_passphrase": "rotated-passphrase-9"}, headers=B)
+        assert r.status_code == 409 and r.json()["code"] == "busy"
+    finally:
+        main._inflight["n"] -= 1
+    assert main._state["maintenance"] is None and not main._state["rekeying"]
+    # while a key change runs, new changes are refused
+    main._state["rekeying"] = True
+    try:
+        assert c.post("/api/patients", json={"name": "x"}, headers=B).status_code == 503
+    finally:
+        main._state["rekeying"] = False
+    assert c.post("/api/vault/rekey", json={"passphrase": PASS, "new_passphrase": "rotated-passphrase-9"}, headers=B).status_code == 200
+
+
+def test_big_zip_import_needs_few_open_files(vault, tmp_path):
+    import resource
+
+    c, B, j = vault
+    p = _patient(c, B, "CT")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for i in range(150):
+            d = tmp_path / f"im{i}.dcm"
+            make_dicom(d, study_uid="1.2.3.99", instance=i + 1)
+            z.write(d, f"DICOM/IM{i:05d}")
+        z.writestr("report.pdf", PDF)
+    used = len(os.listdir("/proc/self/fd"))
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (used + 60, hard))
+    try:
+        r = c.post(f"/api/patients/{p['id']}/import", files=[("file", ("cd.zip", buf.getvalue()))], headers=B)
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+    assert r.status_code == 200, r.text
+    files = r.json()["files"] if isinstance(r.json(), dict) else r.json()
+    assert len(files) == 151
+    assert len({f["study_id"] for f in files}) == 1  # the report joined the imaging study
+
+
+def test_strangers_cannot_lock_out_the_owner(vault):
+    c, B, j = vault
+    c.cookies.clear()
+    ok = c.post("/api/auth/login", json={"username": "ryan", "password": PW})
+    assert ok.status_code == 200
+    device = ok.json()["device"]
+    c.cookies.clear()
+    for _ in range(12):
+        main.login_throttle._fails.clear()  # many addresses
+        c.post("/api/auth/login", json={"username": "ryan", "password": "wrong-password"})
+    main.login_throttle._fails.clear()
+    c.cookies.clear()
+    assert c.post("/api/auth/login", json={"username": "ryan", "password": PW}).status_code == 429
+    assert c.post("/api/auth/login", json={"username": "ryan", "password": PW, "device": "d1.forged"}).status_code == 429
+    assert c.post("/api/auth/login", json={"username": "ryan", "password": PW, "device": device}).status_code == 200
+
+
+def test_reauth_is_throttled(vault):
+    c, B, j = vault
+    codes = [c.post("/api/sso/providers", json={"preset": "generic", "issuer": "https://idp.example.com", "client_id": "x", "password": "nope-nope-nope"}, headers=B).status_code for _ in range(7)]
+    assert codes[:5] == [403] * 5 and 429 in codes[5:]
+
+
+def test_app_confirm_refuses_multipart(vault):
+    c, B, j = vault
+    r = c.post("/api/auth/sso/app-confirm", files={"cid": ("a", b"x" * 100000)})
+    assert r.status_code == 415
+    r = c.post("/api/auth/sso/app-confirm", content=b"cid=" + b"x" * 10000, headers={"Content-Type": "application/x-www-form-urlencoded"})
+    assert r.status_code == 413
+
+
+def test_new_server_needs_secrets_again(vault):
+    cfg = main._merge_config("sftp", {"host": "h", "username": "u", "password": "p", "host_key": "SHA256:x"}, {"host": "evil"})
+    assert "password" not in cfg and cfg["host_key"] == ""
+    cfg = main._merge_config("sftp", {"host": "h", "username": "u", "password": "p"}, {"host": "h2", "password": "p2"})
+    assert cfg["password"] == "p2"
+    cfg = main._merge_config("webdav", {"url": "https://a.example.com", "password": "p", "tls_fingerprint": "ab"}, {"url": "https://b.example.com"})
+    assert "password" not in cfg and "tls_fingerprint" not in cfg
+    cfg = main._merge_config("webdav", {"url": "https://a.example.com", "password": "p"}, {"folder": "x"})
+    assert cfg["password"] == "p"
+    with pytest.raises(main.ApiError):
+        main._merge_config("s3", {}, {"endpoint_url": "http://minio.local:9000", "bucket": "b"})
+
+
+def test_weak_passphrase_refused():
+    for weak in ("password1234", "aaaaaaaaaaaaaaaa", "123456789012", "qwertyuiop12"):
+        with pytest.raises(main.ApiError) as e:
+            main._validate_new_passphrase(weak)
+        assert e.value.code == "weak_passphrase"
+    main._validate_new_passphrase("orbit-cedar-lantern-quill")
+
+
+def test_status_hides_version_until_signed_in(vault):
+    c, B, j = vault
+    c.cookies.clear()
+    assert c.get("/api/status").json()["version"] is None
+    assert c.get("/api/status", headers=B).json()["version"] == main.VERSION
+    assert "version" not in c.get("/api/health").json()

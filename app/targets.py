@@ -26,14 +26,30 @@ SUFFIX = ".svb"
 TIMEOUT = 60
 
 
+MAX_LISTING = 16 * 1024 * 1024  # bytes of folder listing accepted from a server
+
+
 class TargetError(Exception):
     pass
+
+
+class HostKeyPinned(TargetError):
+    """Raised on the first contact with an SSH server, after its host key was
+    pinned and before any credentials were sent."""
+
+    def __init__(self, fingerprint: str):
+        super().__init__(f"Pinned the server's host key {fingerprint} on first contact. Check it, then run the backup again.")
+        self.fingerprint = fingerprint
 
 
 class Target:
     type = ""
     # Secrets are write-only in the UI: never returned by the API.
     secret_fields: tuple[str, ...] = ()
+    # Fields that say *where* the backups go. When one changes, stored secrets
+    # are dropped unless they are entered again, so an edit can't quietly send
+    # the old password to a new server.
+    location_fields: tuple[str, ...] = ()
 
     def __init__(self, config: dict, save_config: Callable[[dict], None] | None = None, vault_id: str = ""):
         self.config = config
@@ -463,13 +479,21 @@ class SSHTarget(Target):
 
     type = "sftp"
     secret_fields = ("password", "private_key", "key_passphrase")
+    location_fields = ("host", "port")
 
     def _connect(self):
         import paramiko
 
         c = self.config
-        client = paramiko.SSHClient()
         pinned = (c.get("host_key") or "").strip()
+        if not pinned:
+            # First contact: learn the host key without signing in, so the
+            # password or key is only ever offered to the pinned server.
+            fp = self._fetch_host_key()
+            c["host_key"] = fp
+            self._save(c)
+            raise HostKeyPinned(fp)
+        client = paramiko.SSHClient()
 
         class Policy(paramiko.MissingHostKeyPolicy):
             def missing_host_key(inner, client_, hostname, key):  # noqa: N805
@@ -505,6 +529,26 @@ class SSHTarget(Target):
         c.pop("_seen_host_key", None)
         return client
 
+    def _fetch_host_key(self) -> str:
+        import socket
+
+        import paramiko
+
+        c = self.config
+        try:
+            sock = socket.create_connection((c["host"], int(c.get("port") or 22)), timeout=20)
+        except (OSError, ValueError, KeyError) as exc:
+            raise TargetError(f"SSH connection failed: {exc}") from exc
+        t = paramiko.Transport(sock)
+        try:
+            t.banner_timeout = 20
+            t.start_client(timeout=20)
+            return _ssh_fp(t.get_remote_server_key())
+        except Exception as exc:
+            raise TargetError(f"SSH connection failed: {exc}") from exc
+        finally:
+            t.close()
+
     def _dir(self) -> str:
         return self.config.get("remote_dir") or "."
 
@@ -512,7 +556,11 @@ class SSHTarget(Target):
         return self.config.get("protocol") or "sftp"
 
     def test(self) -> str:
-        client = self._connect()
+        try:
+            client = self._connect()
+        except HostKeyPinned as exc:
+            return (f"Reached the server and pinned its host key {exc.fingerprint}. Nothing was signed in yet. "
+                    "Check that this matches your server (ssh-keygen -lf on its host key), then press Test again to sign in.")
         try:
             if self._proto() == "sftp":
                 sftp = client.open_sftp()
@@ -666,6 +714,19 @@ class S3(Target):
 
     type = "s3"
     secret_fields = ("secret_access_key",)
+    location_fields = ("provider", "endpoint_url", "account_id")
+
+    @classmethod
+    def validate(cls, config: dict) -> None:
+        from urllib.parse import urlparse
+
+        ep = (config.get("endpoint_url") or "").strip()
+        if ep:
+            u = urlparse(ep)
+            if u.scheme != "https" or not u.hostname:
+                raise TargetError("The endpoint URL must start with https:// (keys and backups would otherwise travel in clear)")
+            if u.username or u.password:
+                raise TargetError("Put the keys in their own fields, not in the endpoint URL")
 
     def _client(self):
         import boto3
@@ -1012,6 +1073,7 @@ class WebDAV(Target):
 
     type = "webdav"
     secret_fields = ("password",)
+    location_fields = ("url",)
 
     @classmethod
     def validate(cls, config: dict) -> None:
@@ -1077,7 +1139,7 @@ class WebDAV(Target):
         for part in [p for p in (self.config.get("folder") or "").strip("/").split("/") if p]:
             url += "/" + requests.utils.quote(part)
             r = self._req("MKCOL", url + "/")
-            self._check(r, "WebDAV create folder", (201, 405, 301, 302))  # 405 = exists
+            self._check(r, "WebDAV create folder", (201, 405))  # 405 = exists
 
     def test(self) -> str:
         self._mkdirs()
@@ -1104,14 +1166,19 @@ class WebDAV(Target):
         import xml.etree.ElementTree as ET
         from urllib.parse import unquote, urlparse
 
-        r = self._req("PROPFIND", self._base() + "/", headers={"Depth": "1", "Content-Type": "application/xml"},
+        r = self._req("PROPFIND", self._base() + "/", headers={"Depth": "1", "Content-Type": "application/xml"}, stream=True,
                       data=b'<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>')
         if r.status_code == 404:
             return []
         self._check(r, "WebDAV list", (207,))
+        body = bytearray()
+        for b in r.iter_content(1 << 16):
+            body += b
+            if len(body) > MAX_LISTING:
+                raise TargetError("WebDAV folder listing is too large (keep the backup folder for backups only)")
         out = []
         try:
-            root = ET.fromstring(r.content)
+            root = ET.fromstring(bytes(body))
         except ET.ParseError as exc:
             raise TargetError("WebDAV list returned something that is not WebDAV XML") from exc
         for resp in root.iter("{DAV:}response"):
@@ -1142,6 +1209,7 @@ class SMB(Target):
 
     type = "smb"
     secret_fields = ("password",)
+    location_fields = ("host",)
 
     def _root(self) -> str:
         c = self.config
