@@ -153,6 +153,11 @@ object EncryptedFileFormat {
                 dataStart = raf.filePointer
                 key = unwrapKey(wrapped)
                 chunkCount = maxOf(1L, (plaintextLength + chunkSize - 1) / chunkSize)
+                // The declared length must match the file, and the last chunk (whose AAD carries the
+                // length) must authenticate, or a tampered length could make the file read as shorter.
+                val expected = dataStart + chunkCount * (NONCE_LEN + TAG_LEN) + plaintextLength
+                if (raf.length() != expected) throw IOException("Encrypted file failed its integrity check")
+                chunk(chunkCount - 1)
             } catch (e: Exception) {
                 raf.close(); throw e
             }
