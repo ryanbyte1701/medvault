@@ -27,6 +27,11 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Render screenshots
         run: ./gradlew --no-daemon testDebugUnitTest -Pscreenshots --tests 'com.scanvault.android.screenshots.*'
+      - name: Print screenshots as base64 (for environments that can read logs but not artifacts)
+        run: |
+          for f in app/build/screenshots/*.png; do
+            echo "SV-SHOT-BEGIN $(basename "$f")"; base64 -w 0 "$f"; echo; echo "SV-SHOT-END"
+          done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
