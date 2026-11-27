@@ -276,6 +276,33 @@ class ApiClientTest {
         assertEquals(VaultFile.KIND_OTHER, kindFor("cd.zip", "application/zip"))
     }
 
+    @Test fun activityParsesEntriesAndSendsFilters() = runTest {
+        server.enqueue(json("""{"entries":[{"seq":42,"at":"2026-11-27T04:56:24+00:00","action":"file.upload","label":"Uploaded files",
+            "category":"file","outcome":"ok","user_id":"u1","username":"ryan","patient_id":"p1","patient_name":"Jane Doe",
+            "study_id":"s1","study_title":"MRI knee","client":"android","ip":"10.0.0.3","signed":true,
+            "details":{"files":2,"bytes":2048,"filenames":["a.dcm","b.dcm"]}},
+            {"seq":41,"at":"2026-11-27T04:50:00+00:00","action":"auth.login_failed","label":"Failed sign-in","category":"auth",
+            "outcome":"failed","user_id":null,"username":"admin","details":{"reason":"unknown username","filename":null}}],
+            "next_before":41}"""))
+        val page = api.activity(patientId = "p 1", before = 50, limit = 20)
+        assertEquals(41L, page.nextBefore)
+        val e = page.entries[0]
+        assertEquals("Jane Doe", e.patientName)
+        assertEquals("2", e.detail("files"))
+        assertEquals(false, e.failed)
+        assertEquals(true, page.entries[1].failed)
+        assertEquals("unknown username", page.entries[1].detail("reason"))
+        assertEquals(null, page.entries[1].detail("filename"))
+        val req = server.takeRequest()
+        assertEquals("Bearer tok123", req.getHeader("Authorization"))
+        val url = req.requestUrl!!
+        assertEquals("/api/activity", url.encodedPath)
+        assertEquals("p 1", url.queryParameter("patient_id"))
+        assertEquals("50", url.queryParameter("before"))
+        assertEquals("20", url.queryParameter("limit"))
+        assertEquals(null, url.queryParameter("study_id"))
+    }
+
     @Test fun aiPrepareSendsEveryChoiceAndParsesThePreview() = runTest {
         server.enqueue(json("""{"token":"t1","provider":"Anthropic Claude","model":"claude-opus-5-5","endpoint":"api.anthropic.com",
             "task":"explain","language":"Spanish","remove_identifiers":true,"removed":{"name":2},"warnings":["w"],

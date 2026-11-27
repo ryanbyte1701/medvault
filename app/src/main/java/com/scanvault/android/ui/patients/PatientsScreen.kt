@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -74,7 +75,12 @@ class PatientsViewModel(private val container: AppContainer) : ViewModel() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PatientsScreen(container: AppContainer, onOpen: (String) -> Unit, onOpenSettings: () -> Unit) {
+fun PatientsScreen(
+    container: AppContainer,
+    onOpen: (String) -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenActivity: () -> Unit = {},
+) {
     val vm: PatientsViewModel = viewModel { PatientsViewModel(container) }
     val state by vm.state.collectAsStateWithLifecycle()
     val session by container.session.collectAsStateWithLifecycle()
@@ -90,6 +96,7 @@ fun PatientsScreen(container: AppContainer, onOpen: (String) -> Unit, onOpenSett
                 title = { Text("Patients") },
                 actions = {
                     IconButton(onClick = vm::load) { Icon(Icons.Default.Refresh, "Refresh") }
+                    IconButton(onClick = onOpenActivity) { Icon(Icons.Default.History, "Recent activity") }
                     IconButton(onClick = onOpenSettings) { Icon(Icons.Default.Settings, "Settings") }
                 },
             )

@@ -47,6 +47,10 @@ patient data. They are rendered by the screenshot tests described under [Buildin
   suggested matches (same kind of scan and body part, closest in time), then zoom, pan,
   window/level and slices stay linked. Unlink to line up anatomy; relinking keeps the offset.
 - Delete patients, studies and files (long-press a file).
+- See **recent activity** from the server's activity log (who signed in, uploaded, edited, deleted,
+  viewed or downloaded what, and when): the clock icon on the Patients screen shows everything,
+  and **Activity** in a patient's or study's menu narrows it to that patient or study. Requests
+  carry a `ScanVault-Android/<version>` User-Agent so the log shows they came from the app.
 - **Explain or translate with AI** (when the server has it turned on): a plain-language,
   non-medical explanation or a translation of a study's report and chosen images. The server
   prepares the exact payload, with names, IDs and dates removed by default, and the app shows it
@@ -121,6 +125,7 @@ The app expects these endpoints (all JSON, `Authorization: Bearer <token>`, erro
 | DELETE | `/api/files/{id}` | |
 | GET | `/api/files/{id}/content` | decrypted bytes |
 | GET | `/api/files/{id}/thumbnail` | JPEG, when `has_thumbnail` |
+| GET | `/api/activity` | `patient_id?`, `study_id?`, `before?`, `limit` → `{entries, next_before}`, newest first |
 | GET | `/api/labs/info` | analyte catalog for matching tests |
 | GET | `/api/patients/{id}/labs/analytes`, `/labs/analytes/{key}` | tests with latest value / one test's points |
 | GET/POST | `/api/patients/{id}/labs/reports` | list / create a hand-entered report |

@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.MoreVert
@@ -255,6 +256,7 @@ fun StudyScreen(
     studyId: String,
     onBack: () -> Unit,
     onOpenImage: (fileId: String, name: String, isDicom: Boolean) -> Unit,
+    onOpenActivity: (studyTitle: String) -> Unit = {},
     onExplain: () -> Unit = {},
     onCompare: () -> Unit = {},
 ) {
@@ -355,6 +357,14 @@ fun StudyScreen(
                             text = { Text("Explain or translate (AI)") },
                             leadingIcon = { Icon(Icons.Default.AutoAwesome, null) },
                             onClick = { menu = false; onExplain() },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Activity") },
+                            leadingIcon = { Icon(Icons.Default.History, null) },
+                            onClick = {
+                                menu = false
+                                onOpenActivity((state as? Loadable.Loaded<StudyDetail>)?.value?.study?.title.orEmpty())
+                            },
                         )
                         DropdownMenuItem(
                             text = { Text("Delete study") },

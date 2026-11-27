@@ -18,6 +18,7 @@ import androidx.navigation.navArgument
 import com.scanvault.android.data.AppContainer
 import com.scanvault.android.data.SessionState
 import com.scanvault.android.ui.components.UnlockDialog
+import com.scanvault.android.ui.activity.ActivityScreen
 import com.scanvault.android.ui.compare.ComparePickScreen
 import com.scanvault.android.ui.compare.CompareScreen
 import com.scanvault.android.ui.files.ImageViewerScreen
@@ -85,6 +86,23 @@ fun ScanVaultNavHost(container: AppContainer) {
                 container,
                 onOpen = { nav.navigate("patient/${enc(it)}") },
                 onOpenSettings = { nav.navigate("settings") },
+                onOpenActivity = { nav.navigate("activity") },
+            )
+        }
+        composable(
+            "activity?patient={patient}&study={study}&title={title}",
+            arguments = listOf(
+                navArgument("patient") { type = NavType.StringType; nullable = true; defaultValue = null },
+                navArgument("study") { type = NavType.StringType; nullable = true; defaultValue = null },
+                navArgument("title") { type = NavType.StringType; nullable = true; defaultValue = null },
+            ),
+        ) { entry ->
+            ActivityScreen(
+                container,
+                patientId = entry.arguments?.getString("patient"),
+                studyId = entry.arguments?.getString("study"),
+                title = entry.arguments?.getString("title"),
+                onBack = { nav.popBackStack() },
             )
         }
         composable("settings") {
@@ -99,6 +117,7 @@ fun ScanVaultNavHost(container: AppContainer) {
                 container, id,
                 onBack = { nav.popBackStack() },
                 onOpenStudy = { nav.navigate("study/${enc(it)}") },
+                onOpenActivity = { name -> nav.navigate("activity?patient=${enc(id)}&title=${enc(name)}") },
                 onOpenLabs = { nav.navigate("labs/${enc(id)}") },
             )
         }
@@ -140,6 +159,7 @@ fun ScanVaultNavHost(container: AppContainer) {
                 onOpenImage = { fileId, name, isDicom ->
                     nav.navigate("image/${enc(fileId)}/${enc(name)}?dicom=$isDicom")
                 },
+                onOpenActivity = { title -> nav.navigate("activity?study=${enc(id)}&title=${enc(title)}") },
                 onExplain = { nav.navigate("ai/${enc(id)}") },
                 onCompare = { nav.navigate("compare/${enc(id)}") },
             )
