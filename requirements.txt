@@ -5,7 +5,7 @@ python-multipart==0.0.32
 cryptography==50.0.1
 pydicom==3.0.2
 numpy==2.5.3
-pillow==13.0.0.post1
+pillow==13.0.0
 pylibjpeg==2.1.0
 pylibjpeg-libjpeg==2.5.0
 pylibjpeg-openjpeg==2.6.0
