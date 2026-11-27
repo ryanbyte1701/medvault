@@ -83,6 +83,7 @@ class ReadmeScreenshots {
         c.theme.update { it.copy(mode = ThemeMode.DARK, darkColor = "#0d1416") }
         c.onSignedIn(url, "ryan", "sample-token", unlocked = true)
         c.appLock.unlock()
+        org.robolectric.shadows.ShadowLog.stream = System.out
         // Robolectric can't draw hardware bitmaps, so thumbnails need software ones.
         coil.Coil.setImageLoader(c.imageLoader.newBuilder().allowHardware(false).logger(coil.util.DebugLogger()).build())
         scenario = ActivityScenario.launch(MainActivity::class.java)
