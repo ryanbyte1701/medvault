@@ -76,10 +76,18 @@ class ReadmeScreenshots {
         settle()
     }
 
+    /** A phone with a screen lock, so the app shows no "set a screen lock" warning. */
+    private fun secureDevice() {
+        val ctx = ApplicationProvider.getApplicationContext<ScanVaultApp>()
+        org.robolectric.Shadows.shadowOf(ctx.getSystemService(android.app.KeyguardManager::class.java))
+            .setIsDeviceSecure(true)
+    }
+
     private fun signedIn() {
+        secureDevice()
         val url = server.start()
         val c = container()
-        c.store.allowLanHttp = true
+        c.store.lanHttpHost = "localhost"
         c.theme.update { it.copy(mode = ThemeMode.DARK, darkColor = "#0d1416") }
         c.onSignedIn(url, "ryan", "sample-token", unlocked = true)
         c.appLock.unlock()
@@ -91,6 +99,7 @@ class ReadmeScreenshots {
     }
 
     @Test fun signIn() {
+        secureDevice()
         val c = container()
         c.theme.update { it.copy(mode = ThemeMode.DARK, darkColor = "#0d1416") }
         c.store.serverUrl = "https://scanvault.example.com/"
