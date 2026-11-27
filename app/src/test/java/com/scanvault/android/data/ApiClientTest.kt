@@ -1,6 +1,7 @@
 package com.scanvault.android.data
 
 import kotlinx.coroutines.test.runTest
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
@@ -145,6 +146,42 @@ class ApiClientTest {
         val body = put.body.readUtf8()
         assertTrue(body.contains("\"dark_color\":\"#000000\""))
         assertTrue(body.contains("\"theme\":\"light\""))
+    }
+
+    @Test fun statusParsesSsoProviders() = runTest {
+        server.enqueue(json("""{"setup_complete":true,"unlocked":false,"authenticated":false,"local_login":false,
+            "sso":[{"id":"google","name":"Google","preset":"google"},{"id":"authentik","name":"Home SSO"}]}"""))
+        val s = api.status()
+        assertTrue(!s.localLogin)
+        assertEquals(listOf("Google", "Home SSO"), s.sso.map { it.name })
+    }
+
+    @Test fun ssoStartUrlCarriesRedirectStateAndChallenge() {
+        val url = api.ssoStartUrl("google", "scanvault://sso", "st", "ch").toHttpUrl()
+        assertEquals("/api/auth/sso/google/start", url.encodedPath)
+        assertEquals("scanvault://sso", url.queryParameter("app_redirect"))
+        assertEquals("st", url.queryParameter("app_state"))
+        assertEquals("ch", url.queryParameter("code_challenge"))
+    }
+
+    @Test fun ssoExchangeSendsTicketAndVerifierWithoutBearer() = runTest {
+        server.enqueue(json("""{"token":"t2","expires_at":"2026-12-27T00:00:00Z","unlocked":false}"""))
+        val r = api.ssoExchange("tick", "ver")
+        assertEquals("t2", r.token)
+        assertEquals(false, r.unlocked)
+        val req = server.takeRequest()
+        assertEquals("/api/auth/sso/exchange", req.path)
+        assertEquals(null, req.getHeader("Authorization"))
+        val body = req.body.readUtf8()
+        assertTrue(body.contains("\"ticket\":\"tick\""))
+        assertTrue(body.contains("\"code_verifier\":\"ver\""))
+    }
+
+    @Test fun ssoErrorsGetFriendlyMessages() = runTest {
+        server.enqueue(json("""{"error":"expired","code":"sso_expired"}""", 400))
+        try { api.ssoExchange("a", "b"); fail() } catch (e: ApiException) {
+            assertEquals("sso_expired", e.code); assertTrue(e.message!!.contains("too long"))
+        }
     }
 
     @Test fun unlockPostsRecoveryKey() = runTest {

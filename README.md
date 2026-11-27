@@ -6,7 +6,9 @@ imaging files and reports from imaging centers.
 
 ## What it does
 
-- Sign in to your ScanVault server (`https://…`, or `http://` on a trusted LAN/VPN).
+- Sign in to your ScanVault server (`https://…`, or `http://` on a trusted LAN/VPN) with a password
+  or with any single sign-on provider the server offers ("Continue with Google", Authentik, etc.).
+  SSO runs in a Custom Tab with PKCE; the server brokers it, so the app needs no IdP registration.
 - Unlock the vault with its passphrase or recovery key when the server has restarted.
 - Browse and add patients; browse and add studies for each patient.
 - Upload to a study from the **camera** (report pages, CD covers) or the **file picker**
@@ -46,7 +48,9 @@ The app expects these endpoints (all JSON, `Authorization: Bearer <token>`, erro
 | --- | --- | --- |
 | POST | `/api/auth/login` | `{username, password}` → `{token, expires_at}` |
 | POST | `/api/auth/logout` | revokes the token |
-| GET | `/api/status` | `{setup_complete, unlocked, authenticated, username, …}` |
+| GET | `/api/auth/sso/{id}/start` | opened in a Custom Tab with `app_redirect=scanvault://sso`, `app_state`, `code_challenge` |
+| POST | `/api/auth/sso/exchange` | `{ticket, code_verifier}` → same as login |
+| GET | `/api/status` | `{setup_complete, unlocked, authenticated, username, local_login, sso: [{id, name, preset}], …}` |
 | POST | `/api/vault/unlock` | `{passphrase}` or `{recovery_key}` |
 | GET/POST | `/api/patients` | list / create |
 | GET/DELETE | `/api/patients/{id}` | |

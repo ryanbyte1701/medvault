@@ -13,8 +13,8 @@ android {
         applicationId = "com.scanvault.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
     }
 
     buildTypes {
@@ -51,6 +51,7 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.coil.compose)
+    implementation(libs.androidx.browser)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     testImplementation(libs.junit)
