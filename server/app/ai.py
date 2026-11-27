@@ -19,7 +19,7 @@ import socket
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
-log = logging.getLogger("scanvault.ai")
+log = logging.getLogger("medvault.ai")
 
 PROVIDERS = {
     "anthropic": "Anthropic Claude",

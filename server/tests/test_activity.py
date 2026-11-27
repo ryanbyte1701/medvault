@@ -17,7 +17,7 @@ from app.store import Store
 
 PASS = "quill-lantern-orbit-cedar-z"
 PW = "pw-1234567890"
-H = {"X-ScanVault": "1"}
+H = {"X-MedVault": "1"}
 PDF = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n"
 
 

@@ -29,7 +29,7 @@ from . import labparse, media
 from . import main as M
 from .store import seal, unseal
 
-log = logging.getLogger("scanvault.labs")
+log = logging.getLogger("medvault.labs")
 router = APIRouter()
 
 MAX_LAB_FILE = 50 * 1024 * 1024

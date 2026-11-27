@@ -21,7 +21,7 @@ from typing import Callable
 
 import requests
 
-log = logging.getLogger("scanvault.targets")
+log = logging.getLogger("medvault.targets")
 PREFIX = "scanvault-backup-"
 SUFFIX = ".svb"
 TIMEOUT = 60
@@ -282,7 +282,7 @@ class GoogleDrive(Target):
         _raise(r, "Google code exchange")
         tok = r.json().get("refresh_token")
         if not tok:
-            raise TargetError("Google did not return a refresh token; remove ScanVault's access in your Google account and try again")
+            raise TargetError("Google did not return a refresh token; remove MedVault's access in your Google account and try again")
         self.config["refresh_token"] = tok
         self._save(self.config)
 
@@ -650,7 +650,7 @@ class SSHTarget(Target):
 def _plain_name(handle: str) -> str:
     """Remote backup handles that are file names must be just a backup name."""
     if not handle or "/" in handle or "\\" in handle or handle.startswith(".") or not handle.startswith(PREFIX) or not handle.endswith(SUFFIX):
-        raise TargetError("Not a ScanVault backup name")
+        raise TargetError("Not a MedVault backup name")
     return handle
 
 
@@ -787,7 +787,7 @@ class S3(Target):
         try:
             cl.delete_object(Bucket=b, Key=k)
         except Exception:
-            return (f"Connected. Backups go to s3://{b}/{self._key('')}. These keys can't delete objects, so ScanVault "
+            return (f"Connected. Backups go to s3://{b}/{self._key('')}. These keys can't delete objects, so MedVault "
                     "can't remove old backups: set 'Keep last' to 0 and use a bucket lifecycle rule instead.")
         return f"Connected. Backups go to s3://{b}/{self._key('')}"
 
@@ -821,7 +821,7 @@ class S3(Target):
 
     def _own_key(self, handle: str) -> None:
         if not handle.startswith(self._key(PREFIX)) or not handle.endswith(SUFFIX) or ".." in handle:
-            raise TargetError("Not a ScanVault backup in this bucket folder")
+            raise TargetError("Not a MedVault backup in this bucket folder")
 
     def download(self, handle: str, dest: Path) -> None:
         self._own_key(handle)
@@ -1322,7 +1322,7 @@ class LocalFolder(Target):
 
     @staticmethod
     def root() -> Path:
-        return Path(os.environ.get("SCANVAULT_LOCAL_BACKUP_ROOT", "/backups")).resolve()
+        return Path(os.environ.get("MEDVAULT_LOCAL_BACKUP_ROOT", "/backups")).resolve()
 
     @classmethod
     def validate(cls, config: dict) -> None:
@@ -1337,7 +1337,7 @@ class LocalFolder(Target):
         p = p.resolve()
         if p != root and root not in p.parents:
             raise TargetError(f"Backups must go to a folder under {root} (mount the disk there)")
-        data = Path(os.environ.get("SCANVAULT_DATA", "/data")).resolve()
+        data = Path(os.environ.get("MEDVAULT_DATA", "/data")).resolve()
         if p == data or data in p.parents or p in data.parents:
             raise TargetError("Pick a folder outside the vault's own data folder")
         return p

@@ -45,7 +45,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from . import crypto
 
-log = logging.getLogger("scanvault.audit")
+log = logging.getLogger("medvault.audit")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS audit_log (

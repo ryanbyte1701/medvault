@@ -1,4 +1,4 @@
-/* In-browser mock of the ScanVault API, used only for the interactive preview
+/* In-browser mock of the MedVault API, used only for the interactive preview
    build (tools/build_demo.py). Sample people and images are synthetic. */
 (() => {
 "use strict";
@@ -109,9 +109,9 @@ S(jane, "MRI left knee", "MR", "2024-06-10", "Lakeside Imaging Center", 8, { nam
 S(mom, "CT head", "CT", "2023-04-18", "Northside Hospital", 6, null, { body: "HEAD", series: "AXIAL 5MM", shift: 1 });
 db.files.filter(f => f._img && f._img[0] === "CT" && db.studies.find(s => s.id === f.study_id).title.includes("head")).forEach(f => f._img[0] = "HEAD");
 db.targets.push(
-  { id: id(), type: "gdrive", name: "Google Drive", enabled: true, schedule_hours: 24, keep_last: 14, config: { auth_mode: "oauth", client_id: "1234-abc.apps.googleusercontent.com", folder_id: "1AbCdEfScanVault" }, secrets_set: { client_secret: true, refresh_token: true, service_account_json: false }, connected: true, last_run: iso(0.3), last_status: "ok" },
-  { id: id(), type: "sftp", name: "Home NAS", enabled: true, schedule_hours: 6, keep_last: 30, config: { protocol: "sftp", host: "nas.local", port: 22, username: "scanvault", remote_dir: "backups/scanvault", host_key: "SHA256:q2Vx4Jw0b6Tq3yZ6m3Q1nqk2sLr8m8uZ7v0c4p9X1aA" }, secrets_set: { password: false, private_key: true, key_passphrase: false }, connected: true, last_run: iso(0.1), last_status: "ok" },
-  { id: id(), type: "s3", name: "Backblaze B2", enabled: true, schedule_hours: 24, keep_last: 30, config: { provider: "b2", bucket: "doe-family-scans", prefix: "scanvault", region: "us-west-004", access_key_id: "004a1b2c3d4e5f0000000001" }, secrets_set: { secret_access_key: true }, connected: true, last_run: iso(0.25), last_status: "ok" },
+  { id: id(), type: "gdrive", name: "Google Drive", enabled: true, schedule_hours: 24, keep_last: 14, config: { auth_mode: "oauth", client_id: "1234-abc.apps.googleusercontent.com", folder_id: "1AbCdEfMedVault" }, secrets_set: { client_secret: true, refresh_token: true, service_account_json: false }, connected: true, last_run: iso(0.3), last_status: "ok" },
+  { id: id(), type: "sftp", name: "Home NAS", enabled: true, schedule_hours: 6, keep_last: 30, config: { protocol: "sftp", host: "nas.local", port: 22, username: "medvault", remote_dir: "backups/medvault", host_key: "SHA256:q2Vx4Jw0b6Tq3yZ6m3Q1nqk2sLr8m8uZ7v0c4p9X1aA" }, secrets_set: { password: false, private_key: true, key_passphrase: false }, connected: true, last_run: iso(0.1), last_status: "ok" },
+  { id: id(), type: "s3", name: "Backblaze B2", enabled: true, schedule_hours: 24, keep_last: 30, config: { provider: "b2", bucket: "doe-family-scans", prefix: "medvault", region: "us-west-004", access_key_id: "004a1b2c3d4e5f0000000001" }, secrets_set: { secret_access_key: true }, connected: true, last_run: iso(0.25), last_status: "ok" },
   { id: id(), type: "box", name: "Box", enabled: true, schedule_hours: 168, keep_last: 8, config: { auth_mode: "oauth", client_id: "boxclient123" }, secrets_set: { client_secret: true, refresh_token: false }, connected: false, last_run: null, last_status: null });
 const size0 = () => db.files.reduce((a, f) => a + f.size_bytes, 0);
 const bname = d => "scanvault-backup-" + new Date(now - d * 86400000).toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-") + "Z.svb";
@@ -125,8 +125,8 @@ const LBL = { "auth.login": "Signed in", "auth.login_failed": "Failed sign-in", 
 const actLog = [];
 {
   const add = (d, action, x = {}) => actLog.push({ at: iso(d), action, label: LBL[action], category: action.split(".")[0], outcome: x.outcome || "ok", user_id: x.anon || x.sys ? null : "u1",
-    username: x.sys ? "ScanVault" : x.anon ? (x.details?.attempted_username || "Unknown") : "ryan", patient_id: x.p?.id || null, patient_name: x.p?.name || null, study_id: x.s?.id || null, study_title: x.s?.title || null,
-    ip: x.ip || "192.168.1.24", client: x.client || "web", user_agent: x.client === "android" ? "ScanVault-Android/1.0 (Pixel 8)" : "Mozilla/5.0 (Macintosh) Firefox/146.0", signed: true, readable: true, details: x.details || {} });
+    username: x.sys ? "MedVault" : x.anon ? (x.details?.attempted_username || "Unknown") : "ryan", patient_id: x.p?.id || null, patient_name: x.p?.name || null, study_id: x.s?.id || null, study_title: x.s?.title || null,
+    ip: x.ip || "192.168.1.24", client: x.client || "web", user_agent: x.client === "android" ? "MedVault-Android/1.0 (Pixel 8)" : "Mozilla/5.0 (Macintosh) Firefox/146.0", signed: true, readable: true, details: x.details || {} });
   const st = t => db.studies.find(s => s.title === t);
   const knee = st("MRI left knee without contrast"), cxr = st("Chest X-ray"), head = st("CT head without contrast");
   add(3.2, "auth.login", { details: { method: "password" } }); add(3.2, "vault.unlock", { details: { method: "passphrase" } });
@@ -148,7 +148,7 @@ const state = { prefs: { theme: "system", dark_color: "#0d1416" }, setup: false,
 function recoveryText() {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; const a = new Uint8Array(58); crypto.getRandomValues(a);
   const k = [...a].map(x => chars[x % 32]).join("").replace(/(.{4})/g, "$1 ").trim();
-  return `SCANVAULT EMERGENCY RECOVERY KEY\n================================\n\nVault ID:         ${state.vault_id}\nKey fingerprint:  ${state.fp}\nCreated:          ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC\n\nThis file can decrypt EVERY ScanVault backup of this vault, including\nbackups stored on Google Drive, Box or SFTP servers. Anyone who holds it\ncan read the medical records inside. Print it or store it offline.\n\n-----BEGIN SCANVAULT RECOVERY KEY-----\n${k.slice(0, 39)}\n${k.slice(40)}\n-----END SCANVAULT RECOVERY KEY-----\n\nTo restore: choose 'Restore from backup' in a fresh ScanVault, or run\n  python3 tools/restore.py --key scanvault-recovery-key.txt --backup <file>.svb --out ./restored\n`;
+  return `MEDVAULT EMERGENCY RECOVERY KEY\n================================\n\nVault ID:         ${state.vault_id}\nKey fingerprint:  ${state.fp}\nCreated:          ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC\n\nThis file can decrypt EVERY MedVault backup of this vault, including\nbackups stored on Google Drive, Box or SFTP servers. Anyone who holds it\ncan read the medical records inside. Print it or store it offline.\n\n-----BEGIN SCANVAULT RECOVERY KEY-----\n${k.slice(0, 39)}\n${k.slice(40)}\n-----END SCANVAULT RECOVERY KEY-----\n\nTo restore: choose 'Restore from backup' in a fresh MedVault, or run\n  python3 tools/restore.py --key medvault-recovery-key.txt --backup <file>.svb --out ./restored\n`;
 }
 
 // ---------------------------------------------------------- similar studies (mirrors app/similar.py)
@@ -214,14 +214,14 @@ async function req(method, path, body) {
   if (url === "/api/vault/settings") { if (method === "PUT") state.pr = !!body.passphrase_restore; return { passphrase_restore: !!state.pr }; }
   if (url === "/api/vault/rekey") { if (state.passphrase && body.passphrase !== state.passphrase) err(400, "Wrong encryption key"); await wait(900); state.recovery = recoveryText(); state.saved = false; return { ok: true, fingerprint: state.fp, recovery_key: state.recovery }; }
   if (url === "/api/vault/unlock") {
-    if (body.recovery_key) { if (!/BEGIN SCANVAULT RECOVERY KEY/i.test(body.recovery_key)) err(400, "That file isn't a ScanVault recovery key"); }
+    if (body.recovery_key) { if (!/BEGIN SCANVAULT RECOVERY KEY/i.test(body.recovery_key)) err(400, "That file isn't a MedVault recovery key"); }
     else if (state.passphrase && body.passphrase !== state.passphrase) err(400, "Wrong encryption key");
     state.unlocked = true; return { unlocked: true };
   }
   if (url === "/api/prefs") { if (method === "PUT") Object.assign(state.prefs, body); return { ...state.prefs }; }
   if (url === "/api/vault/lock") { state.unlocked = false; return { unlocked: false }; }
   if (url === "/api/vault/recovery-key") { if (state.passphrase && body.passphrase !== state.passphrase) err(400, "Wrong encryption key"); return state.recovery || recoveryText(); }
-  if (url === "/api/vault/recovery-key/confirm") { if (body.recovery_key && !/BEGIN SCANVAULT RECOVERY KEY/i.test(body.recovery_key)) err(400, "That file isn't a ScanVault recovery key"); state.saved = !!body.recovery_key || state.saved; return { ok: true }; }
+  if (url === "/api/vault/recovery-key/confirm") { if (body.recovery_key && !/BEGIN SCANVAULT RECOVERY KEY/i.test(body.recovery_key)) err(400, "That file isn't a MedVault recovery key"); state.saved = !!body.recovery_key || state.saved; return { ok: true }; }
   if (url === "/api/vault/passphrase") { if (state.passphrase && body.current !== state.passphrase) err(400, "Current encryption key is wrong"); state.passphrase = body.new; return { ok: true }; }
   need();
   if (url === "/api/stats") return { patients: db.patients.length, studies: db.studies.length, files: db.files.length, bytes: size0(), last_backup_at: db.runs.find(r => r.status === "ok")?.finished_at || null };
@@ -282,13 +282,13 @@ async function req(method, path, body) {
     await wait(600); const t = findT(m[1]);
     if (!t.connected) err(502, `${t.name} is not connected yet: click 'Connect account'`);
     if (t.type === "sftp" && !t.config.host_key) t.config.host_key = "SHA256:demoPinnedHostKey0b6Tq3yZ6m3Q1nqk2sLr8m8uZ7v";
-    return { ok: true, message: { sftp: `Connected over ${(t.config.protocol || "sftp").toUpperCase()}. Host key pinned.`, s3: `Connected. Backups go to s3://${t.config.bucket || "bucket"}/${t.config.prefix || ""}`, local: "Writable. 3,712.4 GB free in " + (t.config.path || "/backups"), smb: `Connected. Backups go to \\\\${t.config.host || "nas"}\\${t.config.share || "backup"}` }[t.type] || "Connected. Backups go to folder 'ScanVault'." };
+    return { ok: true, message: { sftp: `Connected over ${(t.config.protocol || "sftp").toUpperCase()}. Host key pinned.`, s3: `Connected. Backups go to s3://${t.config.bucket || "bucket"}/${t.config.prefix || ""}`, local: "Writable. 3,712.4 GB free in " + (t.config.path || "/backups"), smb: `Connected. Backups go to \\\\${t.config.host || "nas"}\\${t.config.share || "backup"}` }[t.type] || "Connected. Backups go to folder 'MedVault'." };
   }
   if ((m = url.match(/^\/api\/backups\/targets\/([^/]+)\/run$/))) { await wait(1100); return { results: runBackup([findT(m[1])]) }; }
   if (url === "/api/backups/run") { await wait(1400); return { results: runBackup(db.targets.filter(t => t.enabled)) }; }
   if (url === "/api/backups/runs") return db.runs;
   if ((m = url.match(/^\/api\/backups\/targets\/([^/]+)\/remote$/))) { const t = findT(m[1]); return db.runs.filter(r => r.target_id === t.id && r.status === "ok").map(r => ({ name: r.filename, handle: r.filename })); }
-  if ((m = url.match(/^\/api\/oauth\/([^/]+)\/redirect-uri$/))) return { redirect_uri: `https://scanvault.example.com/api/oauth/${m[1]}/callback` };
+  if ((m = url.match(/^\/api\/oauth\/([^/]+)\/redirect-uri$/))) return { redirect_uri: `https://medvault.example.com/api/oauth/${m[1]}/callback` };
   if (url === "/api/activity") {
     const q = new URLSearchParams(path.split("?")[1] || "");
     const a = q.get("action") || "", needle = (q.get("q") || "").toLowerCase();

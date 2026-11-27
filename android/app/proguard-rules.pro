@@ -1,11 +1,11 @@
 # kotlinx.serialization
 -keepattributes *Annotation*, InnerClasses
 -dontnote kotlinx.serialization.**
--keepclassmembers @kotlinx.serialization.Serializable class com.scanvault.android.** {
+-keepclassmembers @kotlinx.serialization.Serializable class com.medvault.android.** {
     *** Companion;
     kotlinx.serialization.KSerializer serializer(...);
 }
--keep,includedescriptorclasses class com.scanvault.android.**$$serializer { *; }
+-keep,includedescriptorclasses class com.medvault.android.**$$serializer { *; }
 # OkHttp
 -dontwarn okhttp3.internal.platform.**
 -dontwarn org.conscrypt.**

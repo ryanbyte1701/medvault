@@ -13,7 +13,7 @@ from pathlib import Path
 from . import crypto
 from .audit import SCHEMA as AUDIT_SCHEMA
 
-DATA_DIR = Path(os.environ.get("SCANVAULT_DATA", "/data"))
+DATA_DIR = Path(os.environ.get("MEDVAULT_DATA", "/data"))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL);

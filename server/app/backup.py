@@ -124,7 +124,7 @@ def read_header(path: Path) -> dict:
 
 def _read_header(f) -> tuple[dict, bytes]:
     if f.read(4) != MAGIC:
-        raise crypto.CryptoError("Not a ScanVault backup (.svb) file")
+        raise crypto.CryptoError("Not a MedVault backup (.svb) file")
     raw = f.read(4)
     if len(raw) != 4:
         raise crypto.CryptoError("Corrupt backup header")

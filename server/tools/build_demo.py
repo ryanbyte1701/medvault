@@ -2,7 +2,7 @@
 """Bundle the web UI with an in-browser mock API into one self-contained HTML
 file (no server, sample data only). Used for the interactive preview.
 
-    python3 tools/build_demo.py preview/scanvault-preview.html
+    python3 tools/build_demo.py preview/medvault-preview.html
 """
 import sys
 from pathlib import Path
@@ -24,7 +24,7 @@ def main(out: str) -> None:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ScanVault preview</title>
+<title>MedVault preview</title>
 <link rel="icon" href="{favicon}">
 <style>
 {css}
@@ -48,4 +48,4 @@ def main(out: str) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "preview/scanvault-preview.html")
+    main(sys.argv[1] if len(sys.argv) > 1 else "preview/medvault-preview.html")

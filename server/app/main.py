@@ -1,4 +1,4 @@
-"""ScanVault server."""
+"""MedVault server."""
 from __future__ import annotations
 
 import asyncio
@@ -31,14 +31,16 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import ai, audit, backup, crypto, ldapauth, media, similar, sso, targets
+from . import LEGACY_ENV_USED, ai, audit, backup, crypto, ldapauth, media, similar, sso, targets
 from .forms import Form as UploadForm, FormError, UploadPart, parse_form
 from .spool import Spool, SpoolFull
 from .store import fsync_dir, fsync_tree, write_durable, Store, seal, unseal
 
 VERSION = "0.2.0"
-log = logging.getLogger("scanvault")
-logging.basicConfig(level=os.environ.get("SCANVAULT_LOG_LEVEL", "INFO"))
+log = logging.getLogger("medvault")
+logging.basicConfig(level=os.environ.get("MEDVAULT_LOG_LEVEL", "INFO"))
+if LEGACY_ENV_USED:
+    log.warning("These settings use the old ScanVault names and still work, but please rename them to MEDVAULT_*: %s", ", ".join(LEGACY_ENV_USED))
 
 
 def _env_int(name: str, default: int) -> int:
@@ -49,22 +51,22 @@ def _env_int(name: str, default: int) -> int:
 
 
 SESSION_DAYS = 30
-SESSION_IDLE_DAYS = _env_int("SCANVAULT_SESSION_IDLE_DAYS", 14)
-AUTO_LOCK_MINUTES = _env_int("SCANVAULT_AUTO_LOCK_MINUTES", 0)
-MAX_UPLOAD = _env_int("SCANVAULT_MAX_UPLOAD_MB", 2048) * 1024 * 1024
-MAX_ZIP_TOTAL = _env_int("SCANVAULT_MAX_ZIP_MB", 8192) * 1024 * 1024
+SESSION_IDLE_DAYS = _env_int("MEDVAULT_SESSION_IDLE_DAYS", 14)
+AUTO_LOCK_MINUTES = _env_int("MEDVAULT_AUTO_LOCK_MINUTES", 0)
+MAX_UPLOAD = _env_int("MEDVAULT_MAX_UPLOAD_MB", 2048) * 1024 * 1024
+MAX_ZIP_TOTAL = _env_int("MEDVAULT_MAX_ZIP_MB", 8192) * 1024 * 1024
 MAX_JSON = 1024 * 1024
-PUBLIC_URL = os.environ.get("SCANVAULT_PUBLIC_URL", "").rstrip("/")
-COOKIE_SECURE = os.environ.get("SCANVAULT_COOKIE_SECURE", "auto")
+PUBLIC_URL = os.environ.get("MEDVAULT_PUBLIC_URL", "").rstrip("/")
+COOKIE_SECURE = os.environ.get("MEDVAULT_COOKIE_SECURE", "auto")
 MIN_PASSPHRASE = 12
 REKEY_WAIT = 300.0  # seconds a key change waits for running uploads and restores
-API_DOCS = os.environ.get("SCANVAULT_API_DOCS", "").lower() in ("1", "true", "yes")
-# SCANVAULT_AI=off removes the optional AI explanations entirely (for example
+API_DOCS = os.environ.get("MEDVAULT_API_DOCS", "").lower() in ("1", "true", "yes")
+# MEDVAULT_AI=off removes the optional AI explanations entirely (for example
 # where policy forbids sending records to any outside service).
-AI_OFF = os.environ.get("SCANVAULT_AI", "").lower() in ("0", "off", "false", "no", "disabled")
+AI_OFF = os.environ.get("MEDVAULT_AI", "").lower() in ("0", "off", "false", "no", "disabled")
 
 app = FastAPI(
-    title="ScanVault",
+    title="MedVault",
     version=VERSION,
     docs_url="/api/docs" if API_DOCS else None,
     redoc_url=None,
@@ -303,13 +305,13 @@ def _csrf(request: Request, how: str | None) -> None:
     # Cookie-authenticated state-changing requests must carry the custom
     # header (a cross-site form cannot set it). Bearer requests are immune.
     if request.method not in ("GET", "HEAD") and how != "bearer":
-        if request.headers.get("x-scanvault") != "1":
-            raise ApiError(403, "Missing X-ScanVault header", "csrf")
+        if not _has_app_header(request):
+            raise ApiError(403, "Missing X-MedVault header", "csrf")
 
 
 def require_user(request: Request) -> dict:
     if not setup_complete():
-        raise ApiError(409, "ScanVault has not been set up yet", "setup_required")
+        raise ApiError(409, "MedVault has not been set up yet", "setup_required")
     u = current_user(request)
     if not u:
         raise ApiError(401, "Not signed in", "unauthenticated")
@@ -353,13 +355,19 @@ def _secure(request: Request) -> bool:
 
 
 def _is_browser(request: Request) -> bool:
-    return request.headers.get("x-scanvault") == "1"
+    return _has_app_header(request)
+
+
+def _has_app_header(request: Request) -> bool:
+    # X-ScanVault is the pre-rename name; still accepted so open tabs and old
+    # clients keep working.
+    return request.headers.get("x-medvault") == "1" or request.headers.get("x-scanvault") == "1"
 
 
 def session_response(request: Request, body: dict, tok: str, exp: float) -> JSONResponse:
     # The web UI authenticates with the HttpOnly cookie only; the token is
     # put in the body just for API/mobile clients (which do not send the
-    # browser's X-ScanVault header), so script on the page can never read it.
+    # browser's X-MedVault header), so script on the page can never read it.
     if not _is_browser(request):
         body = {"token": tok, **body}
     resp = JSONResponse(body)
@@ -446,7 +454,7 @@ def _client_kind(request: Request | None, u: dict | None) -> str:
     if request is None:
         return "system"
     ua = request.headers.get("user-agent", "")
-    if "ScanVault-Android" in ua or "okhttp" in ua.lower():
+    if "MedVault-Android" in ua or "ScanVault-Android" in ua or "okhttp" in ua.lower():
         return "android"
     if u and u.get("via") == "bearer":
         return "api"
@@ -572,7 +580,7 @@ def _validate_new_passphrase(p: str) -> None:
 
 
 MIN_PASSPHRASE_BITS = 44
-_COMMON = ("password", "passwort", "qwerty", "azerty", "letmein", "welcome", "scanvault", "123456", "abcdef", "iloveyou", "admin", "monkey", "dragon")
+_COMMON = ("password", "passwort", "qwerty", "azerty", "letmein", "welcome", "medvault", "scanvault", "123456", "abcdef", "iloveyou", "admin", "monkey", "dragon")
 
 
 def passphrase_bits(p: str) -> float:
@@ -619,7 +627,7 @@ def _pattern_bits(p: str) -> float:
 
 
 def _new_setup_code() -> str:
-    pre = os.environ.get("SCANVAULT_SETUP_CODE", "").strip()
+    pre = os.environ.get("MEDVAULT_SETUP_CODE", "").strip()
     if pre:
         return pre
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -634,7 +642,7 @@ def _announce_setup_code() -> None:
     if not _state["setup_code"]:
         _state["setup_code"] = _new_setup_code()
     bar = "=" * 64
-    log.warning("\n%s\n ScanVault is not set up yet.\n First-run setup code: %s\n (enter it on the setup screen; it changes on every restart)\n%s", bar, _state["setup_code"], bar)
+    log.warning("\n%s\n MedVault is not set up yet.\n First-run setup code: %s\n (enter it on the setup screen; it changes on every restart)\n%s", bar, _state["setup_code"], bar)
 
 
 def _check_setup_code(request: Request, given: str | None) -> None:
@@ -646,7 +654,7 @@ def _check_setup_code(request: Request, given: str | None) -> None:
     want = _state["setup_code"] or ""
     norm = lambda s: re.sub(r"[^A-Z0-9]", "", (s or "").upper())  # noqa: E731
     if not want or not given or not hmac.compare_digest(norm(given), norm(want)):
-        raise ApiError(403, "Wrong setup code. It is printed in the server log (docker logs scanvault).", "setup_code")
+        raise ApiError(403, "Wrong setup code. It is printed in the server log (docker logs medvault).", "setup_code")
     setup_throttle.success("ip:" + client_ip(request))
 
 
@@ -758,7 +766,7 @@ async def setup_restore(request: Request):
 @app.post("/api/auth/login")
 async def login(request: Request):
     if not setup_complete():
-        raise ApiError(409, "ScanVault has not been set up yet", "setup_required")
+        raise ApiError(409, "MedVault has not been set up yet", "setup_required")
     local_ok = local_login_enabled()
     ldap_on = _ldap_enabled()
     if not local_ok and not ldap_on:
@@ -778,7 +786,7 @@ async def login(request: Request):
     (device_throttle if dev_id else account_throttle).attempt(akey)
     ok = local_ok and await asyncio.to_thread(crypto.verify_password, password, r["password_hash"] if r else crypto.DUMMY_PASSWORD_HASH)
     if not r or not ok:
-        # Not a ScanVault password: try the directory, for linked accounts only.
+        # Not a MedVault password: try the directory, for linked accounts only.
         reason = ("wrong password" if r else "unknown username") if local_ok else "password sign-in off"
         method = "password"
         if ldap_on and password:
@@ -800,7 +808,7 @@ async def login(request: Request):
                           provider=_ldap_name(), directory_username=username[:100])
                 return session_response(request, {"expires_at": iso(exp), "unlocked": vault.unlocked, "method": "ldap"}, tok, exp)
             if ident:
-                log.info("Directory account %r signed in correctly but is not linked to a ScanVault login", ident["dn"])
+                log.info("Directory account %r signed in correctly but is not linked to a MedVault login", ident["dn"])
                 reason = "directory account not linked"
             else:
                 reason = "bad credentials"
@@ -997,7 +1005,7 @@ async def get_recovery_key(request: Request):
     j = await body_json(request, 64 * 1024)
     master = await _verify_passphrase(request, jstr(j, "passphrase"))
     log_event(request, "vault.recovery_key_downloaded")
-    return PlainTextResponse(recovery_text(master), headers={"Content-Disposition": 'attachment; filename="scanvault-recovery-key.txt"'})
+    return PlainTextResponse(recovery_text(master), headers={"Content-Disposition": 'attachment; filename="medvault-recovery-key.txt"'})
 
 
 @app.post("/api/vault/recovery-key/confirm")
@@ -1090,14 +1098,14 @@ async def rekey(request: Request):
             new_master = await asyncio.to_thread(_rekey, master, new_pass)
         except RekeyCommitted:
             failed_after_commit = True
-            raise ApiError(500, "The master key change could not be finished. Restart ScanVault to complete it, then unlock with the new encryption key.", "rekey_incomplete")
+            raise ApiError(500, "The master key change could not be finished. Restart MedVault to complete it, then unlock with the new encryption key.", "rekey_incomplete")
     finally:
         if failed_after_commit:
             # The database already uses the new key but the files could not be
             # swapped in. Stay locked until a restart finishes the change.
             vault.lock()
             _clear_caches()
-            _state["maintenance"] = "A master key change could not be finished. Restart ScanVault to complete it."
+            _state["maintenance"] = "A master key change could not be finished. Restart MedVault to complete it."
         else:
             _state["maintenance"] = None
             with key_gate._lock:
@@ -1885,7 +1893,7 @@ def file_thumb(fid: str, request: Request):
 
 _pix_cache: "OrderedDict[tuple, tuple]" = OrderedDict()
 _pix_lock = threading.Lock()
-PIX_CACHE_BYTES = _env_int("SCANVAULT_RENDER_CACHE_MB", 256) * 1024 * 1024
+PIX_CACHE_BYTES = _env_int("MEDVAULT_RENDER_CACHE_MB", 256) * 1024 * 1024
 
 
 def _decoded(fid: str, master: bytes, frame: int | None, nframes_hint: int):
@@ -2840,7 +2848,7 @@ _sso_requests = sso.PendingStore(ttl=600)   # state -> pending authorization req
 _sso_tickets = sso.PendingStore(ttl=120)    # one-time ticket -> signed-in user
 SSO_COOKIE = "sv_sso"
 SSO_COOKIE_PATH = "/api/auth/sso"
-FORCE_LOCAL_LOGIN = os.environ.get("SCANVAULT_FORCE_LOCAL_LOGIN", "").lower() in ("1", "true", "yes")
+FORCE_LOCAL_LOGIN = os.environ.get("MEDVAULT_FORCE_LOCAL_LOGIN", "").lower() in ("1", "true", "yes")
 
 
 def _sso_cfg() -> dict:
@@ -2928,12 +2936,12 @@ async def _reauth(u: dict, j: dict) -> None:
         return
     pw = j.get("password")
     if not isinstance(pw, str) or not pw:
-        raise ApiError(403, "Enter your ScanVault password to confirm this change", "reauth_required")
+        raise ApiError(403, "Enter your MedVault password to confirm this change", "reauth_required")
     key = "reauth:" + u["id"]
     login_throttle.attempt(key)
     r = store.conn().execute("SELECT password_hash FROM users WHERE id=?", (u["id"],)).fetchone()
     if not r or not await asyncio.to_thread(crypto.verify_password, pw, r["password_hash"]):
-        raise ApiError(403, "Enter your ScanVault password to confirm this change", "reauth_required")
+        raise ApiError(403, "Enter your MedVault password to confirm this change", "reauth_required")
     login_throttle.success(key)
 
 
@@ -3013,12 +3021,12 @@ def _web_redirect(path: str, **params) -> RedirectResponse:
 @app.get("/api/auth/sso/{pid}/start")
 def sso_start(pid: str, request: Request, app_redirect: str = "", app_state: str = "", code_challenge: str = ""):
     """Begin SSO sign-in. Browsers navigate here directly. Mobile apps open it in a
-    browser tab with ``app_redirect`` (e.g. ``scanvault://sso``) and a PKCE
+    browser tab with ``app_redirect`` (e.g. ``medvault://sso``) and a PKCE
     ``code_challenge``; the ticket comes back to ``app_redirect``."""
     app_ctx = None
     if app_redirect:
         if not sso.app_redirect_allowed(app_redirect):
-            raise ApiError(400, "app_redirect is not allowed (see SCANVAULT_SSO_APP_REDIRECTS)")
+            raise ApiError(400, "app_redirect is not allowed (see MEDVAULT_SSO_APP_REDIRECTS)")
         if not (43 <= len(code_challenge) <= 128) or not all(c.isalnum() or c in "-_" for c in code_challenge):
             raise ApiError(400, "A PKCE code_challenge (S256, base64url) is required")
         app_ctx = {"redirect": app_redirect, "state": app_state[:500] or None, "challenge": code_challenge}
@@ -3096,7 +3104,7 @@ def sso_callback(request: Request, state: str = "", code: str = "", error: str =
 
     if entry["mode"] == "link":
         if row and row["user_id"] != entry["user_id"]:
-            return fail(f"That {p['name']} account is already linked to another ScanVault login.")
+            return fail(f"That {p['name']} account is already linked to another MedVault login.")
         if row:
             if row["provider_id"] != p["id"]:
                 c.execute("DELETE FROM sessions WHERE identity_id=?", (row["id"],))
@@ -3115,7 +3123,7 @@ def sso_callback(request: Request, state: str = "", code: str = "", error: str =
     if row and row["provider_id"] != p["id"]:
         row = None  # an identity only signs in through the provider it was linked with
     if not row or not c.execute("SELECT 1 FROM users WHERE id=?", (row["user_id"],)).fetchone():
-        return fail(f"This {p['name']} account isn't linked to ScanVault yet. Sign in with your password, then link it under Settings > Single sign-on.")
+        return fail(f"This {p['name']} account isn't linked to MedVault yet. Sign in with your password, then link it under Settings > Single sign-on.")
     c.execute("UPDATE user_identities SET last_login=?, email=? WHERE id=?", (time.time(), email, row["id"]))
     grant = {
         "user_id": row["user_id"],
@@ -3124,8 +3132,8 @@ def sso_callback(request: Request, state: str = "", code: str = "", error: str =
         "challenge": app_ctx["challenge"] if app_ctx else None,
     }
     if app_ctx:
-        # Anything on the phone can open /start with its own scanvault:// redirect,
-        # so the person confirms on a page served by ScanVault before an app gets a ticket.
+        # Anything on the phone can open /start with its own medvault:// redirect,
+        # so the person confirms on a page served by MedVault before an app gets a ticket.
         cid = _sso_confirms.put({"grant": grant, "app": app_ctx, "email": email, "provider": p["name"]})
         return _app_confirm_page(cid, email, p["name"])
     # The session itself is issued by POST /api/auth/sso/exchange, a same-origin
@@ -3141,16 +3149,16 @@ def _app_confirm_page(cid: str, email: str | None, provider: str) -> HTMLRespons
 
     who = escape(email or "your account")
     body = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sign in to the ScanVault app?</title><style>
+<title>Sign in to the MedVault app?</title><style>
 body{{font:16px/1.5 system-ui,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;background:#f4f7f7;color:#13201f}}
 main{{max-width:420px;margin:24px;padding:28px;background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.08)}}
 h1{{font-size:22px;margin:0 0 12px}}p{{margin:0 0 14px}}.row{{display:flex;gap:10px;margin-top:20px}}
 button{{flex:1;font:inherit;font-weight:600;padding:12px;border-radius:10px;border:1px solid #c9d6d5;background:#fff;cursor:pointer}}
 button.go{{background:#0b5d63;color:#fff;border-color:#0b5d63}}.warn{{font-size:14px;color:#6b4b00;background:#fff6dc;padding:10px 12px;border-radius:10px}}
 @media (prefers-color-scheme:dark){{body{{background:#0d1416;color:#e6eeee}}main{{background:#162024}}button{{background:#162024;color:#e6eeee;border-color:#2b3a3e}}.warn{{background:#3a2f12;color:#ffe3a3}}}}
-</style></head><body><main><h1>Sign in to the ScanVault app?</h1>
-<p>You signed in with {escape(provider)} as <b>{who}</b>. Continuing gives the app that opened this page access to your ScanVault for 30 days.</p>
-<p class="warn">Only continue if you just tapped <b>Continue with {escape(provider)}</b> in the ScanVault app yourself.</p>
+</style></head><body><main><h1>Sign in to the MedVault app?</h1>
+<p>You signed in with {escape(provider)} as <b>{who}</b>. Continuing gives the app that opened this page access to your MedVault for 30 days.</p>
+<p class="warn">Only continue if you just tapped <b>Continue with {escape(provider)}</b> in the MedVault app yourself.</p>
 <form method="post" action="/api/auth/sso/app-confirm"><input type="hidden" name="cid" value="{escape(cid)}">
 <div class="row"><button name="action" value="cancel">Cancel</button><button class="go" name="action" value="allow">Continue</button></div></form>
 </main></body></html>"""
@@ -3173,7 +3181,7 @@ async def sso_app_confirm(request: Request):
     cid, action = fields.get("cid", ""), fields.get("action", "")
     c = _sso_confirms.pop(cid)
     if not c:
-        return HTMLResponse("<!doctype html><p>This sign-in expired. Go back to the ScanVault app and try again.</p>", status_code=400)
+        return HTMLResponse("<!doctype html><p>This sign-in expired. Go back to the MedVault app and try again.</p>", status_code=400)
     if action != "allow":
         return RedirectResponse(_app_redirect(c["app"], error="cancelled").headers["location"], status_code=303)
     ticket = _sso_tickets.put(c["grant"])
@@ -3304,7 +3312,7 @@ async def sso_update_provider(pid: str, request: Request):
                       changed=sorted(k for k in set(old) | set(p) if old.get(k) != p.get(k) and "secret" not in k) or None)
             return _sso_admin_out(p)
     if pid == "env":
-        raise ApiError(409, "This provider is configured with SCANVAULT_OIDC_* environment variables")
+        raise ApiError(409, "This provider is configured with MEDVAULT_OIDC_* environment variables")
     raise ApiError(404, "Unknown sign-in provider")
 
 
@@ -3312,7 +3320,7 @@ async def sso_update_provider(pid: str, request: Request):
 def sso_delete_provider(pid: str, request: Request):
     _require_admin(request)
     if pid == "env":
-        raise ApiError(409, "This provider is configured with SCANVAULT_OIDC_* environment variables")
+        raise ApiError(409, "This provider is configured with MEDVAULT_OIDC_* environment variables")
     cfg = _sso_cfg()
     gone = next((p for p in cfg["providers"] if p["id"] == pid), None)
     cfg["providers"] = [p for p in cfg["providers"] if p["id"] != pid]
@@ -3523,7 +3531,7 @@ def export_activity(request: Request, format: str = "csv"):
             w.writerow(vals)
         body = buf.getvalue().encode("utf-8-sig")
         ctype, ext = "text/csv; charset=utf-8", "csv"
-    name = f"scanvault-activity-{vid}-{stamp}.{ext}"
+    name = f"medvault-activity-{vid}-{stamp}.{ext}"
     return Response(body, media_type=ctype, headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "private, no-store"})
 
 
@@ -3615,7 +3623,7 @@ async def ldap_save(request: Request):
     await _reauth(u, j)
     stored = store.get_config("ldap", {}) or {}
     if _ldap_cfg().get("managed"):
-        raise ApiError(409, "Directory sign-in is configured with SCANVAULT_LDAP_* environment variables")
+        raise ApiError(409, "Directory sign-in is configured with MEDVAULT_LDAP_* environment variables")
     old = dict(stored)
     cfg = dict(stored)
     preset = j.get("preset", cfg.get("preset") or "active_directory")
@@ -3669,7 +3677,7 @@ async def ldap_save(request: Request):
 def ldap_delete(request: Request):
     _require_admin(request)
     if _ldap_cfg().get("managed"):
-        raise ApiError(409, "Directory sign-in is configured with SCANVAULT_LDAP_* environment variables")
+        raise ApiError(409, "Directory sign-in is configured with MEDVAULT_LDAP_* environment variables")
     log_event(request, "ldap.settings", change="deleted", provider=_ldap_name(), links_dropped=True)
     store.set_config("ldap", {})
     _drop_ldap_links()
@@ -3692,7 +3700,7 @@ async def ldap_fingerprint(request: Request):
 @app.post("/api/ldap/link")
 async def ldap_link(request: Request):
     """Link the caller's directory account. Body: {directory_username,
-    directory_password, password (ScanVault, unless recently signed in with SSO)}."""
+    directory_password, password (MedVault, unless recently signed in with SSO)}."""
     u = require_user(request)
     j = await body_json(request, 64 * 1024)
     await _reauth(u, j)
@@ -3708,7 +3716,7 @@ async def ldap_link(request: Request):
     c = store.conn()
     row = c.execute("SELECT * FROM user_identities WHERE issuer=? AND subject=?", (ident["issuer"], ident["subject"])).fetchone()
     if row and row["user_id"] != u["id"]:
-        raise ApiError(409, "That directory account is already linked to another ScanVault login")
+        raise ApiError(409, "That directory account is already linked to another MedVault login")
     if row:
         c.execute("UPDATE user_identities SET provider_id=?, email=? WHERE id=?", (LDAP_ID, ident["email"] or ident["name"], row["id"]))
     else:
@@ -3759,17 +3767,17 @@ async def scheduler():
 
 
 def _auto_unlock() -> None:
-    pf = os.environ.get("SCANVAULT_PASSPHRASE_FILE")
+    pf = os.environ.get("MEDVAULT_PASSPHRASE_FILE")
     if not pf or not setup_complete():
         return
     p = Path(pf)
     if not p.is_file():
-        log.error("SCANVAULT_PASSPHRASE_FILE %s does not exist or is not a file; the vault stays locked", pf)
+        log.error("MEDVAULT_PASSPHRASE_FILE %s does not exist or is not a file; the vault stays locked", pf)
         return
     try:
         text = p.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        log.error("Cannot read SCANVAULT_PASSPHRASE_FILE %s (%s); the vault stays locked", pf, exc.__class__.__name__)
+        log.error("Cannot read MEDVAULT_PASSPHRASE_FILE %s (%s); the vault stays locked", pf, exc.__class__.__name__)
         return
     passphrase = text.rstrip("\r\n")
     try:
@@ -3781,9 +3789,9 @@ def _auto_unlock() -> None:
         migrate_file_macs(master)
         _unlock_activity(master)
         log_event(None, "vault.auto_unlock", method="passphrase file")
-        log.info("Vault auto-unlocked from SCANVAULT_PASSPHRASE_FILE")
+        log.info("Vault auto-unlocked from MEDVAULT_PASSPHRASE_FILE")
     except crypto.CryptoError:
-        log.error("SCANVAULT_PASSPHRASE_FILE does not unlock the vault")
+        log.error("MEDVAULT_PASSPHRASE_FILE does not unlock the vault")
 
 
 async def _startup():

@@ -82,7 +82,7 @@ def test_setup_needs_code_and_json(tmp_path):
 def test_csrf_and_token_handling(vault):
     c, B, j = vault
     # browser sign-in: token only in the HttpOnly cookie, never in the body
-    r = c.post("/api/auth/login", json={"username": "ryan", "password": PW}, headers={"X-ScanVault": "1"})
+    r = c.post("/api/auth/login", json={"username": "ryan", "password": PW}, headers={"X-MedVault": "1"})
     assert r.status_code == 200 and "token" not in r.json()
     assert "httponly" in r.headers["set-cookie"].lower()
     # API client sign-in still gets the token
@@ -90,7 +90,7 @@ def test_csrf_and_token_handling(vault):
     # cookie + a non-Bearer Authorization header must not skip the CSRF check
     r = c.post("/api/patients", json={"name": "x"}, headers={"Authorization": "Basic Zm9vOmJhcg=="})
     assert r.status_code == 403 and r.json()["code"] == "csrf"
-    assert c.post("/api/patients", json={"name": "x"}, headers={"X-ScanVault": "1"}).status_code == 200
+    assert c.post("/api/patients", json={"name": "x"}, headers={"X-MedVault": "1"}).status_code == 200
     # logout via cookie also needs the header
     assert c.post("/api/auth/logout").status_code == 403
     c.cookies.clear()
@@ -434,7 +434,7 @@ def test_deletes_during_backup_are_deferred(tmp_path):
 
 def test_prune_only_touches_own_vault(tmp_path):
     d = tmp_path / "backups"
-    os.environ["SCANVAULT_LOCAL_BACKUP_ROOT"] = str(d)
+    os.environ["MEDVAULT_LOCAL_BACKUP_ROOT"] = str(d)
     try:
         mine = targets.make("local", {"path": "shared", "require_mount": False}, vault_id="SV-AAAA0000")
         theirs = targets.make("local", {"path": "shared", "require_mount": False}, vault_id="SV-BBBB1111")
@@ -447,7 +447,7 @@ def test_prune_only_touches_own_vault(tmp_path):
         left = sorted(p.name for p in (d / "shared").iterdir())
         assert sum("SV-AAAA0000" in n for n in left) == 1 and sum("SV-BBBB1111" in n for n in left) == 3
     finally:
-        os.environ.pop("SCANVAULT_LOCAL_BACKUP_ROOT", None)
+        os.environ.pop("MEDVAULT_LOCAL_BACKUP_ROOT", None)
 
 
 def test_unique_backup_names():
@@ -513,15 +513,15 @@ def test_passphrase_file_edge_cases(vault, tmp_path, monkeypatch, caplog):
     main.vault.lock()
     d = tmp_path / "secret-dir"
     d.mkdir()
-    monkeypatch.setenv("SCANVAULT_PASSPHRASE_FILE", str(d))
+    monkeypatch.setenv("MEDVAULT_PASSPHRASE_FILE", str(d))
     main._auto_unlock()  # a directory (missing bind-mount source) must not crash
     assert not main.vault.unlocked
-    monkeypatch.setenv("SCANVAULT_PASSPHRASE_FILE", str(tmp_path / "missing"))
+    monkeypatch.setenv("MEDVAULT_PASSPHRASE_FILE", str(tmp_path / "missing"))
     main._auto_unlock()
     assert "does not exist" in caplog.text
     pf = tmp_path / "pass.txt"
     pf.write_text(PASS + "\r\n")
-    monkeypatch.setenv("SCANVAULT_PASSPHRASE_FILE", str(pf))
+    monkeypatch.setenv("MEDVAULT_PASSPHRASE_FILE", str(pf))
     main._auto_unlock()
     assert main.vault.unlocked
 

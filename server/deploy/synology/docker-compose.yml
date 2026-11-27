@@ -1,46 +1,46 @@
-# ScanVault for Synology DSM 7.2+ (Container Manager > Project).
+# MedVault for Synology DSM 7.2+ (Container Manager > Project).
 # See deploy/synology/README.md for the step-by-step setup.
 services:
-  scanvault:
-    image: ghcr.io/ryanbyte1701/scanvault:latest
+  medvault:
+    image: ghcr.io/ryanbyte1701/medvault:latest
     # Or build on the NAS from a copy of the repo instead of pulling:
-    # build: /volume1/docker/scanvault/src
-    container_name: scanvault
+    # build: /volume1/docker/medvault/src/server
+    container_name: medvault
     restart: unless-stopped
     ports:
       # NAS port 8765 -> container 8080, reachable ONLY from the NAS itself.
-      # Phones and computers reach ScanVault through DSM's HTTPS reverse proxy
+      # Phones and computers reach MedVault through DSM's HTTPS reverse proxy
       # (see README), so passwords and keys never cross the LAN in clear.
       # Avoid 5000/5001 (DSM) and 80/443.
       - "127.0.0.1:8765:8080"
     volumes:
       # Encrypted vault: database, keystore, encrypted files. Nothing in here is
       # readable without your encryption key or recovery key file.
-      - /volume1/docker/scanvault/data:/data
+      - /volume1/docker/medvault/data:/data
       # Optional "USB / local disk" backup destination (USB drive plugged into
-      # the NAS, or a second volume). Pick it in ScanVault as /backups/usb1.
+      # the NAS, or a second volume). Pick it in MedVault as /backups/usb1.
       # - /volumeUSB1/usbshare:/backups/usb1
       # - /volume2/backup:/backups/volume2
     environment:
-      # Owner of /volume1/docker/scanvault/data. Find it over SSH with
+      # Owner of /volume1/docker/medvault/data. Find it over SSH with
       # `id <your DSM user>`; the first DSM admin is usually 1026, group users = 100.
       PUID: "1026"
       PGID: "100"
       TZ: America/New_York
-      # The HTTPS address you open ScanVault at through DSM's reverse proxy.
+      # The HTTPS address you open MedVault at through DSM's reverse proxy.
       # Needed for the Google Drive / Box "Connect account" buttons.
-      SCANVAULT_PUBLIC_URL: https://scans.example.synology.me
-      SCANVAULT_COOKIE_SECURE: "auto"
-      SCANVAULT_MAX_UPLOAD_MB: "4096"
+      MEDVAULT_PUBLIC_URL: https://scans.example.synology.me
+      MEDVAULT_COOKIE_SECURE: "auto"
+      MEDVAULT_MAX_UPLOAD_MB: "4096"
       # DSM's reverse proxy reaches the container through the Docker bridge;
       # only it may set X-Forwarded-Proto/For.
       FORWARDED_ALLOW_IPS: "172.16.0.0/12"
       # Lock the vault after this many idle minutes (0 = stay unlocked)
-      SCANVAULT_AUTO_LOCK_MINUTES: "0"
+      MEDVAULT_AUTO_LOCK_MINUTES: "0"
       # Optional unattended unlock after NAS reboots (see README trade-offs):
-      # SCANVAULT_PASSPHRASE_FILE: /run/secrets/scanvault_passphrase
+      # MEDVAULT_PASSPHRASE_FILE: /run/secrets/medvault_passphrase
     # volumes for the optional secret above:
-    #   - /volume1/docker/scanvault/secrets/passphrase.txt:/run/secrets/scanvault_passphrase:ro
+    #   - /volume1/docker/medvault/secrets/passphrase.txt:/run/secrets/medvault_passphrase:ro
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777

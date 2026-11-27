@@ -14,12 +14,12 @@ import os
 import zlib
 from typing import BinaryIO
 
-log = logging.getLogger("scanvault.media")
+log = logging.getLogger("medvault.media")
 
 PREVIEW_MAX = 1024
 # Largest decoded frame we will hold in memory (bytes). 256 MiB covers a
 # 16-bit 8k x 8k digital radiograph or mammogram with room to spare.
-MAX_FRAME_BYTES = int(os.environ.get("SCANVAULT_MAX_FRAME_MB", "256")) * 1024 * 1024
+MAX_FRAME_BYTES = int(os.environ.get("MEDVAULT_MAX_FRAME_MB", "256")) * 1024 * 1024
 MAX_IMAGE_PIXELS = 120_000_000
 MAX_INFLATED = 256 * 1024 * 1024  # fits a 1 GB container with room for the decode
 DEFLATED_TS = "1.2.840.10008.1.2.1.99"
