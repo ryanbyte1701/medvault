@@ -114,7 +114,7 @@ data class DarkColors(val background: Long, val surface: Long, val surfaceHigh: 
  * dark color to the server's per-user prefs, so they follow the user between web and Android.
  */
 class ThemeStore(context: Context) {
-    private val prefs = context.getSharedPreferences("appearance", Context.MODE_PRIVATE)
+    private val prefs = com.scanvault.android.data.crypto.EncryptedPrefs(context, "appearance")
 
     private val _settings = MutableStateFlow(read())
     val settings: StateFlow<ThemeSettings> = _settings.asStateFlow()
@@ -123,18 +123,16 @@ class ThemeStore(context: Context) {
     var onChanged: ((ThemeSettings) -> Unit)? = null
 
     private fun read() = ThemeSettings(
-        mode = prefs.getString("mode", null)?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() } ?: ThemeMode.SYSTEM,
-        darkColor = prefs.getString("dark_color", null)?.takeIf { DarkColors.parseHex(it) != null }
+        mode = prefs.getString("mode")?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() } ?: ThemeMode.SYSTEM,
+        darkColor = prefs.getString("dark_color")?.takeIf { DarkColors.parseHex(it) != null }
             ?: DarkPreset.TEAL_NIGHT.hex,
         wallpaperColorsInLight = prefs.getBoolean("wallpaper_light", false),
     )
 
     private fun save(next: ThemeSettings) {
-        prefs.edit()
-            .putString("mode", next.mode.name)
-            .putString("dark_color", next.darkColor)
-            .putBoolean("wallpaper_light", next.wallpaperColorsInLight)
-            .apply()
+        prefs.putString("mode", next.mode.name)
+        prefs.putString("dark_color", next.darkColor)
+        prefs.putBoolean("wallpaper_light", next.wallpaperColorsInLight)
         _settings.value = next
     }
 

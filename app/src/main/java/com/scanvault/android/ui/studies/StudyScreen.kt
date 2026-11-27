@@ -84,6 +84,10 @@ import com.scanvault.android.ui.components.userMessage
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import com.scanvault.android.data.crypto.FileVault
+import com.scanvault.android.data.crypto.SecureFileProvider
 import java.io.File
 
 data class StudyDetail(val study: Study, val files: List<VaultFile>)
@@ -134,13 +138,36 @@ class StudyViewModel(private val container: AppContainer, private val studyId: S
 
     suspend fun deleteStudy(): Result<Unit> = container.call { it.deleteStudy(studyId) }
 
-    /** Downloads a decrypted copy into the app cache so another app can open it. */
-    suspend fun downloadForSharing(file: VaultFile): Result<File> = container.call { api ->
+    /**
+     * Downloads a file straight into the encrypted vault and returns a link another app can read
+     * through [SecureFileProvider]; no decrypted copy is written to storage.
+     */
+    suspend fun downloadForSharing(file: VaultFile): Result<Uri> = container.call { api ->
+        var entry: FileVault.Entry? = null
+        api.download(file.id) { input -> entry = container.vault.store(input) }
         val safeName = file.filename.replace(Regex("""[^\w.\- ]"""), "_").ifBlank { "file" }
-        val dir = File(container.sharedDir(), file.id.replace(Regex("""[^\w\-]"""), "_")).apply { mkdirs() }
-        val out = File(dir, safeName)
-        api.download(file.id) { input -> out.outputStream().use { input.copyTo(it) } }
-        out
+        SecureFileProvider.share(container.context, entry!!, safeName, file.contentType)
+    }
+
+    /**
+     * Moves a camera photo into the encrypted vault right away, deletes the camera's plain copy,
+     * and uploads from the vault. The encrypted copy is deleted once the upload finishes.
+     */
+    suspend fun uploadCapture(photo: File): Result<UploadSummary> {
+        val entry = withContext(Dispatchers.IO) {
+            try {
+                photo.inputStream().use { container.vault.store(it) }
+            } finally {
+                photo.delete()
+            }
+        }
+        return try {
+            val size = withContext(Dispatchers.IO) { container.vault.reader(entry).use { it.plaintextLength } }
+            val part = UploadPart(photo.name, "image/jpeg", size) { container.vault.reader(entry).inputStream() }
+            uploadAll(listOf(part), VaultFile.KIND_IMAGE)
+        } finally {
+            withContext(Dispatchers.IO) { container.vault.delete(entry) }
+        }
     }
 }
 
@@ -166,12 +193,11 @@ fun StudyScreen(
 
     LaunchedEffect(session) { if (session == SessionState.Ready) vm.load() }
 
-    fun startUpload(parts: List<UploadPart>, kind: String? = null, cleanup: () -> Unit = {}) {
+    fun startUpload(parts: List<UploadPart>, kind: String? = null) {
         scope.launch {
             vm.uploadAll(parts, kind)
                 .onSuccess { snackbar.showSnackbar(it.toString()) }
                 .onFailure { snackbar.showSnackbar("Upload failed: ${it.userMessage()}") }
-            cleanup()
         }
     }
 
@@ -180,8 +206,10 @@ fun StudyScreen(
         pendingCapture = null
         val file = File(path)
         if (saved && file.length() > 0) {
-            startUpload(listOf(context.contentResolver.uploadPartFor(Uri.fromFile(file))), VaultFile.KIND_IMAGE) {
-                file.delete()
+            scope.launch {
+                vm.uploadCapture(file)
+                    .onSuccess { snackbar.showSnackbar(it.toString()) }
+                    .onFailure { snackbar.showSnackbar("Upload failed: ${it.userMessage()}") }
             }
         } else {
             file.delete()
@@ -216,8 +244,7 @@ fun StudyScreen(
                 duration = androidx.compose.material3.SnackbarDuration.Short)
         }
         scope.launch {
-            vm.downloadForSharing(file).onSuccess { local ->
-                val uri = FileProvider.getUriForFile(context, "${BuildConfig.APPLICATION_ID}.files", local)
+            vm.downloadForSharing(file).onSuccess { uri ->
                 val intent = Intent(Intent.ACTION_VIEW)
                     .setDataAndType(uri, file.contentType)
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
