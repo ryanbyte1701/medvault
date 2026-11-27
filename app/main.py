@@ -901,7 +901,7 @@ def _rekey(old: bytes, passphrase: str) -> bytes:
             fsync_dir(store.dir)
             c.execute("BEGIN IMMEDIATE")
             try:
-                for t, ctx in (("patients", "patient"), ("studies", "study")):
+                for t, ctx in (("patients", "patient"), ("studies", "study"), ("lab_reports", "labreport"), ("lab_results", "labresult")):
                     for r in c.execute(f"SELECT id, blob FROM {t}").fetchall():
                         d = unseal(old, r["blob"], f"{ctx}:{r['id']}")
                         c.execute(f"UPDATE {t} SET blob=? WHERE id=?", (seal(new, d, f"{ctx}:{r['id']}"), r["id"]))
@@ -2712,6 +2712,13 @@ async def lifespan(_app):
 
 
 app.router.lifespan_context = lifespan
+
+
+# =================================================================== LabsVault
+
+from . import labs as _labs  # noqa: E402  (imports this module; keep below every helper it uses)
+
+app.include_router(_labs.router)
 
 
 # =================================================================== static UI

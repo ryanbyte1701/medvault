@@ -5,3 +5,4 @@ responses>=0.25
 moto[s3]>=5.0
 wsgidav>=4.3
 cheroot>=10
+reportlab>=4
