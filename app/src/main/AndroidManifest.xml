@@ -40,5 +40,12 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- Serves encrypted vault files to other apps, decrypting each read on the fly. -->
+        <provider
+            android:name=".data.crypto.SecureFileProvider"
+            android:authorities="${applicationId}.secure"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

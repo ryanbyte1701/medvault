@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import okhttp3.OkHttpClient
+import com.scanvault.android.data.crypto.FileVault
+import com.scanvault.android.data.crypto.SecureFileProvider
 import java.io.File
 
 /** Session-level state shared by every screen. */
@@ -24,10 +26,11 @@ sealed interface SessionState {
  * Simple manual dependency container: holds the secure store, the HTTP client and the
  * current API client, and tracks whether the user is signed in and the vault unlocked.
  */
-class AppContainer(private val context: Context) {
+class AppContainer(val context: Context) {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val store = SecureStore(context)
+    val vault = FileVault(context)
     val theme = ThemeStore(context).also { store ->
         store.onChanged = { settings ->
             if (_session.value != SessionState.SignedOut) {
@@ -130,14 +133,17 @@ class AppContainer(private val context: Context) {
         Result.failure(e)
     }
 
-    /** Directory for decrypted files handed to other apps via FileProvider. */
-    fun sharedDir(): File = File(context.cacheDir, "shared").apply { mkdirs() }
-
-    /** Directory for camera captures before upload. */
+    /**
+     * Where the system camera app writes a photo. It can only write plain files, so the app
+     * encrypts each photo into the vault the moment the camera returns and deletes this copy.
+     */
     fun captureDir(): File = File(context.cacheDir, "captures").apply { mkdirs() }
 
+    /** Wipes every file the app has written: the encrypted vault, camera leftovers, old plaintext caches. */
     fun clearSharedCache() {
-        File(context.cacheDir, "shared").deleteRecursively()
+        SecureFileProvider.revokeAll()
+        vault.clear()
         File(context.cacheDir, "captures").deleteRecursively()
+        File(context.cacheDir, "shared").deleteRecursively() // plaintext copies from version 0.1.0
     }
 }
