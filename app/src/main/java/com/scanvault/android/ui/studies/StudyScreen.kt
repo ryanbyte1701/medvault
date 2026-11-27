@@ -25,6 +25,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
@@ -121,6 +122,10 @@ class StudyViewModel(private val container: AppContainer, private val studyId: S
     val state = _state.asStateFlow()
     private val _upload = MutableStateFlow<UploadProgress?>(null)
     val upload = _upload.asStateFlow()
+    /** Whether the server has AI explanations turned on (checked once; any error means no). */
+    private val _aiEnabled = MutableStateFlow(false)
+    val aiEnabled = _aiEnabled.asStateFlow()
+    private var aiChecked = false
     /** One-off messages for the snackbar; survives rotation because it lives in the ViewModel. */
     val messages = kotlinx.coroutines.channels.Channel<String>(kotlinx.coroutines.channels.Channel.BUFFERED)
 
@@ -130,6 +135,9 @@ class StudyViewModel(private val container: AppContainer, private val studyId: S
             container.call { api -> StudyDetail(api.study(studyId), api.files(studyId)) }
                 .onSuccess { _state.value = Loadable.Loaded(it) }
                 .onFailure { _state.value = Loadable.Failed(it.userMessage()) }
+            if (!aiChecked) {
+                container.call { it.aiSettings() }.onSuccess { aiChecked = true; _aiEnabled.value = it.enabled }
+            }
         }
     }
 
@@ -247,11 +255,13 @@ fun StudyScreen(
     studyId: String,
     onBack: () -> Unit,
     onOpenImage: (fileId: String, name: String, isDicom: Boolean) -> Unit,
+    onExplain: () -> Unit = {},
     onCompare: () -> Unit = {},
 ) {
     val vm: StudyViewModel = viewModel(key = "study-$studyId") { StudyViewModel(container, studyId) }
     val state by vm.state.collectAsStateWithLifecycle()
     val upload by vm.upload.collectAsStateWithLifecycle()
+    val aiEnabled by vm.aiEnabled.collectAsStateWithLifecycle()
     val session by container.session.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -334,12 +344,18 @@ fun StudyScreen(
                 },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 actions = {
+                    if (aiEnabled) IconButton(onClick = onExplain) { Icon(Icons.Default.AutoAwesome, "Explain or translate with AI") }
                     val hasImages = (state as? Loadable.Loaded<StudyDetail>)?.value?.files
                         ?.any { it.kind == VaultFile.KIND_DICOM || it.isImage } == true
                     if (hasImages) IconButton(onClick = onCompare) { Icon(Icons.Default.Compare, "Compare with another study") }
                     IconButton(onClick = vm::load) { Icon(Icons.Default.Refresh, "Refresh") }
                     IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "More") }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        if (aiEnabled) DropdownMenuItem(
+                            text = { Text("Explain or translate (AI)") },
+                            leadingIcon = { Icon(Icons.Default.AutoAwesome, null) },
+                            onClick = { menu = false; onExplain() },
+                        )
                         DropdownMenuItem(
                             text = { Text("Delete study") },
                             leadingIcon = { Icon(Icons.Default.Delete, null) },

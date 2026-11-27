@@ -47,6 +47,12 @@ patient data. They are rendered by the screenshot tests described under [Buildin
   suggested matches (same kind of scan and body part, closest in time), then zoom, pan,
   window/level and slices stay linked. Unlink to line up anatomy; relinking keeps the offset.
 - Delete patients, studies and files (long-press a file).
+- **Explain or translate with AI** (when the server has it turned on): a plain-language,
+  non-medical explanation or a translation of a study's report and chosen images. The server
+  prepares the exact payload, with names, IDs and dates removed by default, and the app shows it
+  (text, images and where it will go) before anything is sent; nothing goes out until you tick
+  "Send this" and tap Send. The AI provider's API key is set up in the web app and never reaches
+  the phone. Answers carry a "not medical advice" notice; Copy marks the clipboard as sensitive.
 - **Lab results (LabsVault)**: from a patient, tap the flask to see every lab test with its latest
   value, flag and a sparkline. Upload a Labcorp, Quest or Sonora Quest report PDF (or a photo of
   one); the server reads it and the app shows a review screen where you correct values, ranges and
