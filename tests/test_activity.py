@@ -290,3 +290,12 @@ def test_unit_encrypt_roundtrip():
     assert audit.decrypt_details(k, blob, 7) == {"a": 1}
     with pytest.raises(crypto.CryptoError):
         audit.decrypt_details(k, blob, 8)  # bound to its sequence number
+
+
+def test_lab_events_are_recorded_for_real(vault):
+    c, B, _ = vault
+    p = c.post("/api/patients", json={"name": "Lab Person"}, headers=B).json()
+    main.log_event(None, "lab.upload", patient_id=p["id"], report_id="r1", lab="labcorp", results=12)
+    e = _acts(c, B, action="lab.")[0]
+    assert e["label"] == "Uploaded a lab report" and e["category"] == "lab" and e["patient_name"] == "Lab Person"
+    assert {c2["id"] for c2 in c.get("/api/activity/filters", headers=B).json()["categories"]} >= {"lab"}

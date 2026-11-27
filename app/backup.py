@@ -38,7 +38,7 @@ from . import crypto
 MAGIC = b"SVB1"
 AAD_V1 = b"scanvault-backup-v1"
 FORMAT = 2
-CONTENT_TABLES = ("patients", "studies", "files")
+CONTENT_TABLES = ("patients", "studies", "files", "lab_reports", "lab_results")
 
 
 def backup_name(vault_id: str, ts: float | None = None) -> str:
@@ -206,6 +206,8 @@ def restore_into_store(store, archive: Path, master_key: bytes, keep_local: bool
                     for t in CONTENT_TABLES:
                         cols = [r[1] for r in c.execute(f"PRAGMA main.table_info({t})")]
                         rcols = {r[1] for r in c.execute(f"PRAGMA r.table_info({t})")}
+                        if not rcols:  # a backup from before this table existed
+                            continue
                         use = [x for x in cols if x in rcols]
                         c.execute(f"INSERT INTO main.{t}({','.join(use)}) SELECT {','.join(use)} FROM r.{t}")
                     c.execute("COMMIT")

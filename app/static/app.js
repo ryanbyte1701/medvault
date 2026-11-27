@@ -97,6 +97,7 @@ const I = {
   home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 10.5 9-7 9 7V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
   chev: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>',
+  flask: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6M10 3v6l-5.5 9.5A1.7 1.7 0 0 0 6 21h12a1.7 1.7 0 0 0 1.5-2.5L14 9V3"/><path d="M7.5 15h9"/></svg>',
   x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
   dl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5M12 15V3"/></svg>',
 };
@@ -204,14 +205,14 @@ function render() {
   if (!S.themeSynced) { S.themeSynced = true; syncTheme(); }
   if (st.recovery_key_saved === false && !sessionStorage.getItem("sv-rk-later")) return viewRecoveryNag();
   const r = S.route;
-  const view = { home: viewHome, patients: viewPatients, patient: viewPatient, study: viewStudy, backups: viewBackups, settings: viewSettings, upload: viewUploadPage, activity: viewActivity }[r.name] || viewHome;
+  const view = { home: viewHome, patients: viewPatients, patient: viewPatient, study: viewStudy, backups: viewBackups, settings: viewSettings, upload: viewUploadPage, activity: viewActivity, ...(window.SV_VIEWS || {}) }[r.name] || viewHome;
   shell(r.name);
   view(r.id).catch(handleErr);
 }
 
 function shell(active) {
-  const nav = [["home", "Home", I.home], ["patients", "Patients", I.users], ["upload", "Upload", I.upload], ["backups", "Backups", I.cloud], ["activity", "Activity", I.activity], ["settings", "Settings", I.gear]];
-  const tabs = nav.filter(([n]) => n !== "activity"); // five fit the phone tab bar; Activity is reached from Settings there
+  const nav = [["home", "Home", I.home], ["patients", "Patients", I.users], ["upload", "Upload", I.upload], ["labs", "Labs", I.flask], ["backups", "Backups", I.cloud], ["activity", "Activity", I.activity], ["settings", "Settings", I.gear]];
+  const tabs = nav.filter(([n]) => n !== "activity"); // six fit the phone tab bar; Activity is reached from Settings there
   const on = n => (n === active || (n === "patients" && (active === "patient" || active === "study"))) ? "on" : "";
   app.innerHTML = `${API.demo ? '<div class="demo-banner">Interactive preview with sample patients. Nothing leaves your browser and nothing is stored.</div>' : ""}
   <div class="shell">
@@ -676,7 +677,7 @@ async function viewPatient(id) {
       ${p.date_of_birth ? `<span>Born <b>${esc(fmtDate(p.date_of_birth))}</b> (${age(p.date_of_birth)})</span>` : ""}${p.sex ? `<span>Sex <b>${esc(p.sex)}</b></span>` : ""}${p.mrn ? `<span>MRN <b>${esc(p.mrn)}</b></span>` : ""}
       <span><b>${p.study_count}</b> ${p.study_count === 1 ? "study" : "studies"}</span><span><b>${p.file_count}</b> ${p.file_count === 1 ? "file" : "files"}</span></div>
       ${p.notes ? `<p class="small muted" style="margin-top:8px;white-space:pre-wrap">${esc(p.notes)}</p>` : ""}</div>
-    <div class="row"><a class="btn" href="#/activity/patient:${esc(p.id)}" data-go="activity/patient:${esc(p.id)}">${I.activity} Activity</a><button class="btn" id="edit">Edit</button><button class="btn primary" id="up">${I.upload} Upload</button></div></div>
+    <div class="row"><a class="btn" href="#/activity/patient:${esc(p.id)}" data-go="activity/patient:${esc(p.id)}">${I.activity} Activity</a><button class="btn" id="edit">Edit</button><a class="btn" href="#/labs/${esc(p.id)}" data-go="labs/${esc(p.id)}">${I.flask} Lab results</a><button class="btn primary" id="up">${I.upload} Upload</button></div></div>
   <div class="drop" id="drop">${I.upload}<div><b>Drop scans or reports here</b><div class="small muted">DICOM files or a whole CD/zip export, JPG/PNG photos of films, PDF reports. DICOM is grouped into studies automatically.</div></div>
     <div class="row" style="justify-content:center"><label tabindex="0" role="button" class="btn sm">Choose files<input type="file" id="fi" multiple hidden accept=".dcm,.dicom,.zip,image/*,application/pdf,application/dicom,application/zip,*/*"></label>
     <label tabindex="0" role="button" class="btn sm">${I.camera} Take photo<input type="file" id="cam" accept="image/*" capture="environment" hidden></label></div></div>
@@ -1811,6 +1812,9 @@ function ssoProviderForm(c, p) {
     try { await API.req("DELETE", `/api/sso/providers/${encodeURIComponent(p.id)}`); mm.close(); toast("Provider removed"); ssoCard(); } catch (er) { handleErr(er); }
   };
 }
+
+// Feature modules (static/labs.js) build on these.
+window.SV = { API, S, render, $, $$, esc, fmtDate, toast, modal, confirmBox, main, mobileHead, handleErr, go, wireDrop, I, initials, age };
 
 boot();
 if (!API.demo && "serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("/sw.js").catch(() => {});
