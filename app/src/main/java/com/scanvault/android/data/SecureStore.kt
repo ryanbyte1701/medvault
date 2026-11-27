@@ -109,6 +109,22 @@ class SecureStore(context: Context) {
         get() = prefs.getString(KEY_REVOKE)
         set(value) = prefs.putString(KEY_REVOKE, value)
 
+    /**
+     * The server's device token for the last account signed in with a password. Kept after
+     * sign-out on purpose: it is what lets this phone sign in while a stranger's wrong guesses
+     * have the account locked. It only stands in for the lockout, never for the password.
+     */
+    fun deviceTokenFor(server: String, username: String): String? {
+        val parts = prefs.getString(KEY_DEVICE)?.split("\n", limit = 3) ?: return null
+        if (parts.size != 3) return null
+        return parts[2].takeIf { parts[0] == server && parts[1].equals(username, ignoreCase = true) }
+    }
+
+    fun saveDeviceToken(server: String, username: String, token: String?) {
+        if (token.isNullOrBlank() || '\n' in server || '\n' in username) return
+        runCatching { prefs.putString(KEY_DEVICE, "$server\n$username\n$token") }
+    }
+
     /** Minutes in the background before the app lock is required again (0 = immediately). */
     var lockTimeoutMinutes: Int
         get() = prefs.getString(KEY_LOCK_TIMEOUT)?.toIntOrNull() ?: 1
@@ -141,6 +157,7 @@ class SecureStore(context: Context) {
         const val KEY_ALLOW_HTTP = "allow_lan_http"
         const val KEY_HTTP_HOST = "lan_http_host"
         const val KEY_REVOKE = "pending_revocation"
+        const val KEY_DEVICE = "login_device"
         const val KEY_PINS = "cert_pins"
         const val KEY_LOCK_TIMEOUT = "lock_timeout_min"
         const val LEGACY_TOKEN = "token_enc"

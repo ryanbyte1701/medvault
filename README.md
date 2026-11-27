@@ -63,7 +63,7 @@ The app expects these endpoints (all JSON, `Authorization: Bearer <token>`, erro
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| POST | `/api/auth/login` | `{username, password}` → `{token, expires_at}` |
+| POST | `/api/auth/login` | `{username, password, device?}` → `{token, expires_at, unlocked, device}`; the device token is stored encrypted and sent back so a stranger's wrong guesses can't lock this phone out |
 | POST | `/api/auth/logout` | revokes the token |
 | GET | `/api/auth/sso/{id}/start` | opened in a Custom Tab with `app_redirect=scanvault://sso`, `app_state`, `code_challenge` |
 | POST | `/api/auth/sso/exchange` | `{ticket, code_verifier}` → same as login |
