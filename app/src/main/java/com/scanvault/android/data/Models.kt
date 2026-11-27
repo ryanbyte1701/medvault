@@ -11,6 +11,8 @@ data class LoginRequest(val username: String, val password: String)
 data class LoginResponse(
     val token: String,
     @SerialName("expires_at") val expiresAt: String? = null,
+    /** Whether the vault is unlocked; SSO never unlocks it, so false means ask for the passphrase. */
+    val unlocked: Boolean? = null,
 )
 
 @Serializable
