@@ -37,6 +37,15 @@ class ApiClientTest {
         assertTrue(req.body.readUtf8().contains("\"username\":\"ryan\""))
     }
 
+    @Test fun loginSendsAndReturnsDeviceToken() = runTest {
+        server.enqueue(json("""{"token":"abc","expires_at":"2026-12-26T00:00:00Z","unlocked":true,"device":"d1.ff"}"""))
+        server.enqueue(json("""{"token":"def"}"""))
+        assertEquals("d1.ff", api.login("ryan", "pw", device = "d1.old").device)
+        assertTrue(server.takeRequest().body.readUtf8().contains("\"device\":\"d1.old\""))
+        api.login("ryan", "pw")
+        assertTrue("no device field when there is none", !server.takeRequest().body.readUtf8().contains("device"))
+    }
+
     @Test fun patientsParseAndSendBearer() = runTest {
         server.enqueue(json("""[{"id":"p1","name":"Jane Doe","date_of_birth":"1980-02-03","study_count":2,"extra":"ignored"}]"""))
         val list = api.patients()

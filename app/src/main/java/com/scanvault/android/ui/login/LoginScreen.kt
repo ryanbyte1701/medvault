@@ -99,8 +99,10 @@ fun LoginScreen(container: AppContainer, onOpenSettings: () -> Unit, onSignedIn:
         busy = true; error = null
         scope.launch {
             val result = runCatching {
-                ApiClient.normalizeBaseUrl(server)
-                val login = container.clientFor(server).login(username.trim(), password)
+                val base = ApiClient.normalizeBaseUrl(server).toString()
+                val user = username.trim()
+                val login = container.clientFor(server).login(user, password, container.store.deviceTokenFor(base, user))
+                container.store.saveDeviceToken(base, user, login.device)
                 val status = runCatching { container.clientFor(server, login.token).status() }.getOrNull()
                 container.onSignedIn(
                     server, username.trim(), login.token,

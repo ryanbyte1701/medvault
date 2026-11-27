@@ -5,7 +5,12 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 
 @Serializable
-data class LoginRequest(val username: String, val password: String)
+data class LoginRequest(
+    val username: String,
+    val password: String,
+    /** Proof this app signed in to the account before; lets the server skip its account lockout. */
+    val device: String? = null,
+)
 
 @Serializable
 data class LoginResponse(
@@ -13,6 +18,8 @@ data class LoginResponse(
     @SerialName("expires_at") val expiresAt: String? = null,
     /** Whether the vault is unlocked; SSO never unlocks it, so false means ask for the passphrase. */
     val unlocked: Boolean? = null,
+    /** Device token to store and send back on the next password sign-in (non-browser clients). */
+    val device: String? = null,
 )
 
 /** An identity provider the server offers for single sign-on. */

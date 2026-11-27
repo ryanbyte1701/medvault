@@ -78,8 +78,8 @@ class ApiClient(
 
     suspend fun status(): ServerStatus = get("api/status", ServerStatus.serializer())
 
-    suspend fun login(username: String, password: String): LoginResponse =
-        send("POST", "api/auth/login", jsonBody(LoginRequest(username, password), LoginRequest.serializer()),
+    suspend fun login(username: String, password: String, device: String? = null): LoginResponse =
+        send("POST", "api/auth/login", jsonBody(LoginRequest(username, password, device), LoginRequest.serializer()),
             LoginResponse.serializer(), authenticated = false)
 
     /** URL to open in a Custom Tab to start SSO with provider [providerId]. */
