@@ -4,16 +4,18 @@ import android.content.ContentResolver
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
-import java.io.File
 
 /** Builds an [UploadPart] from a content:// or file:// Uri without reading it into memory. */
 fun ContentResolver.uploadPartFor(uri: Uri): UploadPart {
+    // Only accept documents from other apps' providers: never file:// paths or this app's own
+    // providers, which could be abused to upload the app's private files.
+    require(uri.scheme == ContentResolver.SCHEME_CONTENT) { "Unsupported file location" }
+    require(uri.authority?.startsWith(com.scanvault.android.BuildConfig.APPLICATION_ID) != true) {
+        "Unsupported file location"
+    }
     var name: String? = null
     var size = -1L
-    if (uri.scheme == ContentResolver.SCHEME_FILE) {
-        val f = File(uri.path!!)
-        name = f.name; size = f.length()
-    } else {
+    run {
         query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { c ->
             if (c.moveToFirst()) {
                 val ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
@@ -23,7 +25,7 @@ fun ContentResolver.uploadPartFor(uri: Uri): UploadPart {
             }
         }
     }
-    val filename = name ?: uri.lastPathSegment ?: "upload"
+    val filename = (name ?: uri.lastPathSegment ?: "upload").substringAfterLast('/').ifBlank { "upload" }
     val type = getType(uri)?.takeIf { it != "application/octet-stream" } ?: guessMimeType(filename)
     return UploadPart(filename, type, size) {
         openInputStream(uri) ?: throw java.io.FileNotFoundException("Can't open $filename")

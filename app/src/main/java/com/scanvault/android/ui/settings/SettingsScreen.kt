@@ -40,6 +40,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -127,6 +128,9 @@ fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
                     },
                 )
             }
+
+            HorizontalDivider()
+            SecuritySection(container)
 
             HorizontalDivider()
             Text("Account", style = MaterialTheme.typography.titleMedium)
@@ -230,6 +234,56 @@ private fun CustomColorPicker(current: String, onPick: (String) -> Unit) {
         Slider(
             value = sat, onValueChange = { sat = it }, valueRange = 0f..0.45f,
             onValueChangeFinished = { onPick(preview) },
+        )
+    }
+}
+
+@Composable
+private fun SecuritySection(container: AppContainer) {
+    val activity = androidx.compose.ui.platform.LocalContext.current as androidx.fragment.app.FragmentActivity
+    val hasScreenLock = remember { com.scanvault.android.ui.components.phoneHasScreenLock(activity) }
+    var timeout by remember { mutableStateOf(container.store.lockTimeoutMinutes) }
+    var allowHttp by remember { mutableStateOf(container.store.allowLanHttp) }
+    var pins by remember { mutableStateOf(container.store.certPins) }
+
+    Text("Security", style = MaterialTheme.typography.titleMedium)
+    if (!hasScreenLock) {
+        Text(
+            "This phone has no screen lock, so ScanVault can't lock itself. Set a PIN, pattern or " +
+                "fingerprint in the phone's settings to protect these records.",
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+    Text("Lock ScanVault after it's been in the background for", style = MaterialTheme.typography.bodyMedium)
+    val options = listOf(0 to "Immediately", 1 to "1 min", 5 to "5 min", 15 to "15 min")
+    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+        options.forEachIndexed { i, (minutes, label) ->
+            SegmentedButton(
+                selected = timeout == minutes,
+                onClick = { timeout = minutes; container.store.lockTimeoutMinutes = minutes },
+                shape = SegmentedButtonDefaults.itemShape(i, options.size),
+            ) { Text(label) }
+        }
+    }
+    ListItem(
+        headlineContent = { Text("Allow http on my local network") },
+        supportingContent = {
+            Text("Unencrypted, and only to home or VPN addresses. The vault key is never sent over http.")
+        },
+        trailingContent = {
+            Switch(checked = allowHttp, onCheckedChange = { allowHttp = it; container.store.allowLanHttp = it })
+        },
+    )
+    if (pins.isNotEmpty()) {
+        ListItem(
+            headlineContent = { Text("Trusted server certificates: ${pins.size}") },
+            supportingContent = { Text("Self-signed certificates you approved when signing in") },
+            trailingContent = {
+                androidx.compose.material3.TextButton(onClick = { container.store.clearPins(); pins = emptySet() }) {
+                    Text("Forget")
+                }
+            },
         )
     }
 }

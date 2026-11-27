@@ -1,6 +1,11 @@
 package com.scanvault.android.ui
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import com.scanvault.android.ui.components.LockScreen
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -36,11 +41,16 @@ fun ScanVaultNavHost(container: AppContainer) {
         }
     }
 
-    if (session == SessionState.Locked) {
+    val appLocked by container.appLock.locked.collectAsStateWithLifecycle()
+    val showLock = appLocked && session != SessionState.SignedOut
+
+    if (session == SessionState.Locked && !showLock) {
         UnlockDialog(container)
     }
 
+    Box(Modifier.fillMaxSize()) {
     NavHost(
+        modifier = if (showLock) Modifier.clearAndSetSemantics {} else Modifier,
         navController = nav,
         startDestination = startDestination,
     ) {
@@ -99,5 +109,7 @@ fun ScanVaultNavHost(container: AppContainer) {
                 onBack = { nav.popBackStack() },
             )
         }
+    }
+    if (showLock) LockScreen(container.appLock)
     }
 }

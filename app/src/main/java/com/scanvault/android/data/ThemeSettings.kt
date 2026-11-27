@@ -136,6 +136,11 @@ class ThemeStore(context: Context) {
         _settings.value = next
     }
 
+    /** True when the theme was changed while signed out, so sign-in should push it, not pull. */
+    var changedWhileSignedOut: Boolean
+        get() = prefs.getBoolean("dirty", false)
+        set(value) = prefs.putBoolean("dirty", value)
+
     fun update(transform: (ThemeSettings) -> ThemeSettings) {
         val next = transform(_settings.value)
         if (next == _settings.value) return

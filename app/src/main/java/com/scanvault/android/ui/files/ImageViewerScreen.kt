@@ -155,11 +155,19 @@ fun ImageViewerScreen(
         }
     }
 
-    val dicomRange: Double = dicom?.info?.let { i ->
-        if (i.min != null && i.max != null && i.max > i.min) i.max - i.min else null
-    } ?: ((ww ?: 400.0) * 2)
+    // Colour (RGB) DICOMs have no window/level; for them, offer the photo brightness/contrast instead.
+    val trueWl = isDicom && dicom?.info?.rgb != true
 
-    val colorFilter: ColorFilter? = if (isDicom) {
+    /** The image's value range, only if the server reported a sane one. */
+    val valueRange: Pair<Double, Double>? = dicom?.info?.let { i ->
+        val mn = i.min
+        val mx = i.max
+        if (mn != null && mx != null && mn.isFinite() && mx.isFinite() && mx > mn) mn to mx else null
+    }
+    val dicomRange: Double = valueRange?.let { it.second - it.first }
+        ?: ((ww ?: 400.0).takeIf { it.isFinite() && it > 0 } ?: 400.0) * 2
+
+    val colorFilter: ColorFilter? = if (trueWl) {
         val d = dicom
         val c = wc
         val w = ww
@@ -217,7 +225,7 @@ fun ImageViewerScreen(
                     },
                 )
             }
-            .pointerInput(windowLevelMode, isDicom) {
+            .pointerInput(windowLevelMode, trueWl) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
                     do {
@@ -229,7 +237,7 @@ fun ImageViewerScreen(
                                 val d = change.position - change.previousPosition
                                 val fx = d.x / size.width
                                 val fy = d.y / size.height
-                                if (isDicom) {
+                                if (trueWl) {
                                     val c = wc; val w = ww
                                     if (c != null && w != null) {
                                         val next = WindowLevel(c, w).dragged(fx, fy, dicomRange)
@@ -318,7 +326,7 @@ fun ImageViewerScreen(
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 val info = dicom?.info
-                if (isDicom && info != null) {
+                if (trueWl && info != null) {
                     WindowPresets(
                         isCt = info.modality.equals("CT", ignoreCase = true),
                         onDefault = ::defaultWindow,
@@ -326,12 +334,11 @@ fun ImageViewerScreen(
                     )
                 }
                 if (showSliders) {
-                    if (isDicom) {
+                    if (trueWl) {
                         val c = wc
                         val w = ww
-                        if (info != null && c != null && w != null) {
-                            val lo = info.min ?: (c - dicomRange)
-                            val hi = info.max ?: (c + dicomRange)
+                        if (info != null && c != null && w != null && c.isFinite() && w.isFinite()) {
+                            val (lo, hi) = valueRange ?: ((c - dicomRange) to (c + dicomRange))
                             LabeledSlider("Level", c.toFloat(), lo.toFloat()..hi.toFloat(), { wc = it.toDouble() }) {
                                 "${c.roundToInt()}"
                             }
@@ -377,7 +384,7 @@ fun ImageViewerScreen(
                     )
                     Row {
                         IconToggleButton(checked = showSliders, onCheckedChange = { showSliders = it }) {
-                            Icon(Icons.Default.Tune, if (isDicom) "Window and level" else "Brightness and contrast",
+                            Icon(Icons.Default.Tune, if (trueWl) "Window and level" else "Brightness and contrast",
                                 tint = if (showSliders) MaterialTheme.colorScheme.primary else Color.White)
                         }
                         IconToggleButton(checked = invert, onCheckedChange = { invert = it }) {
@@ -394,7 +401,7 @@ fun ImageViewerScreen(
                 }
                 val status = buildList {
                     add("${"%.1f".format(scale)}x")
-                    if (isDicom) {
+                    if (trueWl) {
                         val c = wc; val w = ww
                         if (c != null && w != null) {
                             val unit = if (info?.modality.equals("CT", ignoreCase = true)) " HU" else ""

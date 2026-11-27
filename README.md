@@ -6,7 +6,7 @@ imaging files and reports from imaging centers.
 
 ## What it does
 
-- Sign in to your ScanVault server (`https://…`, or `http://` on a trusted LAN/VPN).
+- Sign in to your ScanVault server (`https://…`; `http://` only on your own LAN, if you allow it).
 - Unlock the vault with its passphrase or recovery key when the server has restarted.
 - Browse and add patients; browse and add studies for each patient.
 - Upload to a study from the **camera** (report pages, CD covers) or the **file picker**
@@ -20,27 +20,42 @@ stores the vault passphrase or recovery key.
 
 ## Privacy on the device
 
-Everything the app writes to the phone is encrypted, with keys held in the Android Keystore
-(the StrongBox secure element when the phone has one). Key material never leaves secure hardware.
-
+- **App lock**: the app locks when it goes to the background (after 1 minute by default; choose
+  immediately, 1, 5 or 15 minutes in Settings) and opens again with your fingerprint, face or phone
+  PIN. The app warns when the phone has no screen lock. Screenshots, screen recording and the
+  recent-apps preview are blocked.
 - **Settings and sign-in** (server address, username, session token, appearance): every value is
-  AES-256-GCM encrypted before it reaches SharedPreferences.
+  AES-256-GCM encrypted with a Keystore key before it reaches SharedPreferences, and each value is
+  bound to its name so values cannot be swapped.
 - **Files** (reports opened in other apps, camera photos waiting to upload): stored in a chunked
-  AES-256-GCM format with a random key per file, wrapped by the Keystore. Every 64 KB chunk is
-  authenticated, so tampering, reordering and truncation are detected. Files have random names.
-- **Opening a report in another app** never writes a decrypted copy: the other app gets a seekable
-  file descriptor whose reads are decrypted on the fly, and the link dies with the app's process.
-- **Camera photos**: the system camera app can only write a plain file, so the app encrypts the
-  photo the moment the camera returns, deletes the plain copy, and uploads from the encrypted one.
-- Thumbnails and rendered DICOM frames are kept in memory only, never on disk.
-- The vault is wiped on every launch and on sign-out; app data is excluded from cloud backup and
-  device transfer. The vault passphrase and recovery key are never stored on the phone.
-- User-installed CA certificates are trusted, so a server with a private/home CA works once its
-  CA is installed on the phone.
+  AES-256-GCM format with a random data key per file. Data keys are generated in software and
+  wrapped by a Keystore key (StrongBox when the phone has one); on Android 9+ the Keystore keys can
+  only be used while the phone is unlocked. Every 64 KB chunk is authenticated and the header is
+  bound to every chunk, so tampering, reordering and truncation are detected.
+- **Opening a report in another app** never writes a decrypted copy: the other app gets a file
+  descriptor whose reads are decrypted on the fly. Shared copies are deleted after an hour, on
+  sign-out, and on the next launch.
+- **Camera photos**: the system camera app can only write a plain file, so the photo is plain on
+  the phone while the camera is open. The app encrypts it the moment the camera returns, deletes the
+  plain copy and uploads from the encrypted one. If the upload fails the photo stays, encrypted, in a
+  "waiting to upload" list on the study so you can retry or discard it.
+- Thumbnails and rendered DICOM frames are kept in memory only. App data is excluded from cloud
+  backup and device transfer. The vault passphrase and recovery key are never stored on the phone.
+
+## Network security
+
+- Servers must use **https**. A plain `http://` address works only if you turn on "Allow http on
+  my local network" and the server is on a private address (192.168.x, 10.x, 172.16–31.x,
+  100.64/10 VPN ranges, or `.local`-style LAN hosts resolving to them). The vault passphrase and
+  recovery key are never sent over http, even then.
+- Only the phone's system certificate authorities are trusted. For a server with a self-signed or
+  private-CA certificate, the app shows the certificate's SHA-256 fingerprint the first time and
+  remembers it once you approve it (Settings → Forget approved certificates resets this).
+- Redirects are not followed, and server replies are size-limited.
 
 ## Server API
 
-The app expects these endpoints (all JSON, `Authorization: Bearer <token>`, errors as `{"error": "…"}`):
+The app expects these endpoints (all JSON, `Authorization: Bearer <token>`, errors as `{"error": "…"}` or `{"detail": "…"}`):
 
 | Method | Path | Notes |
 | --- | --- | --- |
@@ -71,3 +86,8 @@ Requires JDK 17 and the Android SDK (API 35).
 
 Every push and pull request is built by GitHub Actions, and the debug APK is attached to the run
 as the `scanvault-debug-apk` artifact.
+
+The workflow also builds a minified release APK (`scanvault-release-apk`). It is signed when the
+repository has these Actions secrets: `SCANVAULT_KEYSTORE_BASE64` (base64 of the .jks file),
+`SCANVAULT_KEYSTORE_PASSWORD`, `SCANVAULT_KEY_ALIAS` and `SCANVAULT_KEY_PASSWORD`; otherwise the
+release APK is unsigned.

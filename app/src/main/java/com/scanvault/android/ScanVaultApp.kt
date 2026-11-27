@@ -13,7 +13,7 @@ class ScanVaultApp : Application(), ImageLoaderFactory {
         super.onCreate()
         container = AppContainer(this)
         // Decrypted copies opened in other apps are temporary; clear any left from a previous run.
-        container.clearSharedCache()
+        container.cleanUpOnLaunch()
     }
 
     override fun newImageLoader(): ImageLoader = container.imageLoader

@@ -80,6 +80,18 @@ class EncryptedFileFormatTest {
         expectIntegrityFailure(f)
     }
 
+    @Test fun headerLengthCannotBeZeroedToReadAsEmpty() {
+        val f = write(bytes(500))
+        RandomAccessFile(f, "rw").use { raf -> raf.seek(9); raf.writeLong(0) }
+        expectIntegrityFailure(f)
+    }
+
+    @Test fun headerChunkSizeIsAuthenticated() {
+        val f = write(bytes(3000))
+        RandomAccessFile(f, "rw").use { raf -> raf.seek(5); raf.writeInt(2048) }
+        expectIntegrityFailure(f)
+    }
+
     @Test fun chunksCannotBeSwappedBetweenFiles() {
         val a = write(bytes(2048), name = "a.sve")
         val b = write(bytes(2049), name = "b.sve")

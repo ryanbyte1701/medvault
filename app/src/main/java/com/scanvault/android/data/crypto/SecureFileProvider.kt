@@ -59,6 +59,7 @@ class SecureFileProvider : ContentProvider() {
         val vault = FileVault(ctx)
         val entry = vault.find(s.entryId) ?: throw FileNotFoundException("File is gone")
         val reader = vault.reader(entry)
+        openReaders.add(reader)
         val storage = ctx.getSystemService(StorageManager::class.java)
         return storage.openProxyFileDescriptor(
             ParcelFileDescriptor.MODE_READ_ONLY,
@@ -69,7 +70,10 @@ class SecureFileProvider : ContentProvider() {
                 } catch (e: Exception) {
                     throw ErrnoException("read", OsConstants.EIO)
                 }
-                override fun onRelease() = reader.close()
+                override fun onRelease() {
+                    openReaders.remove(reader)
+                    reader.close()
+                }
             },
             handler,
         )
@@ -81,6 +85,7 @@ class SecureFileProvider : ContentProvider() {
 
     companion object {
         private val shared = ConcurrentHashMap<String, Shared>()
+        private val openReaders: MutableSet<EncryptedFileFormat.Reader> = ConcurrentHashMap.newKeySet()
         private val handler: Handler by lazy {
             Handler(HandlerThread("secure-file-reads").apply { start() }.looper)
         }
@@ -95,6 +100,11 @@ class SecureFileProvider : ContentProvider() {
                 .appendPath(token).appendPath(displayName).build()
         }
 
-        fun revokeAll() = shared.clear()
+        /** Invalidates every link and closes descriptors other apps still hold (e.g. on sign-out). */
+        fun revokeAll() {
+            shared.clear()
+            openReaders.toList().forEach { runCatching { it.close() } }
+            openReaders.clear()
+        }
     }
 }

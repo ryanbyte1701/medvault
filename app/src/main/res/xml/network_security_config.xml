@@ -1,14 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
     <!--
-      ScanVault is self-hosted, so the server is often on a home network or VPN with a
-      private certificate authority. Trust user-installed CAs and allow http for LAN use;
-      the login screen warns when an http:// address is entered.
+      Only system CAs are trusted. Self-signed and private-CA servers are handled in the app by
+      showing the certificate fingerprint and pinning it once the user approves it.
+      Cleartext is allowed at this layer only so that the app's own network interceptor can make
+      the decision: http is refused unless the user turned on LAN http and the server resolves to
+      a private address, and secrets are never sent over http.
     -->
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
-            <certificates src="user" />
         </trust-anchors>
     </base-config>
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
 </network-security-config>
