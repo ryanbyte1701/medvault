@@ -251,6 +251,21 @@ def test_user_edits_are_what_is_sent(env):
     assert env.c.get("/api/ai/audit", headers=env.B).json()[0]["edited"] is True
 
 
+def test_activity_log_gets_metadata_not_content(env):
+    _enable(env)
+    pv = _prepare(env, kinds=("report",)).json()
+    assert env.c.post("/api/ai/send", json={"token": pv["token"], "confirm": True}, headers=env.B).status_code == 200
+    r = env.c.get("/api/activity", params={"action": "ai."}, headers=env.B)
+    assert r.status_code == 200, r.text
+    entries = r.json()["entries"]
+    acts = [x["action"] for x in entries]
+    assert "ai.explain" in acts and "ai.settings" in acts
+    ex = next(x for x in entries if x["action"] == "ai.explain")
+    assert ex["study_id"] == env.study["id"]
+    blob = json.dumps(entries)
+    assert "outcome" in blob and KEY not in blob and "FINDINGS" not in blob and "small tear" not in blob
+
+
 def test_unstripped_scan_and_translation(env):
     _enable(env)
     pv = _prepare(env, kinds=("report",), task="translate", language="Español", remove_identifiers=False).json()

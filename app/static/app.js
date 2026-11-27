@@ -145,6 +145,7 @@ const themeLabel = () => ({ system: "Theme: match device", light: "Theme: light"
 function cycleTheme() { const next = { system: "light", light: "dark", dark: "system" }[THEME.theme]; saveTheme({ theme: next }); $$("[data-theme-btn]").forEach(b => { b.innerHTML = themeIcon(); b.title = b.ariaLabel = themeLabel(); }); toast(themeLabel()); }
 document.body.insertAdjacentHTML("beforeend", `<svg width="0" height="0" style="position:absolute" aria-hidden="true"><filter id="svwl" color-interpolation-filters="sRGB"><feComponentTransfer><feFuncR type="linear" slope="1" intercept="0"/><feFuncG type="linear" slope="1" intercept="0"/><feFuncB type="linear" slope="1" intercept="0"/></feComponentTransfer></filter></svg>`);
 
+I.activity = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r="1"/><circle cx="3.5" cy="12" r="1"/><circle cx="3.5" cy="18" r="1"/></svg>';
 // ------------------------------------------------------------------ state + router
 const S = { status: null, patients: null, route: { name: "home" } };
 
@@ -205,13 +206,14 @@ function render() {
   if (!S.themeSynced) { S.themeSynced = true; syncTheme(); }
   if (st.recovery_key_saved === false && !sessionStorage.getItem("sv-rk-later")) return viewRecoveryNag();
   const r = S.route;
-  const view = { home: viewHome, patients: viewPatients, patient: viewPatient, study: viewStudy, backups: viewBackups, settings: viewSettings, upload: viewUploadPage, ...(window.SV_VIEWS || {}) }[r.name] || viewHome;
+  const view = { home: viewHome, patients: viewPatients, patient: viewPatient, study: viewStudy, backups: viewBackups, settings: viewSettings, upload: viewUploadPage, activity: viewActivity, ...(window.SV_VIEWS || {}) }[r.name] || viewHome;
   shell(r.name);
   view(r.id).catch(handleErr);
 }
 
 function shell(active) {
-  const nav = [["home", "Home", I.home], ["patients", "Patients", I.users], ["upload", "Upload", I.upload], ["labs", "Labs", I.flask], ["backups", "Backups", I.cloud], ["settings", "Settings", I.gear]];
+  const nav = [["home", "Home", I.home], ["patients", "Patients", I.users], ["upload", "Upload", I.upload], ["labs", "Labs", I.flask], ["backups", "Backups", I.cloud], ["activity", "Activity", I.activity], ["settings", "Settings", I.gear]];
+  const tabs = nav.filter(([n]) => n !== "activity"); // six fit the phone tab bar; Activity is reached from Settings there
   const on = n => (n === active || (n === "patients" && (active === "patient" || active === "study"))) ? "on" : "";
   app.innerHTML = `${API.demo ? '<div class="demo-banner">Interactive preview with sample patients. Nothing leaves your browser and nothing is stored.</div>' : ""}
   <div class="shell">
@@ -221,7 +223,7 @@ function shell(active) {
       <div class="foot"><span class="lockchip">${I.shield} Vault unlocked</span><span>Signed in as ${esc(S.status.username)}</span><button class="btn ghost sm themebtn" data-theme-btn title="${themeLabel()}" aria-label="${themeLabel()}">${themeIcon()}</button></div>
     </nav>
     <main id="main"><div class="empty"><span class="spin"></span></div></main>
-    <nav class="tabbar" aria-label="Main">${nav.map(([n, l, ic]) => `<a href="#/${n}" data-go="${n}" class="${on(n)}">${ic}<span>${l}</span></a>`).join("")}</nav>
+    <nav class="tabbar" aria-label="Main">${tabs.map(([n, l, ic]) => `<a href="#/${n}" data-go="${n}" class="${on(n)}">${ic}<span>${l}</span></a>`).join("")}</nav>
   </div>`;
 }
 const main = () => $("#main");
@@ -676,7 +678,7 @@ async function viewPatient(id) {
       ${p.date_of_birth ? `<span>Born <b>${esc(fmtDate(p.date_of_birth))}</b> (${age(p.date_of_birth)})</span>` : ""}${p.sex ? `<span>Sex <b>${esc(p.sex)}</b></span>` : ""}${p.mrn ? `<span>MRN <b>${esc(p.mrn)}</b></span>` : ""}
       <span><b>${p.study_count}</b> ${p.study_count === 1 ? "study" : "studies"}</span><span><b>${p.file_count}</b> ${p.file_count === 1 ? "file" : "files"}</span></div>
       ${p.notes ? `<p class="small muted" style="margin-top:8px;white-space:pre-wrap">${esc(p.notes)}</p>` : ""}</div>
-    <div class="row"><button class="btn" id="edit">Edit</button><a class="btn" href="#/labs/${esc(p.id)}" data-go="labs/${esc(p.id)}">${I.flask} Lab results</a><button class="btn primary" id="up">${I.upload} Upload</button></div></div>
+    <div class="row"><a class="btn" href="#/activity/patient:${esc(p.id)}" data-go="activity/patient:${esc(p.id)}">${I.activity} Activity</a><button class="btn" id="edit">Edit</button><a class="btn" href="#/labs/${esc(p.id)}" data-go="labs/${esc(p.id)}">${I.flask} Lab results</a><button class="btn primary" id="up">${I.upload} Upload</button></div></div>
   <div class="drop" id="drop">${I.upload}<div><b>Drop scans or reports here</b><div class="small muted">DICOM files or a whole CD/zip export, JPG/PNG photos of films, PDF reports. DICOM is grouped into studies automatically.</div></div>
     <div class="row" style="justify-content:center"><label tabindex="0" role="button" class="btn sm">Choose files<input type="file" id="fi" multiple hidden accept=".dcm,.dicom,.zip,image/*,application/pdf,application/dicom,application/zip,*/*"></label>
     <label tabindex="0" role="button" class="btn sm">${I.camera} Take photo<input type="file" id="cam" accept="image/*" capture="environment" hidden></label></div></div>
@@ -764,7 +766,7 @@ async function viewStudy(id) {
   m.innerHTML = `${mobileHead()}<div class="crumbs"><a href="#/patients" data-go="patients">Patients</a><span>/</span><a href="#/patient/${esc(p.id)}" data-go="patient/${esc(p.id)}">${esc(p.name)}</a><span>/</span><span>${esc(s.title)}</span></div>
   <div class="top"><div><h1>${esc(s.title)}</h1><p class="sub">${[s.study_date && fmtDate(s.study_date), s.modality, s.facility, s.referring_physician && "Ref. " + s.referring_physician, s.accession && "Acc. " + s.accession].filter(Boolean).map(esc).join(" · ")}</p>
     ${s.description ? `<p class="small" style="margin-top:8px;max-width:70ch">${esc(s.description)}</p>` : ""}</div>
-    <div class="row"><button class="btn" id="aibtn" style="display:none">${I.spark} Explain or translate</button><button class="btn" id="edit">Edit</button>${imgs.length ? `<button class="btn" id="cmp" title="Show next to another study of this patient">Compare</button>` : ""}<label tabindex="0" role="button" class="btn primary">${I.upload} Add files<input type="file" id="fi" multiple hidden></label></div></div>
+    <div class="row"><a class="btn" href="#/activity/study:${esc(s.id)}" data-go="activity/study:${esc(s.id)}">${I.activity} Activity</a><button class="btn" id="aibtn" style="display:none">${I.spark} Explain or translate</button><button class="btn" id="edit">Edit</button>${imgs.length ? `<button class="btn" id="cmp" title="Show next to another study of this patient">Compare</button>` : ""}<label tabindex="0" role="button" class="btn primary">${I.upload} Add files<input type="file" id="fi" multiple hidden></label></div></div>
   <div class="drop" id="drop" style="padding:16px">${I.upload}<div class="small"><b>Drop more files for this study</b></div></div>
   <div class="queue" id="queue"></div>
   ${reports.length ? `<div class="section-h"><h2>Reports</h2></div><div class="lightbox">${reports.map(tile).join("")}</div>` : ""}
@@ -1422,6 +1424,158 @@ async function restoreDialog({ file, targets }) {
 }
 
 // ------------------------------------------------------------------ settings
+// ------------------------------------------------------------------ activity log
+const ACT_ICON = { auth: I.key, vault: I.lock, patient: I.users, study: I.scan, file: I.file, backup: I.cloud, sso: I.shield, activity: I.activity, ai: I.info, lab: I.pdf };
+const CLIENT = { web: "Web", android: "Android app", api: "API", system: "ScanVault" };
+const DETAIL_LABELS = { method: "Method", reason: "Reason", attempted_username: "Username tried", provider: "Provider", email: "Account", filename: "File", previous_filename: "Was named",
+  filenames: "Files", files: "Files", bytes: "Size", duplicates: "Already in vault", skipped: "Skipped", how: "How", new_study: "New study", changed: "Changed fields", previous_name: "Was named",
+  studies: "Studies", target_name: "Destination", target_type: "Type", trigger: "Trigger", message: "Result", mode: "Mode", source: "Source", backup_created: "Backup from",
+  setting: "Setting", value: "Value", fingerprint: "New key fingerprint", format: "Format", entries: "Entries", problems: "Problems", from_study_title: "From study", idle_minutes: "Idle minutes",
+  signed_out: "Sessions signed out", patients: "Patients", model: "Model", path: "Where", lab: "Lab", results: "Results" };
+const HIDE_DETAILS = new Set(["report_id", "file_id", "file_ids", "target_id", "provider_id", "from_study_id", "app", "vault_id", "filters", "other_study_id"]);
+function actTarget(e) {
+  const d = e.details || {};
+  const bits = [e.patient_name, e.study_title];
+  if (d.filename) bits.push(d.filename);
+  else if (d.files != null && e.action === "file.upload") bits.push(`${d.files} file${d.files === 1 ? "" : "s"}${d.bytes ? " · " + fmtBytes(d.bytes) : ""}`);
+  if (d.target_name) bits.push(d.target_name);
+  if (d.provider) bits.push(d.provider);
+  if (e.action === "auth.login_failed" && d.attempted_username && !e.user_id) bits.push(`username "${d.attempted_username}"`);
+  return bits.filter(Boolean);
+}
+function actDetailRows(e) {
+  const rows = [];
+  for (const [k, v] of Object.entries(e.details || {})) {
+    if (HIDE_DETAILS.has(k) || v == null || v === "") continue;
+    let val = Array.isArray(v) ? v.join(", ") : typeof v === "boolean" ? (v ? "Yes" : "No") : k === "bytes" ? fmtBytes(v) : String(v);
+    if (k === "backup_created") val = fmtDT(v);
+    rows.push([DETAIL_LABELS[k] || k.replace(/_/g, " "), val]);
+  }
+  rows.push(["Device", [CLIENT[e.client] || e.client, e.ip].filter(Boolean).join(" · ") || "Unknown"]);
+  if (e.user_agent) rows.push(["Browser or app", e.user_agent]);
+  rows.push(["Entry", `#${e.seq} · ${e.signed ? "signed" : "not yet signed (written while locked)"}`]);
+  return rows;
+}
+function actRow(e) {
+  const failed = e.outcome && e.outcome !== "ok";
+  const tgt = actTarget(e);
+  return `<details class="card actrow ${failed ? "fail" : ""}"><summary>
+    <span class="aico">${ACT_ICON[e.category] || I.info}</span>
+    <span class="awhat"><span class="atitle"><b>${esc(e.label)}</b>${failed ? '<span class="badge err">Failed</span>' : ""}${e.readable ? "" : '<span class="badge warn">Unreadable</span>'}</span>
+      ${tgt.length ? `<span class="atgt">${tgt.map(esc).join(" · ")}</span>` : ""}</span>
+    <span class="awho"><span>${esc(e.username || "Unknown")}</span><span class="muted">${esc(new Date(e.at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }))}${e.client && e.client !== "web" ? " · " + esc(CLIENT[e.client] || e.client) : ""}</span></span>
+  </summary><dl class="adl">${actDetailRows(e).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}
+    ${e.patient_id && S.route.id !== "patient:" + e.patient_id ? `<dt></dt><dd><a href="#/activity/patient:${esc(e.patient_id)}" data-go="activity/patient:${esc(e.patient_id)}">All activity for this patient</a></dd>` : ""}</dl></details>`;
+}
+const dayLabel = d => { const t = new Date(d), n = new Date(); const y = new Date(n); y.setDate(n.getDate() - 1);
+  return t.toDateString() === n.toDateString() ? "Today" : t.toDateString() === y.toDateString() ? "Yesterday" : t.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" }); };
+
+async function viewActivity(id) {
+  const F = S.actFilters = { user_id: "", category: "", patient_id: "", study_id: "", since: "", until: "", q: "" };
+  if (id && id.startsWith("patient:")) F.patient_id = id.slice(8);
+  if (id && id.startsWith("study:")) F.study_id = id.slice(6);
+  const [opts, patients] = await Promise.all([API.req("GET", "/api/activity/filters"), S.patients ? Promise.resolve(S.patients) : API.req("GET", "/api/patients")]);
+  S.patients = patients;
+  const admin = S.status.role === "admin";
+  let study = null;
+  if (F.study_id) { try { study = await API.req("GET", `/api/studies/${F.study_id}`); F.patient_id = study.patient_id; } catch {} }
+  const m = main();
+  m.innerHTML = `${mobileHead()}<div class="top"><div><h1>Activity</h1><p class="sub">Who did what, and when. ${admin ? "Everyone's activity" : "Your activity"} in this vault, newest first.</p></div>
+    <div class="row">${admin ? `<button class="btn" id="verify">${I.shield} Check integrity</button>` : ""}<button class="btn" id="xcsv">${I.dl} Export CSV</button><button class="btn" id="xjson">${I.dl} JSON</button></div></div>
+  <div id="vres"></div>
+  <div class="card pad actfilters">
+    <label class="f">Person<select id="fu"><option value="">Everyone</option>${opts.users.map(u => `<option value="${esc(u.id)}">${esc(u.username)}</option>`).join("")}</select></label>
+    <label class="f">Type<select id="fc"><option value="">All activity</option>${opts.categories.map(c => `<option value="${esc(c.id)}.">${esc(c.label)}</option>`).join("")}
+      <optgroup label="Specific action">${opts.actions.map(a => `<option value="${esc(a.action)}">${esc(a.label)}</option>`).join("")}</optgroup></select></label>
+    <label class="f">Patient<select id="fp"><option value="">All patients</option>${patients.map(p => `<option value="${esc(p.id)}" ${p.id === F.patient_id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></label>
+    <label class="f">Study<select id="fs" ${F.patient_id ? "" : "disabled"}><option value="">All studies</option></select></label>
+    <label class="f">From<input type="date" id="fa"></label>
+    <label class="f">To<input type="date" id="fb"></label>
+    <label class="f wide">Search<input type="search" id="fq" placeholder="File name, destination, address, reason…"></label>
+    <div class="row wide"><button class="btn ghost sm" id="fclear">Clear filters</button><span class="muted small" id="fcount"></span></div>
+  </div>
+  <div id="alist"><div class="empty"><span class="spin"></span></div></div>
+  <div class="row" style="justify-content:center;margin-top:14px"><button class="btn" id="more" hidden>Load older activity</button></div>`;
+  if (!admin) $("#fu").closest("label").hidden = true;
+  const fillStudies = async () => {
+    const sel = $("#fs");
+    sel.disabled = !F.patient_id;
+    sel.innerHTML = '<option value="">All studies</option>';
+    if (!F.patient_id) return;
+    try {
+      const list = await API.req("GET", `/api/patients/${F.patient_id}/studies`);
+      sel.innerHTML += list.map(s => `<option value="${esc(s.id)}" ${s.id === F.study_id ? "selected" : ""}>${esc([s.study_date && fmtDate(s.study_date), s.title].filter(Boolean).join(" · "))}</option>`).join("");
+    } catch {}
+    // A deleted study can still be filtered on; show it by its id.
+    if (F.study_id && !sel.value) { sel.innerHTML += `<option value="${esc(F.study_id)}" selected>${esc(study?.title || "Deleted study")}</option>`; }
+  };
+  if (F.patient_id && !patients.some(p => p.id === F.patient_id)) $("#fp").innerHTML += `<option value="${esc(F.patient_id)}" selected>Deleted patient</option>`;
+  await fillStudies();
+  const params = () => {
+    const q = new URLSearchParams();
+    if (F.user_id) q.set("user_id", F.user_id);
+    if (F.category) q.set("action", F.category);
+    if (F.patient_id) q.set("patient_id", F.patient_id);
+    if (F.study_id) q.set("study_id", F.study_id);
+    // Dates mean the whole local day.
+    if (F.since) q.set("since", new Date(F.since + "T00:00:00").toISOString());
+    if (F.until) { const t = new Date(F.until + "T00:00:00"); t.setDate(t.getDate() + 1); q.set("until", t.toISOString()); }
+    if (F.q) q.set("q", F.q);
+    return q;
+  };
+  let next = null, shown = 0, lastDay = "", seqNo = 0;
+  const load = async (append) => {
+    const my = ++seqNo;
+    const q = params(); q.set("limit", "60"); if (append && next) q.set("before", next);
+    let r;
+    try { r = await API.req("GET", "/api/activity?" + q); } catch (e) { handleErr(e); return; }
+    if (my !== seqNo) return; // a newer filter change won
+    const list = $("#alist");
+    if (!append) { list.innerHTML = ""; shown = 0; lastDay = ""; }
+    let html = "";
+    for (const e of r.entries) {
+      const d = dayLabel(e.at);
+      if (d !== lastDay) { html += `<h3 class="aday">${esc(d)}</h3>`; lastDay = d; }
+      html += actRow(e);
+    }
+    list.insertAdjacentHTML("beforeend", html);
+    shown += r.entries.length;
+    next = r.next_before;
+    $("#more").hidden = !next;
+    if (!shown) list.innerHTML = `<div class="card empty">${I.activity}<h2>No activity found</h2><p>${Object.values(F).some(Boolean) ? "Nothing matches these filters." : "Activity appears here as people use the vault."}</p></div>`;
+    $("#fcount").textContent = shown ? `${shown}${next ? "+" : ""} entr${shown === 1 ? "y" : "ies"}` : "";
+  };
+  let qt;
+  const bind = (sel, key, ev = "change") => $(sel).addEventListener(ev, async e => {
+    F[key] = e.target.value;
+    if (key === "patient_id") { F.study_id = ""; await fillStudies(); }
+    if (ev === "input") { clearTimeout(qt); qt = setTimeout(() => load(false), 300); } else load(false);
+  });
+  bind("#fu", "user_id"); bind("#fc", "category"); bind("#fp", "patient_id"); bind("#fs", "study_id"); bind("#fa", "since"); bind("#fb", "until"); bind("#fq", "q", "input");
+  $("#fclear").onclick = () => go("activity");
+  $("#more").onclick = () => load(true);
+  const exportAs = fmt => {
+    if (API.demo) return toast("Downloads are off in this preview.");
+    const q = params(); q.set("format", fmt);
+    const a = document.createElement("a"); a.href = "/api/activity/export?" + q; a.download = ""; document.body.appendChild(a); a.click(); a.remove();
+  };
+  $("#xcsv").onclick = () => exportAs("csv");
+  $("#xjson").onclick = () => exportAs("json");
+  const vb = $("#verify");
+  if (vb) vb.onclick = async () => {
+    vb.disabled = true;
+    try {
+      const v = await API.req("GET", "/api/activity/verify");
+      $("#vres").innerHTML = v.ok
+        ? `<div class="note info" style="margin-bottom:16px">${I.check}<div><b>The activity log is intact.</b> All ${v.entries.toLocaleString()} entries link up and their signatures check out${v.unsigned_tail ? `, except the newest ${v.unsigned_tail}, written while the vault was locked, which are signed on the next unlock` : ""}.</div></div>`
+        : `<div class="note" style="margin-bottom:16px;background:var(--red-soft)">${I.warn}<div><b>The activity log has been changed outside ScanVault.</b><ul class="small" style="margin:6px 0 0;padding-left:18px">${v.problems.map(p => `<li>${esc(p)}</li>`).join("")}</ul></div></div>`;
+      load(false);
+    } catch (e) { handleErr(e); }
+    vb.disabled = false;
+  };
+  load(false);
+}
+
 async function viewSettings() {
   const st = S.status = await API.req("GET", "/api/status");
   const m = main();
@@ -1434,6 +1588,9 @@ async function viewSettings() {
         <div class="swatches" role="radiogroup" aria-label="Dark theme color">${DARK_SWATCHES.map(([n, c]) => `<button type="button" class="sw ${THEME.dark_color === c ? "on" : ""}" data-c="${c}" role="radio" aria-checked="${THEME.dark_color === c}" title="${n}"><i style="background:${c}"></i><span>${n}</span></button>`).join("")}
           <label class="sw ${DARK_SWATCHES.some(([, c]) => c === THEME.dark_color) ? "" : "on"}" title="Custom"><input type="color" id="cc" value="${esc(THEME.dark_color)}"><span>Custom</span></label></div>
         <p class="small muted" style="margin-top:8px">Very bright picks are darkened so text stays readable. Saved to your account, so it follows you to other devices.</p></div></div>
+    <div class="card pad stack"><h2>Activity log</h2>
+      <p class="small muted">Every sign-in, upload, edit, delete, view, download, backup and key change, with who did it and when. Encrypted and tamper-evident.</p>
+      <div class="row"><a class="btn" href="#/activity" data-go="activity">${I.activity} Open activity log</a></div></div>
     <div class="card pad stack"><h2>Encryption</h2>
       <div class="facts"><span>Vault <b class="mono">${esc(st.vault_id)}</b></span><span>Key fingerprint <b class="mono">${esc(st.fingerprint)}</b></span></div>
       <p class="small muted">AES-256-GCM for every file, preview and patient record. Your encryption key is stretched with scrypt and only unlocks the master key, which lives in memory while the vault is unlocked.</p>

@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from . import crypto
+from .audit import SCHEMA as AUDIT_SCHEMA
 
 DATA_DIR = Path(os.environ.get("SCANVAULT_DATA", "/data"))
 
@@ -60,7 +61,7 @@ CREATE TABLE IF NOT EXISTS lab_results (
 CREATE INDEX IF NOT EXISTS lab_reports_patient ON lab_reports(patient_id);
 CREATE INDEX IF NOT EXISTS lab_results_patient ON lab_results(patient_id);
 CREATE INDEX IF NOT EXISTS lab_results_report ON lab_results(report_id);
-"""
+""" + AUDIT_SCHEMA
 
 
 class Store:

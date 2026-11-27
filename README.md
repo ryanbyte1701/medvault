@@ -49,6 +49,11 @@ a USB disk.
 - **Your key**: you set the encryption key at first run and download a
   **recovery key file** for emergency restore. `tools/restore.py` decrypts
   any backup into plain folders without ScanVault running at all.
+- **Activity log**: who did what and when (sign-ins and failed attempts,
+  uploads, edits, deletes, views, downloads, backups, restores, key and
+  sign-in setting changes), filterable by person, patient, study, type and
+  date, exportable as CSV or JSON. Encrypted, tamper-evident, and part of
+  every backup.
 
 ## Screenshots
 
@@ -484,6 +489,24 @@ restore turned on.
   configure. A covered entity needs a BAA with that provider first; see
   [AI explanations](#ai-explanations-optional).
 
+### Activity log
+
+Each entry's details (names, file names, address, browser) are encrypted to
+the log's own X25519 public key, so sign-ins and failed attempts are recorded
+even while the vault is locked; the private key is sealed with the master key,
+so reading the log needs the vault unlocked. Only the time, action name and
+the random user, patient and study ids stay in the clear, like the ids the
+other tables already keep. Entries form a SHA-256 hash chain, and while the
+vault is unlocked each new entry (and, at unlock, the newest entry written
+while locked) is signed with an HMAC key that is also sealed with the master
+key. **Activity > Check integrity** walks the chain and reports edited,
+reordered, missing or truncated entries. Views are recorded at most once per
+person and item per 15 minutes; DICOM slice rendering and thumbnails are not
+logged. Administrators see everyone's activity; other accounts see their own.
+Restoring over a running vault keeps the local log and adds a restore entry;
+a fresh-install restore brings back the backup's log. `tools/restore.py`
+writes the decrypted log to `activity-log.json`.
+
 ## API (for the Android app and scripts)
 
 Interactive docs: set `SCANVAULT_API_DOCS=1`, then `http://localhost:8080/api/docs`.
@@ -500,6 +523,15 @@ reads keep working until the re-encryption itself starts. One upload request
 takes at most 500 files.
 A locked vault returns **423** `{code: "locked"}`; unlock with
 `POST /api/vault/unlock {passphrase}`.
+
+**Activity log.** `GET /api/activity` returns `{entries, next_before}`,
+newest first, with filters `user_id`, `patient_id`, `study_id`, `action` (a
+name like `file.download`, a prefix like `file.`, or several, comma
+separated), `q` (text search), `since`, `until` (dates or ISO times), `limit`
+and `before` (paging). `GET /api/activity/filters` lists people and actions,
+`GET /api/activity/export?format=csv|json` downloads it (same filters), and
+`GET /api/activity/verify` checks the chain (administrators). Send a
+`User-Agent` starting with `ScanVault-Android` so entries show the app.
 
 **SSO from an app.** `GET /api/status` lists `sso: [{id, name, preset}]` and
 `local_login`. To sign in with a provider:
