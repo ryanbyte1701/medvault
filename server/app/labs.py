@@ -497,6 +497,30 @@ def _point(d: dict) -> dict:
     return {k: d.get(k) for k in ("id", "report_id", "date", "value", "value_num", "comparator", "unit", "ref_low", "ref_high", "ref_text", "flag", "source", "lab_name", "name")}
 
 
+@router.get("/api/labs/recent")
+def recent_reports(request: Request, limit: int = 6):
+    """Saved lab reports across all patients, newest collection date first, for
+    the home page. Each carries its patient's name and up to four flagged tests."""
+    master = M.data_access(request)
+    limit = max(1, min(int(limit), 50))
+    c = M.store.conn()
+    rows = c.execute("SELECT * FROM lab_reports WHERE status='saved'").fetchall()
+    reps = sorted(((r, _report_blob(r, master)) for r in rows), key=lambda x: (x[1].get("collected") or "", x[0]["updated_at"]), reverse=True)
+    names: dict = {}
+    out = []
+    for r, _d in reps[:limit]:
+        results = _results_for(r["id"], master)
+        o = _report_out(r, master, results)
+        pid = r["patient_id"]
+        if pid not in names:
+            p = c.execute("SELECT blob FROM patients WHERE id=?", (pid,)).fetchone()
+            names[pid] = M.unseal(master, p["blob"], f"patient:{pid}").get("name") if p else None
+        o["patient_name"] = names[pid]
+        o["flagged"] = [{"name": x.get("name"), "flag": x.get("flag")} for x in results if x.get("flag") and x.get("source") != "previous"][:4]
+        out.append(o)
+    return out
+
+
 @router.get("/api/patients/{pid}/labs/analytes")
 def list_analytes(pid: str, request: Request):
     master = M.data_access(request)

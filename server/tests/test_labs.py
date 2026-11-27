@@ -303,3 +303,24 @@ def test_patient_record_counts_scans_and_labs(vault):
     assert c.put(f"/api/labs/reports/{d['id']}", json={"save": True}, headers=B).status_code == 200
     listed = {x["id"]: x for x in c.get("/api/patients", headers=B).json()}[p["id"]]
     assert (listed["scan_count"], listed["lab_report_count"], listed["lab_draft_count"]) == (1, 1, 0)
+
+
+def test_recent_lab_reports_for_home(vault):
+    c, B, _ = vault
+    p = _patient(c, B)
+    assert c.get("/api/labs/recent", headers=B).json() == []
+    d = _upload(c, B, p["id"], lab_samples.labcorp())
+    # drafts are not listed until saved
+    assert c.get("/api/labs/recent", headers=B).json() == []
+    assert c.put(f"/api/labs/reports/{d['id']}", json={"save": True}, headers=B).status_code == 200
+    d2 = _upload(c, B, p["id"], lab_samples.sonora_quest())
+    assert c.put(f"/api/labs/reports/{d2['id']}", json={"save": True}, headers=B).status_code == 200
+    rec = c.get("/api/labs/recent?limit=5", headers=B).json()
+    assert [r["collected"] for r in rec] == ["2026-06-09", "2026-03-14"]
+    assert rec[0]["patient_name"] == "Jane Doe" and rec[0]["patient_id"] == p["id"]
+    assert rec[0]["flagged_count"] >= len(rec[0]["flagged"]) > 0 and len(rec[0]["flagged"]) <= 4
+    assert all(f["flag"] and f["name"] for f in rec[0]["flagged"])
+    assert len(c.get("/api/labs/recent?limit=1", headers=B).json()) == 1
+    assert c.get("/api/stats", headers=B).json()["lab_reports"] == 2
+    pt = c.get(f"/api/patients/{p['id']}", headers=B).json()
+    assert pt["scan_count"] == 0 and pt["last_scan_date"] is None and pt["lab_report_count"] == 2

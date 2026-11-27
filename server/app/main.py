@@ -1259,7 +1259,7 @@ def _patient_out(row, master: bytes, counts: dict | None = None) -> dict:
 
 
 def _empty_counts() -> dict:
-    return {"study_count": 0, "scan_count": 0, "file_count": 0, "last_study_date": None, "lab_report_count": 0, "lab_draft_count": 0}
+    return {"study_count": 0, "scan_count": 0, "file_count": 0, "last_study_date": None, "last_scan_date": None, "lab_report_count": 0, "lab_draft_count": 0}
 
 
 # Modality of the study a lab report's PDF is filed in (see labs.py).
@@ -1299,6 +1299,8 @@ def _patient_counts(master: bytes) -> dict:
         # Lab report PDFs are filed in a "LAB" study; they show under Labs, not Scans.
         if d.get("modality") != LAB_MODALITY:
             e["scan_count"] += 1
+            if sd and (not e["last_scan_date"] or sd > e["last_scan_date"]):
+                e["last_scan_date"] = sd
         if sd and (not e["last_study_date"] or sd > e["last_study_date"]):
             e["last_study_date"] = sd
     for r in c.execute("SELECT patient_id, status, COUNT(*) n FROM lab_reports GROUP BY patient_id, status"):
@@ -2410,6 +2412,7 @@ def _counts() -> dict:
         "studies": c.execute("SELECT COUNT(*) FROM studies").fetchone()[0],
         "files": c.execute("SELECT COUNT(*) FROM files").fetchone()[0],
         "bytes": c.execute("SELECT COALESCE(SUM(size),0) FROM files").fetchone()[0],
+        "lab_reports": c.execute("SELECT COUNT(*) FROM lab_reports WHERE status='saved'").fetchone()[0],
     }
 
 
