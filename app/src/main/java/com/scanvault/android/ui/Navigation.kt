@@ -23,6 +23,7 @@ import com.scanvault.android.ui.login.LoginScreen
 import com.scanvault.android.ui.patients.PatientDetailScreen
 import com.scanvault.android.ui.patients.PatientsScreen
 import com.scanvault.android.ui.settings.SettingsScreen
+import com.scanvault.android.ui.studies.AiExplainScreen
 import com.scanvault.android.ui.studies.StudyScreen
 
 // Navigation decodes path arguments itself, so only encode here.
@@ -106,7 +107,14 @@ fun ScanVaultNavHost(container: AppContainer) {
                 onOpenImage = { fileId, name, isDicom ->
                     nav.navigate("image/${enc(fileId)}/${enc(name)}?dicom=$isDicom")
                 },
+                onExplain = { nav.navigate("ai/${enc(id)}") },
             )
+        }
+        composable(
+            "ai/{id}",
+            arguments = listOf(navArgument("id") { type = NavType.StringType }),
+        ) { entry ->
+            AiExplainScreen(container, entry.arguments!!.getString("id")!!, onBack = { nav.popBackStack() })
         }
         composable(
             "image/{id}/{name}?dicom={dicom}",

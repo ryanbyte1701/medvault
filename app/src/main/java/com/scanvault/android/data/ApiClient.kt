@@ -216,6 +216,21 @@ class ApiClient(
         }
     }
 
+    // --- AI explanations (optional) -------------------------------------------------------
+
+    /** The server's AI settings. 404 when the server has AI turned off or predates it. */
+    suspend fun aiSettings(): AiSettings = get("api/ai/settings", AiSettings.serializer())
+
+    /** Builds the exact payload on the server for review. Sends nothing to the AI provider. */
+    suspend fun aiPrepare(request: AiPrepareRequest): AiPreview =
+        send("POST", "api/ai/prepare", jsonBody(request, AiPrepareRequest.serializer()), AiPreview.serializer(),
+            client = slowHttp)
+
+    /** Sends a reviewed payload (single-use token). The answer can take a few minutes. */
+    suspend fun aiSend(request: AiSendRequest): AiResult =
+        send("POST", "api/ai/send", jsonBody(request, AiSendRequest.serializer()), AiResult.serializer(),
+            client = slowHttp)
+
     // --- Plumbing ------------------------------------------------------------------------
 
     private fun seg(id: String): String = java.net.URLEncoder.encode(id, "UTF-8").replace("+", "%20")

@@ -44,6 +44,12 @@ patient data. They are rendered by the screenshot tests described under [Buildin
 - Import DICOM files or a zipped imaging-CD export into a patient; the server groups them into studies.
 - View images full-screen with pinch-zoom; open PDFs and other files in another app.
 - Delete patients, studies and files (long-press a file).
+- **Explain or translate with AI** (when the server has it turned on): a plain-language,
+  non-medical explanation or a translation of a study's report and chosen images. The server
+  prepares the exact payload, with names, IDs and dates removed by default, and the app shows it
+  (text, images and where it will go) before anything is sent; nothing goes out until you tick
+  "Send this" and tap Send. The AI provider's API key is set up in the web app and never reaches
+  the phone. Answers carry a "not medical advice" notice; Copy marks the clipboard as sensitive.
 
 Encryption and the Google Drive / Box / SFTP backups all happen on the server. The phone never
 stores the vault passphrase or recovery key.

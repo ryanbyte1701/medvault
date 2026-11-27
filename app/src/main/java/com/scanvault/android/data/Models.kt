@@ -143,3 +143,85 @@ class RenderedImage(
     val rgb: Boolean,
     val modality: String?,
 )
+
+// --- Optional AI explanations (configured on the server; the API key never reaches the phone) ---
+
+@Serializable
+data class AiSettings(
+    val enabled: Boolean = false,
+    val provider: String = "anthropic",
+    val model: String = "",
+    /** Host the requests go to, for example api.anthropic.com or 192.168.1.20:11434. */
+    val endpoint: String = "",
+    @SerialName("key_set") val keySet: Boolean = false,
+    @SerialName("default_language") val defaultLanguage: String = "English",
+    val providers: Map<String, String> = emptyMap(),
+    @SerialName("max_images") val maxImages: Int = 6,
+    val disclaimer: String = "",
+) {
+    val providerName: String get() = providers[provider] ?: provider
+}
+
+@Serializable
+data class AiPrepareRequest(
+    @SerialName("study_id") val studyId: String,
+    @SerialName("file_ids") val fileIds: List<String>,
+    val task: String,
+    val language: String,
+    // No defaults: the app's Json doesn't encode default values, and these must always be sent.
+    @SerialName("remove_identifiers") val removeIdentifiers: Boolean,
+    val question: String,
+)
+
+@Serializable
+data class AiPreviewImage(
+    val label: String,
+    val width: Int = 0,
+    val height: Int = 0,
+    /** data:image/jpeg;base64,... : exactly the bytes that will be sent. */
+    @SerialName("data_url") val dataUrl: String,
+)
+
+@Serializable
+data class AiPreviewPdf(val label: String, @SerialName("size_bytes") val sizeBytes: Long = 0)
+
+/** What the server will send, for the user to review. Nothing has been sent yet. */
+@Serializable
+data class AiPreview(
+    val token: String,
+    @SerialName("expires_in") val expiresIn: Int = 900,
+    val provider: String = "",
+    val model: String = "",
+    val endpoint: String = "",
+    val task: String = "explain",
+    val language: String = "English",
+    @SerialName("remove_identifiers") val removeIdentifiers: Boolean = true,
+    val removed: Map<String, Int> = emptyMap(),
+    val warnings: List<String> = emptyList(),
+    val context: String = "",
+    val text: String = "",
+    val question: String = "",
+    val images: List<AiPreviewImage> = emptyList(),
+    val pdfs: List<AiPreviewPdf> = emptyList(),
+    val instructions: String = "",
+    val disclaimer: String = "",
+)
+
+@Serializable
+data class AiSendRequest(
+    val token: String,
+    /** The reviewed (possibly edited) report text; null keeps the server's version. */
+    val text: String?,
+    /** The user ticked "send this"; the server refuses without it. No default, so it's always encoded. */
+    val confirm: Boolean,
+)
+
+@Serializable
+data class AiResult(
+    val text: String,
+    val model: String = "",
+    val task: String = "explain",
+    val language: String = "English",
+    val disclaimer: String = "",
+    val truncated: Boolean = false,
+)
