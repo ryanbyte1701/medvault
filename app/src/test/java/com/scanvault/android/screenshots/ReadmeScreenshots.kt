@@ -84,7 +84,7 @@ class ReadmeScreenshots {
         c.onSignedIn(url, "ryan", "sample-token", unlocked = true)
         c.appLock.unlock()
         // Robolectric can't draw hardware bitmaps, so thumbnails need software ones.
-        coil.Coil.setImageLoader(c.imageLoader.newBuilder().allowHardware(false).build())
+        coil.Coil.setImageLoader(c.imageLoader.newBuilder().allowHardware(false).logger(coil.util.DebugLogger()).build())
         scenario = ActivityScenario.launch(MainActivity::class.java)
         settle()
     }

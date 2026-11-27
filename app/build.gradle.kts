@@ -63,6 +63,7 @@ tasks.withType<Test>().configureEach {
         systemProperty("roborazzi.test.record", "true")
         systemProperty("scanvault.screenshots.dir", layout.buildDirectory.dir("screenshots").get().asFile.absolutePath)
         maxHeapSize = "4g"
+        testLogging.showStandardStreams = true
     } else {
         exclude("**/screenshots/**")
     }

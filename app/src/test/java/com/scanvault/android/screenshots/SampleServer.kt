@@ -38,6 +38,7 @@ class SampleServer {
 
     private fun route(req: RecordedRequest): MockResponse {
         val path = req.requestUrl!!.encodedPath
+        println("sample-server: ${req.method} $path")
         val parts = path.trim('/').split('/')
         return when {
             path == "/api/status" -> json(
