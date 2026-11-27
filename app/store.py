@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from . import crypto
+from .audit import SCHEMA as AUDIT_SCHEMA
 
 DATA_DIR = Path(os.environ.get("SCANVAULT_DATA", "/data"))
 
@@ -45,7 +46,7 @@ CREATE TABLE IF NOT EXISTS user_identities (
   id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   provider_id TEXT NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, email TEXT,
   created_at REAL NOT NULL, last_login REAL, UNIQUE(issuer, subject));
-"""
+""" + AUDIT_SCHEMA
 
 
 class Store:

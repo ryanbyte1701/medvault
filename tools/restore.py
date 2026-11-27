@@ -11,6 +11,7 @@ works for backups made with "passphrase restore" turned on in Settings.
 Output:
     restored/
       patients.json                 # every patient, study and file record
+      activity-log.json             # who did what and when (decrypted)
       Jane Doe (1980-04-02)/
         2026-03-14 MR Knee - Lakeside Imaging/
           report.pdf
@@ -31,7 +32,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from app import backup, crypto  # noqa: E402
+from app import audit, backup, crypto  # noqa: E402
 
 
 def safe(name: str) -> str:
@@ -140,6 +141,7 @@ def export(mk: bytes, work: Path, out: Path) -> int:
                     n += 1
                 prec["studies"].append(srec)
             index.append(prec)
+        export_activity(mk, db, out)
     finally:
         db.close()
         (out / "patients.json").write_text(json.dumps(index, indent=2))
@@ -150,6 +152,35 @@ def export(mk: bytes, work: Path, out: Path) -> int:
             print("  " + line, file=sys.stderr)
         return 1
     return 0
+
+
+def export_activity(mk: bytes, db: sqlite3.Connection, out: Path) -> None:
+    """Decrypt the activity log (if the backup has one) into activity-log.json."""
+    try:
+        cfg = db.execute("SELECT value FROM config WHERE key=?", (audit.KEYS_CFG,)).fetchone()
+        rows = db.execute("SELECT * FROM audit_log ORDER BY seq").fetchall()
+    except sqlite3.OperationalError:
+        return  # made before the activity log existed
+    if not cfg or not rows:
+        return
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+    keys = crypto.open_json(mk, audit._unb64(json.loads(cfg[0])["sealed"]), "audit-keys")
+    priv = X25519PrivateKey.from_private_bytes(audit._unb64(keys["priv"]))
+    entries, prev, broken = [], audit.GENESIS, []
+    for r in rows:
+        try:
+            d = audit.decrypt_details(priv, r["blob"], r["seq"])
+        except crypto.CryptoError:
+            d = None
+        h = audit.chain_hash(r["prev"], r["seq"], r["ts"], r["action"], r["user_id"], r["patient_id"], r["study_id"], r["blob"])
+        if r["prev"] != prev or h != r["hash"]:
+            broken.append(r["seq"])
+        prev = r["hash"]
+        entries.append({"seq": r["seq"], "at": r["ts"], "action": r["action"], "label": audit.label(r["action"]), "user_id": r["user_id"],
+                        "patient_id": r["patient_id"], "study_id": r["study_id"], "details": d, "hash": r["hash"]})
+    (out / "activity-log.json").write_text(json.dumps({"chain_ok": not broken, "broken_at": broken[:50], "entries": entries}, indent=2))
+    print(f"Wrote {len(entries)} activity log entries" + (f" ({len(broken)} fail the hash chain check)" if broken else ""))
 
 
 if __name__ == "__main__":

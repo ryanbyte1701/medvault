@@ -386,3 +386,29 @@ code{overflow-wrap:anywhere;word-break:break-word}
 @media (max-width:820px),(max-height:500px){.auth .art svg.hero{display:none}.auth .art{padding:16px 20px;gap:8px}.auth .art h1{font-size:22px}}
 .check .hint{display:block;font-weight:400;color:var(--muted);font-size:13px;margin-top:2px}
 .hint{overflow-wrap:anywhere}
+
+/* ---------- activity log */
+.actfilters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px 12px;margin-bottom:18px;padding:14px 16px}
+.actfilters .f{margin:0}
+.actfilters .wide{grid-column:span 2}
+.actfilters .row{align-items:end;gap:12px}
+@media (max-width:900px){.actfilters{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.actfilters{grid-template-columns:minmax(0,1fr)}.actfilters .wide{grid-column:auto}}
+.aday{font-size:14px;color:var(--muted);font-weight:650;margin:18px 2px 8px;text-transform:none}
+.aday:first-child{margin-top:0}
+.actrow{margin-bottom:6px;box-shadow:none}
+.actrow summary{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px 14px;cursor:pointer;list-style:none;min-height:52px}
+.actrow summary::-webkit-details-marker{display:none}
+.actrow summary:hover{background:color-mix(in srgb,var(--teal-soft) 50%,transparent);border-radius:var(--r)}
+.actrow .aico{display:grid;place-items:center;width:32px;height:32px;border-radius:9px;background:var(--teal-soft);color:var(--teal)}
+.actrow .aico svg{width:17px;height:17px}
+.actrow.fail .aico{background:var(--red-soft);color:var(--red)}
+.actrow .awhat{display:grid;gap:1px}
+.actrow .atgt{font-size:14px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.actrow .awho{display:grid;justify-items:end;font-size:14px;text-align:right}
+.adl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 14px;margin:0;padding:4px 14px 14px 58px;font-size:14px}
+.adl dt{color:var(--muted)}
+.adl dd{margin:0;overflow-wrap:anywhere}
+@media (max-width:600px){.actrow summary{grid-template-columns:auto minmax(0,1fr)}.actrow .awho{grid-column:2;justify-items:start;text-align:left;display:flex;gap:8px}.adl{padding-left:14px;grid-template-columns:minmax(0,1fr)}.adl dt{margin-top:6px}}
+.actrow .atitle{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+@media (max-width:520px){.actfilters{grid-template-columns:repeat(2,minmax(0,1fr))}.actfilters label:nth-child(-n+4),.actfilters .wide{grid-column:1/-1}}
