@@ -1,5 +1,8 @@
 package com.scanvault.android.ui.components
 
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -86,8 +89,8 @@ fun UnlockDialog(container: AppContainer) {
                     trailingIcon = {
                         androidx.compose.material3.IconButton(onClick = { reveal = !reveal }) {
                             androidx.compose.material3.Icon(
-                                if (reveal) androidx.compose.material.icons.Icons.Default.VisibilityOff
-                                else androidx.compose.material.icons.Icons.Default.Visibility,
+                                if (reveal) Icons.Default.VisibilityOff
+                                else Icons.Default.Visibility,
                                 contentDescription = if (reveal) "Hide" else "Show",
                             )
                         }
