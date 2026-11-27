@@ -548,21 +548,26 @@ I.slice = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-wid
 I.us = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4 4.5 17.5a14 14 0 0 0 15 0z"/><path d="M8.5 14.5a6 6 0 0 0 7 0M12 4v3"/></svg>';
 I.ecg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h4l2-5 4 10 2-5h8"/></svg>';
 I.frame = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><path d="M12 9v6M9 12h6"/></svg>';
+I.disk = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5.5" rx="8" ry="2.5"/><path d="M4 5.5v13c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5v-13M4 12c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5"/></svg>';
 I.pulse = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5-6 4 12 2.5-6h5"/></svg>';
 I.note = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v5h1"/></svg>';
 const modInfo = m => MOD[(m || "").toUpperCase()] || [m || "Imaging", "image"];
 const modIcon = m => ({ slice: I.slice, us: I.us, ecg: I.ecg })[modInfo(m)[1]] || I.frame;
 const FLAG_WORD = { H: "high", HH: "critical high", L: "low", LL: "critical low", A: "abnormal", C: "critical" };
 
+const upFor = sec => { const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60); return d ? `${d} day${d === 1 ? "" : "s"}${h ? ` ${h} h` : ""}` : h ? `${h} h ${m} min` : `${m} min`; };
+
 async function viewHome() {
-  const [list, stats, recent, tg, labs] = await Promise.all([
+  const [list, stats, recent, tg, labs, sys, act] = await Promise.all([
     API.req("GET", "/api/patients"), API.req("GET", "/api/stats"), API.req("GET", "/api/studies/recent?limit=12"), API.req("GET", "/api/backups/targets"),
-    API.req("GET", "/api/labs/recent?limit=50").catch(() => [])]);
+    API.req("GET", "/api/labs/recent?limit=50").catch(() => []), API.req("GET", "/api/system").catch(() => null),
+    API.req("GET", "/api/activity?limit=6").then(r => (r.entries || []).slice(0, 6)).catch(() => null)]);
   S.patients = list;
   const st = S.status, m = main(), bh = backupHealth(tg, stats);
   const keyOk = st.recovery_key_saved !== false;
   const imaging = list.reduce((n, p) => n + (p.scan_count ?? p.study_count ?? 0), 0);
   const labCount = stats.lab_reports ?? labs.length;
+  const drafts = list.filter(p => p.lab_draft_count);
   const steps = [
     [list.length > 0, "Add a patient", "One record per person: you, a child, a parent.", "addp"],
     [stats.files > 0, "Upload a scan, lab or report", "DICOM, a CD/zip export, lab PDFs, photos of paper reports.", "upl"],
@@ -572,6 +577,37 @@ async function viewHome() {
   const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
   const latestLab = {};
   labs.forEach(r => { if (!latestLab[r.patient_id]) latestLab[r.patient_id] = r; });
+
+  // ---- system status tiles
+  const disk = sys && sys.disk, freePct = disk ? disk.free / disk.total : null, diskLow = freePct != null && (freePct < .1 || disk.free < 5e9);
+  const secure = sys ? sys.secure : st.secure;
+  const tile = (cls, t, label, value, detail, action = "", extra = "") => `<div class="card stile ${cls}">${tone(t)}<div class="hc-body"><span class="hc-l">${label}</span><b>${value}</b><span class="small muted">${detail}</span>${extra}</div>${action}</div>`;
+  const tiles = [
+    tile("st-server", secure ? "ok" : "warn", `${I.pulse}Server`, sys ? "Online" : "Online",
+      sys ? [`v${esc(sys.version)}`, `up ${esc(upFor(sys.uptime_seconds))}`, sys.docker ? "Docker" : "", secure ? "HTTPS" : "Not encrypted (http)"].filter(Boolean).join(" · ") : esc(st.version ? "v" + st.version : "")),
+    tile("st-vault", "ok", `${I.lock}Vault`, "Unlocked", `AES-256-GCM${st.fingerprint ? ` · key <span class="mono">${esc(String(st.fingerprint).slice(0, 9))}</span>` : ""}`,
+      `<button class="btn sm ghost" id="lock">${I.lock}<span>Lock</span></button>`),
+    tile("st-backup " + bh.tone, bh.tone, `${I.cloud}Backups`, esc(bh.title), `${esc(bh.text)}${bh.next ? ` · next ${esc(until(bh.next))}` : ""}`,
+      tg.length ? `<button class="btn sm" id="bnow">Back up now</button>` : `<a class="btn sm" href="#/backups" data-go="backups">Set up</a>`),
+    tile("st-disk" + (diskLow ? " warn" : ""), diskLow ? "warn" : "ok", `${I.disk}Storage`, disk ? `${fmtBytes(disk.free)} free` : fmtBytes(stats.bytes),
+      disk ? `of ${fmtBytes(disk.total)} · vault ${fmtBytes(stats.bytes + (sys.db_bytes || 0))}` : "encrypted on this server", "",
+      disk ? `<span class="meter" role="img" aria-label="${Math.round((1 - freePct) * 100)}% of the disk used"><i style="width:${Math.max(2, Math.round((1 - freePct) * 100))}%"></i></span>` : "")];
+
+  // ---- needs attention
+  const att = [];
+  if (!keyOk) att.push(["warn", "Recovery key not confirmed", "Without it, a forgotten encryption key locks your backups.", `<a class="btn sm" href="#/settings" data-go="settings">Fix</a>`]);
+  if (!tg.length) att.push(["warn", "No backup destination", "A lost disk would mean lost records.", `<a class="btn sm" href="#/backups" data-go="backups">Set up</a>`]);
+  tg.filter(t => t.enabled && (!t.connected || t.last_status === "error")).forEach(t => att.push(["warn", `${t.name}: ${t.connected ? "last backup failed" : "not connected"}`, t.connected ? `Last tried ${ago(t.last_run)}.` : "Reconnect it so backups reach it again.", `<a class="btn sm" href="#/backups" data-go="backups">Open</a>`]));
+  if (!secure) att.push(["warn", "Connection is not encrypted", "Use HTTPS (for example through a reverse proxy) when you reach MedVault from other devices.", ""]);
+  if (diskLow) att.push(["warn", "Disk space is low", `${fmtBytes(disk.free)} left. Uploads and local backups need room.`, ""]);
+  drafts.forEach(p => att.push(["info", `${plural(p.lab_draft_count, "lab report")} to review`, `${p.name}: read from an upload, not saved yet.`, `<a class="btn sm" href="#/labs/${esc(p.id)}" data-go="labs/${esc(p.id)}">Review</a>`]));
+  Object.values(latestLab).filter(r => r.flagged_count).forEach(r => att.push(["flag", `${r.patient_name}: ${plural(r.flagged_count, "flagged result")}`, `Latest labs, ${fmtDate(r.collected)}: ${(r.flagged || []).map(f => `${f.name} ${FLAG_WORD[f.flag] || ""}`).join(", ")}`, `<a class="btn sm" href="#/labs/${esc(r.patient_id)}" data-go="labs/${esc(r.patient_id)}">View</a>`]));
+  if (sys && !sys.ocr) att.push(["info", "Photo lab reports need OCR", "Install tesseract to read photos of lab reports. PDFs work without it.", ""]);
+  const attIcon = { warn: I.warn, info: I.note, flag: I.flask };
+
+  // ---- records summary
+  const mods = Object.entries(stats.modalities || {}).sort((x, y) => y[1] - x[1]);
+  const flaggedNow = Object.values(latestLab).reduce((n, r) => n + (r.flagged_count || 0), 0);
 
   // One card per person: who they are, then an Imaging line and a Labs line.
   const careCard = p => {
@@ -587,7 +623,7 @@ async function viewHome() {
         <span><span class="cl-l">Imaging</span><b>${scans ? plural(scans, "study", "studies") : "None yet"}</b>${lastScan ? `<span class="small muted">Latest ${esc(fmtDate(lastScan))}</span>` : ""}</span></a>
       <a class="care-line" href="#/labs/${esc(p.id)}" data-go="labs/${esc(p.id)}"><span class="ctile lab" aria-hidden="true">${I.flask}</span>
         <span><span class="cl-l">Labs</span><b>${nlab ? plural(nlab, "report") : "None yet"}</b>${lab ? `<span class="small muted">Latest ${esc(fmtDate(lab.collected))}</span>` : ""}</span>
-        ${lab ? (flags ? `<span class="badge warn">${plural(flags, "flag")}</span>` : `<span class="badge ok">${I.check}In range</span>`) : ""}</a>
+        ${p.lab_draft_count ? `<span class="badge">${p.lab_draft_count} to review</span>` : lab ? (flags ? `<span class="badge warn">${plural(flags, "flag")}</span>` : `<span class="badge ok">${I.check}In range</span>`) : ""}</a>
     </article>`;
   };
 
@@ -595,7 +631,7 @@ async function viewHome() {
   const recs = [
     ...recent.filter(s => s.modality !== "LAB").map(s => ({ kind: "img", date: s.study_date || (s.last_activity || "").slice(0, 10), s })),
     ...labs.slice(0, 8).map(r => ({ kind: "lab", date: r.collected || (r.created_at || "").slice(0, 10), r }))]
-    .sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 7);
+    .sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 6);
   const who = (name) => `<span class="who"><span class="avatar xs">${esc(initials(name))}</span>${esc(name || "Unknown")}</span>`;
   const recRow = x => {
     if (x.kind === "lab") {
@@ -615,24 +651,34 @@ async function viewHome() {
         <div class="small muted rs-meta">${who(s.patient_name)}${s.facility ? `<span>${esc(s.facility)}</span>` : ""}<span>${plural(s.file_count, "file")}</span></div></div>
       <span class="chev" aria-hidden="true">${I.chev}</span></a>`;
   };
+  const actItem = e => `<li class="${e.outcome && e.outcome !== "ok" ? "fail" : ""}"><span class="aico">${ACT_ICON[e.category] || I.note}</span><span><b>${esc(e.label)}</b><span class="small muted">${[e.patient_name, e.username, ago(e.at)].filter(Boolean).map(esc).join(" · ")}</span></span></li>`;
 
   m.innerHTML = `${mobileHead()}
   <div class="home">
   <header class="hhead"><div><p class="eyebrow">${I.pulse}${esc(new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" }))}</p><h1>${greeting()}${st.username ? ", " + esc(st.username) : ""}</h1>
-    <p class="sub">${plural(stats.patients, "person", "people")} · ${plural(imaging, "imaging study", "imaging studies")} · ${plural(labCount, "lab report")} · ${fmtBytes(stats.bytes)} encrypted</p></div>
+    <p class="sub">${att.filter(a => a[0] === "warn").length ? plural(att.filter(a => a[0] === "warn").length, "system alert") : "Everything is running normally"} · ${plural(stats.patients, "person", "people")} · ${plural(imaging + labCount, "record")}</p></div>
     <div class="row hactions"><button class="btn" id="addp">${I.plus} Add patient</button><button class="btn primary" id="upl">${I.upload} Upload</button></div></header>
 
-  <section class="health" aria-label="Vault status">
-    <div class="card hcard ok hc-vault">${tone("ok")}<div class="hc-body"><span class="hc-l">Vault</span><b>Unlocked</b><span class="small muted">AES-256-GCM${st.fingerprint ? ` · key <span class="mono">${esc(String(st.fingerprint).slice(0, 9))}</span>` : ""}</span></div>
-      <button class="btn sm ghost" id="lock">${I.lock}<span>Lock</span></button></div>
-    <div class="card hcard ${bh.tone}">${tone(bh.tone)}<div class="hc-body"><span class="hc-l">Backups</span><b>${esc(bh.title)}</b><span class="small muted">${esc(bh.text)}${bh.next ? ` · next ${esc(until(bh.next))}` : ""}</span></div>
-      ${tg.length ? `<button class="btn sm" id="bnow">Back up now</button>` : `<a class="btn sm" href="#/backups" data-go="backups">Set up</a>`}</div>
-    <div class="card hcard ${keyOk ? "ok" : "warn"}">${tone(keyOk ? "ok" : "warn")}<div class="hc-body"><span class="hc-l">Recovery key</span><b>${keyOk ? "Saved and confirmed" : "Not confirmed yet"}</b><span class="small muted">${keyOk ? "Keep the file offline or printed." : "Without it, a forgotten key locks your backups."}</span></div>
-      ${keyOk ? "" : `<a class="btn sm" href="#/settings" data-go="settings">Fix</a>`}</div>
-  </section>
+  <section class="sgrid" aria-label="System status">${tiles.join("")}</section>
 
   ${todo ? `<section class="card pad onboard"><div class="section-h" style="margin:0 0 12px"><h2>Get set up</h2><span class="muted small">${steps.length - todo} of ${steps.length} done</span></div>
     <ol class="steps2">${steps.map(([done, t, d, act]) => `<li class="${done ? "done" : ""}"><span class="tick">${done ? I.check : ""}</span><span><b>${t}</b><span class="small muted">${d}</span></span>${done ? "" : `<button class="btn sm" data-step="${act}">Start</button>`}</li>`).join("")}</ol></section>` : ""}
+
+  <div class="dgrid">
+    <section class="card attn" aria-labelledby="ah"><div class="side-h"><h2 id="ah">Needs attention</h2>${att.length ? `<span class="badge ${att.some(a => a[0] === "warn") ? "warn" : "gray"}">${att.length}</span>` : ""}</div>
+      ${att.length ? `<ul class="alist">${att.map(([t, h, d, b]) => `<li class="${t}"><span class="aic">${attIcon[t]}</span><span><b>${esc(h)}</b><span class="small muted">${esc(d)}</span></span>${b}</li>`).join("")}</ul>`
+        : `<p class="allclear">${I.check}<span><b>All clear</b><span class="small muted">Backups, keys and records are in order.</span></span></p>`}</section>
+    <section class="card recs" aria-labelledby="rsh"><div class="side-h"><h2 id="rsh">Records</h2><a class="small" href="#/patients" data-go="patients">Patients</a></div>
+      <div class="kgrid">
+        <div><b>${stats.patients}</b><span>Patients</span></div>
+        <div><b>${imaging}</b><span>Imaging studies</span></div>
+        <div><b>${labCount}</b><span>Lab reports</span></div>
+        <div><b>${stats.files}</b><span>Files</span></div>
+        <div class="${flaggedNow ? "flag" : ""}"><b>${flaggedNow}</b><span>Flagged results</span></div>
+        <div><b>${fmtBytes(stats.bytes)}</b><span>Encrypted</span></div>
+      </div>
+      ${mods.length ? `<div class="mods" aria-label="Imaging by modality">${mods.map(([k, n]) => `<span class="mchip">${modIcon(k)}${esc(modInfo(k)[0])}<b>${n}</b></span>`).join("")}</div>` : ""}</section>
+  </div>
 
   <div class="hgrid">
     <div class="hmain">
@@ -653,9 +699,10 @@ async function viewHome() {
         <div class="qup-btns"><label class="btn b-files">${I.upload} Choose files<input type="file" id="fi" multiple hidden></label>
           <label class="btn b-cam">${I.camera} Take photo<input type="file" id="cam" accept="image/*" capture="environment" hidden></label></div>
         <div class="queue" id="queue"></div></section>` : ""}
-      <section class="card storage" aria-label="In this vault"><div><b>${imaging}</b><span>imaging</span></div><div><b>${labCount}</b><span>lab reports</span></div><div><b>${fmtBytes(stats.bytes)}</b><span>encrypted</span></div></section>
       ${tg.length ? `<section class="card" aria-labelledby="bh"><div class="side-h"><h2 id="bh">Backup destinations</h2><a class="small" href="#/backups" data-go="backups">Manage</a></div>
-        <ul class="dests">${tg.map(t => `<li>${tone(!t.enabled ? "gray" : !t.connected || t.last_status === "error" ? "warn" : t.last_status === "ok" ? "ok" : "gray")}<span><b>${esc(t.name)}</b><span class="small muted">${!t.enabled ? "Paused" : !t.connected ? "Not connected" : t.last_status === "error" ? "Last run failed " + esc(ago(t.last_run)) : t.last_run ? "Last run " + esc(ago(t.last_run)) : "Not run yet"}</span></span></li>`).join("")}</ul></section>` : ""}
+        <ul class="dests">${tg.map(t => `<li>${tone(!t.enabled ? "gray" : !t.connected || t.last_status === "error" ? "warn" : t.last_status === "ok" ? "ok" : "gray")}<span><b>${esc(t.name)}</b><span class="small muted">${!t.enabled ? "Paused" : !t.connected ? "Not connected" : t.last_status === "error" ? "Last run failed " + esc(ago(t.last_run)) : t.last_run ? "Last run " + esc(ago(t.last_run)) : "Not run yet"}${t.enabled && t.connected && t.schedule_hours ? ` · next ${esc(until((t.last_run ? Date.parse(t.last_run) : Date.now()) + t.schedule_hours * 3600e3))}` : ""}</span></span></li>`).join("")}</ul></section>` : ""}
+      ${act && act.length ? `<section class="card" aria-labelledby="acth"><div class="side-h"><h2 id="acth">Recent activity</h2><a class="small" href="#/activity" data-go="activity">All activity</a></div>
+        <ul class="hact">${act.map(actItem).join("")}</ul></section>` : ""}
     </aside>
   </div></div>`;
 

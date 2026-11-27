@@ -324,3 +324,19 @@ def test_recent_lab_reports_for_home(vault):
     assert c.get("/api/stats", headers=B).json()["lab_reports"] == 2
     pt = c.get(f"/api/patients/{p['id']}", headers=B).json()
     assert pt["scan_count"] == 0 and pt["last_scan_date"] is None and pt["lab_report_count"] == 2
+
+
+def test_home_dashboard_system_and_modalities(vault):
+    c, B, _ = vault
+    p = _patient(c, B)
+    for mod in ("CT", "CT", "MR"):
+        assert c.post(f"/api/patients/{p['id']}/studies", json={"title": "Study", "modality": mod}, headers=B).status_code == 200
+    _upload(c, B, p["id"], lab_samples.labcorp())  # files a "LAB" study, which is not imaging
+    st = c.get("/api/stats", headers=B).json()
+    assert st["modalities"] == {"CT": 2, "MR": 1}
+    sysj = c.get("/api/system", headers=B).json()
+    assert sysj["version"] == main.VERSION and sysj["uptime_seconds"] >= 0
+    assert sysj["disk"]["total"] >= sysj["disk"]["free"] > 0 and sysj["db_bytes"] > 0
+    assert isinstance(sysj["ocr"], bool) and isinstance(sysj["docker"], bool)
+    c.cookies.clear()
+    assert c.get("/api/system").status_code == 401  # needs a signed-in session

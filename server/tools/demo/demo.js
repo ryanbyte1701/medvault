@@ -256,7 +256,9 @@ async function req(method, path, body) {
   if (url === "/api/vault/recovery-key/confirm") { if (body.recovery_key && !/BEGIN SCANVAULT RECOVERY KEY/i.test(body.recovery_key)) err(400, "That file isn't a MedVault recovery key"); state.saved = !!body.recovery_key || state.saved; return { ok: true }; }
   if (url === "/api/vault/passphrase") { if (state.passphrase && body.current !== state.passphrase) err(400, "Current encryption key is wrong"); state.passphrase = body.new; return { ok: true }; }
   need();
-  if (url === "/api/stats") return { patients: db.patients.length, studies: db.studies.length, files: db.files.length, bytes: size0(), lab_reports: db.labs.length, last_backup_at: db.runs.find(r => r.status === "ok")?.finished_at || null };
+  if (url === "/api/stats") return { patients: db.patients.length, studies: db.studies.length, files: db.files.length, bytes: size0(), lab_reports: db.labs.length, last_backup_at: db.runs.find(r => r.status === "ok")?.finished_at || null,
+    modalities: db.studies.reduce((o, s) => (o[s.modality] = (o[s.modality] || 0) + 1, o), {}) };
+  if (url === "/api/system") return { version: "0.2.0", started_at: iso(3.2), uptime_seconds: Math.round(3.2 * 86400), disk: { total: 2e12, used: 1.31e12, free: 0.69e12 }, db_bytes: 2.4e6, docker: true, secure: true, ocr: true, ai_available: true };
   if (url === "/api/patients" && method === "GET") return db.patients.map(p => ({ ...p, ...counts(p.id) })).sort((a, b) => a.name.localeCompare(b.name));
   if (url === "/api/patients" && method === "POST") { if (!body.name) err(400, "Patient name is required"); const p = P(body.name, body.date_of_birth || null, body.sex || null, body.mrn || null, body.notes || null); return { ...p, ...counts(p.id) }; }
   if ((m = url.match(/^\/api\/patients\/([^/]+)$/))) {

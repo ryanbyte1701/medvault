@@ -519,3 +519,52 @@ code{overflow-wrap:anywhere;word-break:break-word}
 .ptabs .n{font-size:12px;font-weight:650;padding:1px 8px;border-radius:999px;background:color-mix(in srgb,var(--muted) 14%,transparent)}
 .ptabs a.on .n{background:var(--teal-soft);color:var(--teal)}
 @media (max-width:600px){.ptabs a{flex:1;justify-content:center;padding:10px 8px}}
+
+/* ---------- home dashboard */
+.sgrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.stile{display:grid;grid-template-columns:auto minmax(0,1fr);gap:10px 12px;align-items:start;align-content:start;padding:14px 16px;position:relative;overflow:hidden}
+.stile>.dot{margin-top:4px}
+.stile>.btn{grid-column:2;justify-self:start}
+.stile::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--green)}
+.stile.warn::before{background:var(--amber)}
+.stile.warn{background:color-mix(in srgb,var(--amber-soft) 60%,var(--panel))}
+.stile .hc-l{display:flex;align-items:center;gap:5px}
+.stile .hc-l svg{width:13px;height:13px}
+.stile .btn svg{width:16px;height:16px}
+.meter{display:block;height:6px;border-radius:3px;background:color-mix(in srgb,var(--muted) 22%,transparent);margin-top:6px;overflow:hidden}
+.meter i{display:block;height:100%;border-radius:3px;background:var(--teal)}
+.stile.warn .meter i{background:var(--amber)}
+.dgrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;align-items:start}
+.alist{list-style:none;margin:0;padding:4px 10px 10px;display:grid}
+.alist li{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:center;padding:9px 6px;border-top:1px solid var(--line)}
+.alist li:first-child{border-top:0}
+.alist li>span:nth-child(2){display:grid;line-height:1.35}
+.alist b{font-weight:600}
+.aic{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;background:var(--teal-soft);color:var(--teal)}
+.aic svg{width:17px;height:17px}
+.alist .warn .aic{background:var(--amber-soft);color:var(--amber)}
+.alist .flag .aic{background:var(--lab-soft);color:var(--lab)}
+.allclear{display:flex;gap:12px;align-items:center;margin:0;padding:8px 16px 16px}
+.allclear>svg{width:32px;height:32px;padding:7px;border-radius:50%;background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green)}
+.allclear>span{display:grid}
+.kgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line);margin:6px 16px 0;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.kgrid div{display:grid;gap:2px;padding:12px 14px;background:var(--panel)}
+.kgrid b{font-size:22px;line-height:1.1;font-variant-numeric:tabular-nums;font-weight:700}
+.kgrid span{font-size:12.5px;color:var(--muted)}
+.kgrid .flag b{color:var(--amber)}
+.mods{display:flex;flex-wrap:wrap;gap:6px;padding:12px 16px 16px}
+.mchip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px 4px 8px;border-radius:999px;background:var(--teal-soft);color:var(--ink);font-size:13px}
+.mchip svg{width:15px;height:15px;color:var(--teal)}
+.mchip b{color:var(--teal);font-variant-numeric:tabular-nums}
+.recs .side-h,.attn .side-h{padding-bottom:8px}
+.hact{list-style:none;margin:0;padding:2px 16px 14px;display:grid;gap:10px}
+.hact li{display:grid;grid-template-columns:auto minmax(0,1fr);gap:10px;align-items:center}
+.hact li>span:nth-child(2){display:grid;line-height:1.3;min-width:0}
+.hact b{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hact .aico{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;background:color-mix(in srgb,var(--muted) 12%,transparent);color:var(--muted)}
+.hact .aico svg{width:15px;height:15px}
+.hact .fail .aico{background:var(--red-soft);color:var(--red)}
+@media (max-width:1280px){.sgrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:1080px){.dgrid{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:820px){.sgrid{gap:10px}.stile{padding:12px 14px}.dgrid{gap:14px}}
+@media (max-width:560px){.sgrid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.stile{padding:10px 12px;gap:8px 10px}.stile .hc-body>.small,.st-vault>.btn{display:none}.stile.warn .hc-body>.small{display:block}.st-backup,.st-disk{grid-column:span 2}.st-backup{order:1}.kgrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
