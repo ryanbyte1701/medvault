@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS user_identities (
   id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   provider_id TEXT NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, email TEXT,
   created_at REAL NOT NULL, last_login REAL, UNIQUE(issuer, subject));
+CREATE TABLE IF NOT EXISTS ai_config (id TEXT PRIMARY KEY, blob BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS ai_audit (
+  id TEXT PRIMARY KEY, created_at REAL NOT NULL, user_id TEXT, blob BLOB NOT NULL);
+CREATE INDEX IF NOT EXISTS ai_audit_time ON ai_audit(created_at);
 """
 
 

@@ -31,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import backup, crypto, media, sso, targets
+from . import ai, backup, crypto, media, sso, targets
 from .forms import Form as UploadForm, FormError, UploadPart, parse_form
 from .spool import Spool, SpoolFull
 from .store import fsync_dir, fsync_tree, write_durable, Store, seal, unseal
@@ -59,6 +59,9 @@ COOKIE_SECURE = os.environ.get("SCANVAULT_COOKIE_SECURE", "auto")
 MIN_PASSPHRASE = 12
 REKEY_WAIT = 300.0  # seconds a key change waits for running uploads and restores
 API_DOCS = os.environ.get("SCANVAULT_API_DOCS", "").lower() in ("1", "true", "yes")
+# SCANVAULT_AI=off removes the optional AI explanations entirely (for example
+# where policy forbids sending records to any outside service).
+AI_OFF = os.environ.get("SCANVAULT_AI", "").lower() in ("0", "off", "false", "no", "disabled")
 
 app = FastAPI(
     title="ScanVault",
@@ -90,6 +93,11 @@ async def _api_error(_, exc: ApiError):
     if exc.code:
         body["code"] = exc.code
     return JSONResponse(body, status_code=exc.status, headers=exc.headers)
+
+
+@app.exception_handler(ai.AiError)
+async def _ai_error(_, exc: ai.AiError):
+    return JSONResponse({"error": exc.msg, "code": exc.code}, status_code=exc.status)
 
 
 @app.exception_handler(crypto.CryptoError)
@@ -420,6 +428,7 @@ def status(request: Request):
         "local_login": local_login_enabled(),
         "sso": [_sso_public(p) for p in _sso_providers()] if setup_complete() else [],
         "version": VERSION if u else None,
+        "ai_available": (not AI_OFF) if u else None,
     }
 
 
@@ -702,6 +711,8 @@ async def change_password(request: Request):
 def _clear_caches() -> None:
     with _pix_lock:
         _pix_cache.clear()
+    with _ai_lock:
+        _ai_pending.clear()
 
 
 def migrate_file_macs(master: bytes) -> int:
@@ -914,6 +925,12 @@ def _rekey(old: bytes, passphrase: str) -> bytes:
                 for r in c.execute("SELECT id, config FROM backup_targets").fetchall():
                     d = unseal(old, r["config"], f"target:{r['id']}")
                     c.execute("UPDATE backup_targets SET config=? WHERE id=?", (seal(new, d, f"target:{r['id']}"), r["id"]))
+                for r in c.execute("SELECT id, blob FROM ai_config").fetchall():
+                    d = unseal(old, r["blob"], f"ai:{r['id']}")
+                    c.execute("UPDATE ai_config SET blob=? WHERE id=?", (seal(new, d, f"ai:{r['id']}"), r["id"]))
+                for r in c.execute("SELECT id, blob FROM ai_audit").fetchall():
+                    d = unseal(old, r["blob"], f"ai_audit:{r['id']}")
+                    c.execute("UPDATE ai_audit SET blob=? WHERE id=?", (seal(new, d, f"ai_audit:{r['id']}"), r["id"]))
                 c.execute(
                     "INSERT INTO config(key,value) VALUES('rekey_id',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     (json.dumps(jid),),
@@ -1630,6 +1647,338 @@ async def file_render(fid: str, request: Request, wc: str | None = None, ww: str
         })
     h["Access-Control-Expose-Headers"] = ", ".join(h)
     return Response(jpg, media_type="image/jpeg", headers=h)
+
+
+# =================================================================== AI explanations (optional, off by default)
+#
+# Two steps, so nothing ever leaves the server by accident:
+#   POST /api/ai/prepare builds the exact payload (identifiers removed from the
+#     text, images re-rendered from pixels so no DICOM header or EXIF goes out)
+#     and returns it for review, with a single-use token.
+#   POST /api/ai/send sends that payload, and only that, to the configured
+#     provider, after the user has seen it. Every send is audited.
+
+AI_PENDING_TTL = 900
+AI_MAX_FILE = 64 * 1024 * 1024
+_ai_pending: dict[str, dict] = {}
+_ai_lock = threading.Lock()
+
+
+def _ai_guard() -> None:
+    if AI_OFF:
+        raise ApiError(404, "AI features are turned off on this server", "ai_off")
+
+
+def _ai_cfg(master: bytes) -> dict:
+    r = store.conn().execute("SELECT blob FROM ai_config WHERE id='settings'").fetchone()
+    return unseal(master, r["blob"], "ai:settings") if r else {}
+
+
+def _ai_save(master: bytes, cfg: dict) -> None:
+    store.conn().execute(
+        "INSERT INTO ai_config(id, blob) VALUES('settings', ?) ON CONFLICT(id) DO UPDATE SET blob=excluded.blob",
+        (seal(master, cfg, "ai:settings"),),
+    )
+
+
+def _ai_sig(cfg: dict) -> str:
+    """Identifies where a payload would go; a prepared payload is only sent if this is unchanged."""
+    raw = "\0".join(str(cfg.get(k) or "") for k in ("provider", "base_url", "model", "api_key"))
+    return hmac.new(b"scanvault-ai", raw.encode(), hashlib.sha256).hexdigest()
+
+
+def _ai_audit(master: bytes, u: dict, entry: dict) -> str:
+    aid = crypto.random_id()
+    now = time.time()
+    entry = {"user": u.get("username"), **entry}
+    store.conn().execute(
+        "INSERT INTO ai_audit(id, created_at, user_id, blob) VALUES(?,?,?,?)",
+        (aid, now, u.get("id"), seal(master, entry, f"ai_audit:{aid}")),
+    )
+    return aid
+
+
+def _ai_audit_update(master: bytes, aid: str, changes: dict) -> None:
+    with store.lock:
+        r = store.conn().execute("SELECT blob FROM ai_audit WHERE id=?", (aid,)).fetchone()
+        if not r:
+            return
+        d = unseal(master, r["blob"], f"ai_audit:{aid}")
+        d.update(changes)
+        store.conn().execute("UPDATE ai_audit SET blob=? WHERE id=?", (seal(master, d, f"ai_audit:{aid}"), aid))
+
+
+def _ai_settings_out(cfg: dict, u: dict) -> dict:
+    return {**ai.public_settings(cfg), "providers": ai.PROVIDERS, "can_edit": u.get("role") == "admin",
+            "tasks": list(ai.TASKS), "max_images": ai.MAX_IMAGES, "disclaimer": ai.DISCLAIMER, "reauth_fresh": _recent_sso(u)}
+
+
+@app.get("/api/ai/settings")
+def get_ai_settings(request: Request):
+    _ai_guard()
+    u = require_user(request)
+    return _ai_settings_out(_ai_cfg(mk()), u)
+
+
+@app.put("/api/ai/settings")
+async def put_ai_settings(request: Request):
+    """Changing where records may be sent needs an administrator and their
+    password (or a fresh SSO sign-in), like other security settings."""
+    _ai_guard()
+    u = require_user(request)
+    if u["role"] != "admin":
+        raise ApiError(403, "Only an administrator can change AI settings")
+    j = await body_json(request, 64 * 1024)
+    await _reauth(u, j)
+    master = mk()
+    with store.lock:
+        old = _ai_cfg(master)
+        cfg = ai.merge_settings(old, {k: v for k, v in j.items() if k != "password"})
+        _ai_save(master, cfg)
+    with _ai_lock:
+        _ai_pending.clear()
+    _ai_audit(master, u, {
+        "event": "settings", "status": "ok", "enabled": bool(cfg.get("enabled")), "provider": cfg.get("provider"),
+        "model": cfg.get("model"), "endpoint": ai.endpoint_host(cfg),
+        "key": "changed" if j.get("api_key") else "removed" if old.get("api_key") and not cfg.get("api_key") else "unchanged",
+    })
+    return _ai_settings_out(cfg, u)
+
+
+@app.post("/api/ai/test")
+async def test_ai(request: Request):
+    """Checks the key and endpoint with a one-word prompt. No record data is sent."""
+    _ai_guard()
+    u = require_user(request)
+    if u["role"] != "admin":
+        raise ApiError(403, "Only an administrator can change AI settings")
+    master = mk()
+    cfg = _ai_cfg(master)
+    if not cfg.get("provider"):
+        raise ApiError(400, "Save the AI settings first", "ai_not_configured")
+    aid = _ai_audit(master, u, {"event": "test", "status": "sending", "provider": cfg.get("provider"), "model": cfg.get("model"), "endpoint": ai.endpoint_host(cfg), "chars": 0, "images": 0})
+    try:
+        res = await asyncio.to_thread(ai.test_connection, cfg)
+    except ai.AiError as e:
+        _ai_audit_update(master, aid, {"status": "error", "error": e.msg})
+        raise
+    _ai_audit_update(master, aid, {"status": "ok", "model": res.model})
+    return {"ok": True, "model": res.model, "reply": res.text[:200]}
+
+
+def _ai_read(row, master: bytes) -> bytes:
+    if row["size"] > AI_MAX_FILE:
+        raise ApiError(413, "That file is too large to send")
+    buf = bytearray()
+    with open(store.blob_path(row["id"]), "rb") as f:
+        for chunk in crypto.decrypt_stream_iter(master, f, f"file:{row['id']}".encode()):
+            buf += chunk
+    return bytes(buf)
+
+
+def _ai_build(master: bytes, study: dict, patient: dict, rows: list, task: str, language: str, strip: bool, question: str) -> tuple[ai.Payload, dict, list[str]]:
+    all_files = [_file_out(r, master) for r in store.conn().execute("SELECT * FROM files WHERE study_id=?", (study["id"],)).fetchall()]
+    idents = ai.identifiers_from(patient, study, [f["dicom"] for f in all_files if f.get("dicom")])
+    warnings: list[str] = []
+    texts: list[str] = []
+    p = ai.Payload(task=task, language=language, context="", text="", question=question)
+    ctx = [study.get("modality"), study.get("body_part"), study.get("title"), study.get("description")]
+    p.context = " · ".join(dict.fromkeys(str(x) for x in ctx if x))
+    n_img = n_rep = 0
+    dicom_note = photo_note = False
+    for row in rows:
+        f = _file_out(row, master)
+        ctype = f.get("content_type") or ""
+        if f["kind"] == "dicom":
+            n_img += 1
+            label = f"Image {n_img}"
+            try:
+                nframes = int((f.get("dicom") or {}).get("frames") or 1)
+            except ValueError:
+                nframes = 1
+            try:
+                arr, info = _decoded(row["id"], master, None, nframes)
+                jpg, _c, _w = media.render_window(arr, info, None, None, False, ai.IMAGE_EDGE)
+            except Exception as exc:
+                log.info("AI: render failed for %s: %s", row["id"], exc)
+                warnings.append(f"{label} couldn't be rendered and was left out.")
+                continue
+            w, h = ai.jpeg_size(jpg)
+            p.images.append(ai.Image(row["id"], label, jpg, w, h))
+            if info.get("burned_in") == "YES":
+                warnings.append(f"{label}: the scanner marked this image as having text burned into the pixels (often the patient's name). Check the preview, or leave it out.")
+            dicom_note = True
+        elif ctype.startswith("image/"):
+            n_img += 1
+            label = f"Image {n_img}" if f["kind"] != "report" else f"Report photo {n_img}"
+            try:
+                jpg, w, h = ai.photo_jpeg(_ai_read(row, master))
+            except ApiError:
+                raise
+            except Exception as exc:
+                log.info("AI: photo decode failed for %s: %s", row["id"], exc)
+                warnings.append(f"{label} is in a format that can't be sent (for example HEIC) and was left out.")
+                continue
+            p.images.append(ai.Image(row["id"], label, jpg, w, h))
+            photo_note = True
+        elif ctype == "application/pdf" or f["kind"] == "report":
+            n_rep += 1
+            label = f"Report {n_rep}"
+            data = _ai_read(row, master)
+            text = ai.pdf_text(data) if data[:5] == b"%PDF-" else ""
+            if text:
+                texts.append(f"--- {label} ---\n{text}")
+            elif not strip and data[:5] == b"%PDF-":
+                p.pdfs.append((label, data))
+                warnings.append(f"{label} has no text layer (it's a scan), so the whole PDF will be sent as it is, including any names and numbers on it.")
+            else:
+                warnings.append(f"{label} has no text layer (it's a scan), so identifiers can't be removed from it. It was left out. Turn off removing identifiers to send the PDF as it is.")
+        else:
+            warnings.append(f"{f['filename']} isn't a report or image and was left out.")
+    if len(p.images) > ai.MAX_IMAGES:
+        raise ApiError(400, f"Choose at most {ai.MAX_IMAGES} images")
+    text = "\n\n".join(texts)
+    removed: dict = {}
+    if strip:
+        text, removed = ai.scrub(text, idents)
+        p.context, more = ai.scrub(p.context, idents)
+        p.question, more2 = ai.scrub(p.question, idents)
+        for d in (more, more2):
+            for k, v in d.items():
+                removed[k] = removed.get(k, 0) + v
+    if len(text) > ai.MAX_TEXT:
+        raise ApiError(400, "The selected reports are too long to send at once. Choose fewer reports.")
+    p.text = text
+    if dicom_note:
+        warnings.append("DICOM images are sent as plain pictures made from the pixels only. The DICOM header (name, ID, dates, center) is never sent, but text drawn onto an image by the scanner is. Check the previews below.")
+    if photo_note:
+        warnings.append("Photos are sent as they look, without their EXIF data (location, camera, time). Names or numbers that appear in the picture itself are not removed.")
+    if not (p.text or p.images or p.pdfs):
+        raise ApiError(400, "Nothing to send: choose at least one report with text, or an image.")
+    return p, removed, warnings
+
+
+def _ai_take(token: str, user_id: str) -> dict:
+    now = time.time()
+    with _ai_lock:
+        for k in [k for k, v in _ai_pending.items() if v["exp"] < now]:
+            _ai_pending.pop(k, None)
+        e = _ai_pending.get(token)
+        if not e or not hmac.compare_digest(e["user_id"], user_id):
+            raise ApiError(409, "This preview has expired. Prepare it again.", "ai_expired")
+        return _ai_pending.pop(token)
+
+
+@app.post("/api/ai/prepare")
+async def ai_prepare(request: Request):
+    _ai_guard()
+    u = require_user(request)
+    master = mk()
+    j = await body_json(request, 64 * 1024)
+    cfg = _ai_cfg(master)
+    if not cfg.get("enabled"):
+        raise ApiError(409, "AI explanations are turned off. An administrator can turn them on in Settings.", "ai_disabled")
+    task = jstr(j, "task") or "explain"
+    if task not in ai.TASKS:
+        raise ApiError(400, "task must be explain or translate")
+    language = ai.check_language(j.get("language") or cfg.get("default_language"))
+    strip = j.get("remove_identifiers", True) is not False
+    question = _str(j.get("question"), 2000) or ""
+    study = _get_study(jstr(j, "study_id"), master)
+    patient = _get_patient(study["patient_id"], master)
+    ids = j.get("file_ids")
+    if not isinstance(ids, list) or not ids or len(ids) > 50 or not all(isinstance(x, str) for x in ids):
+        raise ApiError(400, "Choose the reports and images to send")
+    rows = []
+    for fid in dict.fromkeys(ids):
+        r = store.conn().execute("SELECT * FROM files WHERE id=? AND study_id=?", (fid, study["id"])).fetchone()
+        if not r:
+            raise ApiError(404, "File not found in this study")
+        rows.append(r)
+    payload, removed, warnings = await asyncio.to_thread(_ai_build, master, study, patient, rows, task, language, strip, question)
+    token = secrets.token_urlsafe(24)
+    with _ai_lock:
+        while len(_ai_pending) >= 20:
+            _ai_pending.pop(next(iter(_ai_pending)))
+        _ai_pending[token] = {
+            "user_id": u["id"], "exp": time.time() + AI_PENDING_TTL, "payload": payload, "sig": _ai_sig(cfg),
+            "study_id": study["id"], "patient_id": patient["id"], "study_title": study.get("title"),
+            "file_ids": [r["id"] for r in rows], "strip": strip, "removed": removed,
+        }
+    return {
+        "token": token, "expires_in": AI_PENDING_TTL,
+        "provider": ai.PROVIDERS.get(cfg.get("provider") or "anthropic"), "model": cfg.get("model"), "endpoint": ai.endpoint_host(cfg),
+        "task": task, "language": language, "remove_identifiers": strip, "removed": removed, "warnings": warnings,
+        "context": payload.context, "text": payload.text, "question": payload.question,
+        "images": [{"label": im.label, "width": im.width, "height": im.height, "data_url": im.data_url()} for im in payload.images],
+        "pdfs": [{"label": lbl, "size_bytes": len(b)} for lbl, b in payload.pdfs],
+        "instructions": ai.system_prompt(payload), "disclaimer": ai.DISCLAIMER,
+    }
+
+
+@app.post("/api/ai/send")
+async def ai_send(request: Request):
+    _ai_guard()
+    u = require_user(request)
+    master = mk()
+    j = await body_json(request, 2 * 1024 * 1024)
+    if j.get("confirm") is not True:
+        raise ApiError(400, "Confirm that you want to send this", "ai_confirm")
+    e = _ai_take(jstr(j, "token"), u["id"])
+    cfg = _ai_cfg(master)
+    if not cfg.get("enabled"):
+        raise ApiError(409, "AI explanations are turned off.", "ai_disabled")
+    if not hmac.compare_digest(e["sig"], _ai_sig(cfg)):
+        raise ApiError(409, "The AI settings changed since this preview. Prepare it again.", "ai_expired")
+    p: ai.Payload = e["payload"]
+    edited = False
+    if "text" in j:
+        t = j.get("text")
+        if not isinstance(t, str) or len(t) > ai.MAX_TEXT:
+            raise ApiError(400, "Text is too long")
+        t = t.replace("\r\n", "\n")
+        edited = t != p.text
+        p.text = t
+    if not (p.text.strip() or p.images or p.pdfs):
+        raise ApiError(400, "Nothing to send")
+    aid = _ai_audit(master, u, {
+        "event": "send", "status": "sending", "task": p.task, "language": p.language,
+        "provider": cfg.get("provider"), "model": cfg.get("model"), "endpoint": ai.endpoint_host(cfg),
+        "study_id": e["study_id"], "patient_id": e["patient_id"], "study_title": e["study_title"], "file_ids": e["file_ids"],
+        "removed_identifiers": e["strip"], "removed": e["removed"], "edited": edited,
+        "chars": len(p.text) + len(p.context) + len(p.question), "images": len(p.images), "pdfs": len(p.pdfs), "sha256": p.digest(),
+    })
+    try:
+        res = await asyncio.to_thread(ai.send, cfg, p)
+    except ai.AiError as exc:
+        _ai_audit_update(master, aid, {"status": "error", "error": exc.msg})
+        raise
+    except Exception as exc:
+        log.warning("AI request failed: %s", type(exc).__name__)
+        _ai_audit_update(master, aid, {"status": "error", "error": "Unexpected error"})
+        raise ApiError(502, "The AI request failed.", "ai_error")
+    _ai_audit_update(master, aid, {"status": "ok", "model": res.model, "input_tokens": res.input_tokens, "output_tokens": res.output_tokens})
+    return {
+        "text": res.text, "model": res.model, "task": p.task, "language": p.language, "audit_id": aid,
+        "disclaimer": ai.DISCLAIMER if p.task == "explain" else ai.TRANSLATION_NOTE + " " + ai.DISCLAIMER,
+        "truncated": res.stop_reason in ("max_tokens", "length"),
+    }
+
+
+@app.get("/api/ai/audit")
+def ai_audit_log(request: Request, limit: int = 100):
+    _ai_guard()
+    require_user(request)
+    master = mk()
+    rows = store.conn().execute("SELECT * FROM ai_audit ORDER BY created_at DESC LIMIT ?", (max(1, min(500, limit)),)).fetchall()
+    out = []
+    for r in rows:
+        try:
+            d = unseal(master, r["blob"], f"ai_audit:{r['id']}")
+        except crypto.CryptoError:
+            continue
+        out.append({"id": r["id"], "at": iso(r["created_at"]), **d})
+    return out
 
 
 # =================================================================== per-user preferences
