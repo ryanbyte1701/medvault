@@ -208,7 +208,10 @@ class ApiClientTest {
         val serverCerts = okhttp3.tls.HandshakeCertificates.Builder().heldCertificate(cert).build()
         val clientCerts = okhttp3.tls.HandshakeCertificates.Builder().addTrustedCertificate(cert.certificate).build()
         val tls = MockWebServer().apply { useHttps(serverCerts.sslSocketFactory(), false); start() }
-        val client = okhttp3.OkHttpClient.Builder().sslSocketFactory(clientCerts.sslSocketFactory(), clientCerts.trustManager).build()
+        val client = okhttp3.OkHttpClient.Builder()
+            .sslSocketFactory(clientCerts.sslSocketFactory(), clientCerts.trustManager)
+            .addNetworkInterceptor(com.scanvault.android.data.net.CleartextPolicyInterceptor(allowLanHttp = false))
+            .build()
         val httpsApi = ApiClient(tls.url("/").newBuilder().host("localhost").build().toString(), { "tok" }, client)
         tls.enqueue(json("""{"unlocked":true}"""))
         httpsApi.unlock(recoveryKey = "AAAA-BBBB")
