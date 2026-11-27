@@ -20,7 +20,7 @@ from typing import Optional
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
@@ -106,7 +106,7 @@ def current_user(request: Request) -> dict | None:
         return None
     th = hashlib.sha256(tok.encode()).hexdigest()
     r = store.conn().execute(
-        "SELECT u.id, u.username, u.role, s.expires_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?",
+        "SELECT u.id, u.username, u.role, s.expires_at, s.created_at AS session_created, s.identity_id FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?",
         (th,),
     ).fetchone()
     if not r or r["expires_at"] < time.time():
@@ -132,12 +132,12 @@ def data_access(request: Request) -> bytes:
     return mk()
 
 
-def new_session(user_id: str) -> tuple[str, float]:
+def new_session(user_id: str, identity_id: str | None = None) -> tuple[str, float]:
     tok = secrets.token_urlsafe(32)
     exp = time.time() + SESSION_DAYS * 86400
     store.conn().execute(
-        "INSERT INTO sessions(token_hash,user_id,created_at,expires_at) VALUES(?,?,?,?)",
-        (hashlib.sha256(tok.encode()).hexdigest(), user_id, time.time(), exp),
+        "INSERT INTO sessions(token_hash,user_id,created_at,expires_at,identity_id) VALUES(?,?,?,?,?)",
+        (hashlib.sha256(tok.encode()).hexdigest(), user_id, time.time(), exp, identity_id),
     )
     return tok, exp
 
@@ -1368,6 +1368,45 @@ def _sso_redirect_uri(request: Request) -> str:
     return f"{base}/api/auth/sso/callback"
 
 
+REAUTH_SECONDS = 600
+
+
+def _recent_sso(u: dict) -> bool:
+    return bool(u.get("identity_id")) and time.time() - (u.get("session_created") or 0) < REAUTH_SECONDS
+
+
+def _reauth(u: dict, j: dict) -> None:
+    """Changes that add a way to sign in need the password, or an SSO sign-in in
+    the last 10 minutes, so a stolen session can't plant a backdoor."""
+    if _recent_sso(u):
+        return
+    r = store.conn().execute("SELECT password_hash FROM users WHERE id=?", (u["id"],)).fetchone()
+    if not r or not crypto.verify_password(str(j.get("password") or ""), r["password_hash"]):
+        time.sleep(0.5)
+        raise ApiError(403, "Enter your ScanVault password to confirm this change", "reauth_required")
+
+
+def _revoke_identity_sessions(where: str, args: tuple) -> None:
+    store.conn().execute(f"DELETE FROM sessions WHERE identity_id IN (SELECT id FROM user_identities WHERE {where})", args)
+
+
+_start_hits: dict[str, list[float]] = {}
+START_LIMIT = (30, 600)  # sign-in starts per client per 10 minutes
+
+
+def _start_rate_ok(request: Request) -> bool:
+    ip = request.client.host if request.client else "?"
+    now = time.time()
+    hits = [t for t in _start_hits.get(ip, []) if now - t < START_LIMIT[1]]
+    if len(_start_hits) > 10000:
+        _start_hits.clear()
+    ok = len(hits) < START_LIMIT[0]
+    if ok:
+        hits.append(now)
+    _start_hits[ip] = hits
+    return ok
+
+
 def _sso_flow(request: Request, p: dict, mode: str, user_id: str | None = None, app: dict | None = None) -> tuple[str, str | None]:
     """Start an authorization request. Returns (provider URL, browser binding cookie)."""
     verifier, challenge = sso.pkce_pair()
@@ -1379,7 +1418,9 @@ def _sso_flow(request: Request, p: dict, mode: str, user_id: str | None = None, 
         "binding": sso.sha(binding) if binding else None, "app": app, "redirect_uri": redirect_uri,
     })
     try:
-        url = oidc.authorization_url(p, redirect_uri, state, nonce, challenge)
+        # Apps: make the provider show which account is used instead of silently reusing a session.
+        prompt = "select_account" if app and p.get("preset") in ("google", "microsoft") else None
+        url = oidc.authorization_url(p, redirect_uri, state, nonce, challenge, prompt=prompt)
     except sso.SSOError as exc:
         _sso_requests.pop(state)
         raise ApiError(502, str(exc), "sso_provider") from exc
@@ -1424,6 +1465,8 @@ def sso_start(pid: str, request: Request, app_redirect: str = "", app_state: str
         app_ctx = {"redirect": app_redirect, "state": app_state[:500] or None, "challenge": code_challenge}
     if not setup_complete():
         return _app_redirect(app_ctx, error="setup_required") if app_ctx else _web_redirect("")
+    if not _start_rate_ok(request):
+        raise ApiError(429, "Too many sign-in attempts. Wait a few minutes.")
     try:
         p = _sso_provider(pid)
         url, binding = _sso_flow(request, p, "login", app=app_ctx)
@@ -1434,9 +1477,15 @@ def sso_start(pid: str, request: Request, app_redirect: str = "", app_state: str
 
 
 @app.post("/api/auth/sso/{pid}/link")
-def sso_link_start(pid: str, request: Request):
-    """Signed-in user links an identity-provider account. Returns the URL to open."""
+async def sso_link_start(pid: str, request: Request):
+    """Signed-in user links an identity-provider account. Returns the URL to open.
+    Body: ``{password}`` (not needed within 10 minutes of an SSO sign-in)."""
     u = require_user(request)
+    try:
+        j = await request.json()
+    except Exception:
+        j = {}
+    _reauth(u, j if isinstance(j, dict) else {})
     p = _sso_provider(pid)
     url, binding = _sso_flow(request, p, "link", user_id=u["id"])
     return _set_binding(request, JSONResponse({"url": url}), binding)
@@ -1444,6 +1493,7 @@ def sso_link_start(pid: str, request: Request):
 
 @app.get("/api/auth/sso/callback")
 def sso_callback(request: Request, state: str = "", code: str = "", error: str = "", error_description: str = ""):
+    resp_iss = request.query_params.get("iss", "")
     entry = _sso_requests.pop(state)
     if not entry:
         return _web_redirect("", sso_error="This sign-in link expired. Try again.")
@@ -1451,7 +1501,7 @@ def sso_callback(request: Request, state: str = "", code: str = "", error: str =
     back = "settings" if entry["mode"] == "link" else ""
 
     def fail(msg: str):
-        log.info("SSO %s failed: %s", entry["mode"], msg)
+        log.info("SSO %s failed: %r", entry["mode"], msg)
         resp = _app_redirect(app_ctx, error=msg) if app_ctx else _web_redirect(back, sso_error=msg)
         resp.delete_cookie(SSO_COOKIE, path=SSO_COOKIE_PATH)
         return resp
@@ -1459,14 +1509,20 @@ def sso_callback(request: Request, state: str = "", code: str = "", error: str =
     if not app_ctx and not _binding_ok(request, entry["binding"]):
         return fail("This sign-in was started in a different browser. Try again.")
     if error:
-        return fail(error_description or error)
+        return fail((error_description or error)[:300])
     try:
         p = _sso_provider(entry["pid"])
+        # RFC 9207: if the provider names itself in the response, it must be the one we asked.
+        doc = oidc.discover(sso.resolve_issuer(p))
+        if resp_iss and doc["issuer"] != sso.MS_TEMPLATE and resp_iss.rstrip("/") != doc["issuer"].rstrip("/"):
+            return fail("The sign-in response came from a different provider.")
         tokens = oidc.exchange_code(p, code, entry["redirect_uri"], entry["verifier"])
         claims = oidc.validate_id_token(p, tokens["id_token"], entry["nonce"])
     except (sso.SSOError, ApiError) as exc:
         return fail(getattr(exc, "msg", None) or str(exc))
     iss, sub = claims["iss"], str(claims["sub"])
+    if resp_iss and doc["issuer"] == sso.MS_TEMPLATE and resp_iss.rstrip("/") != iss.rstrip("/"):
+        return fail("The sign-in response came from a different provider.")
     email = claims.get("email") if claims.get("email_verified", True) not in (False, "false") else None
     email = email or claims.get("preferred_username")
     c = store.conn()
@@ -1476,6 +1532,8 @@ def sso_callback(request: Request, state: str = "", code: str = "", error: str =
         if row and row["user_id"] != entry["user_id"]:
             return fail(f"That {p['name']} account is already linked to another ScanVault login.")
         if row:
+            if row["provider_id"] != p["id"]:
+                c.execute("DELETE FROM sessions WHERE identity_id=?", (row["id"],))
             c.execute("UPDATE user_identities SET provider_id=?, email=? WHERE id=?", (p["id"], email, row["id"]))
         else:
             c.execute(
@@ -1486,17 +1544,60 @@ def sso_callback(request: Request, state: str = "", code: str = "", error: str =
         resp.delete_cookie(SSO_COOKIE, path=SSO_COOKIE_PATH)
         return resp
 
+    if row and row["provider_id"] != p["id"]:
+        row = None  # an identity only signs in through the provider it was linked with
     if not row or not c.execute("SELECT 1 FROM users WHERE id=?", (row["user_id"],)).fetchone():
         return fail(f"This {p['name']} account isn't linked to ScanVault yet. Sign in with your password, then link it under Settings > Single sign-on.")
-    c.execute("UPDATE user_identities SET last_login=?, provider_id=?, email=? WHERE id=?", (time.time(), p["id"], email, row["id"]))
-    ticket = _sso_tickets.put({
+    c.execute("UPDATE user_identities SET last_login=?, email=? WHERE id=?", (time.time(), email, row["id"]))
+    grant = {
         "user_id": row["user_id"],
+        "identity_id": row["id"],
         "binding": entry["binding"],
         "challenge": app_ctx["challenge"] if app_ctx else None,
-    })
+    }
+    if app_ctx:
+        # Anything on the phone can open /start with its own scanvault:// redirect,
+        # so the person confirms on a page served by ScanVault before an app gets a ticket.
+        cid = _sso_confirms.put({"grant": grant, "app": app_ctx, "email": email, "provider": p["name"]})
+        return _app_confirm_page(cid, email, p["name"])
     # The session itself is issued by POST /api/auth/sso/exchange, a same-origin
     # request, so the SameSite=Strict session cookie is set reliably.
-    return _app_redirect(app_ctx, ticket=ticket) if app_ctx else _web_redirect("sso", ticket=ticket)
+    return _web_redirect("sso", ticket=_sso_tickets.put(grant))
+
+
+_sso_confirms = sso.PendingStore(ttl=300)
+
+
+def _app_confirm_page(cid: str, email: str | None, provider: str) -> HTMLResponse:
+    from html import escape
+
+    who = escape(email or "your account")
+    body = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in to the ScanVault app?</title><style>
+body{{font:16px/1.5 system-ui,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;background:#f4f7f7;color:#13201f}}
+main{{max-width:420px;margin:24px;padding:28px;background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.08)}}
+h1{{font-size:22px;margin:0 0 12px}}p{{margin:0 0 14px}}.row{{display:flex;gap:10px;margin-top:20px}}
+button{{flex:1;font:inherit;font-weight:600;padding:12px;border-radius:10px;border:1px solid #c9d6d5;background:#fff;cursor:pointer}}
+button.go{{background:#0b5d63;color:#fff;border-color:#0b5d63}}.warn{{font-size:14px;color:#6b4b00;background:#fff6dc;padding:10px 12px;border-radius:10px}}
+@media (prefers-color-scheme:dark){{body{{background:#0d1416;color:#e6eeee}}main{{background:#162024}}button{{background:#162024;color:#e6eeee;border-color:#2b3a3e}}.warn{{background:#3a2f12;color:#ffe3a3}}}}
+</style></head><body><main><h1>Sign in to the ScanVault app?</h1>
+<p>You signed in with {escape(provider)} as <b>{who}</b>. Continuing gives the app that opened this page access to your ScanVault for 30 days.</p>
+<p class="warn">Only continue if you just tapped <b>Continue with {escape(provider)}</b> in the ScanVault app yourself.</p>
+<form method="post" action="/api/auth/sso/app-confirm"><input type="hidden" name="cid" value="{escape(cid)}">
+<div class="row"><button name="action" value="cancel">Cancel</button><button class="go" name="action" value="allow">Continue</button></div></form>
+</main></body></html>"""
+    return HTMLResponse(body, headers={"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'", "Cache-Control": "no-store"})
+
+
+@app.post("/api/auth/sso/app-confirm")
+def sso_app_confirm(request: Request, cid: str = Form(""), action: str = Form("")):
+    c = _sso_confirms.pop(cid)
+    if not c:
+        return HTMLResponse("<!doctype html><p>This sign-in expired. Go back to the ScanVault app and try again.</p>", status_code=400)
+    if action != "allow":
+        return RedirectResponse(_app_redirect(c["app"], error="cancelled").headers["location"], status_code=303)
+    ticket = _sso_tickets.put(c["grant"])
+    return RedirectResponse(_app_redirect(c["app"], ticket=ticket).headers["location"], status_code=303)
 
 
 @app.post("/api/auth/sso/exchange")
@@ -1512,7 +1613,7 @@ async def sso_exchange(request: Request):
             raise ApiError(400, "code_verifier does not match", "sso_pkce")
     elif not _binding_ok(request, t["binding"]):
         raise ApiError(400, "This sign-in was started in a different browser. Try again.", "sso_binding")
-    tok, exp = new_session(t["user_id"])
+    tok, exp = new_session(t["user_id"], t.get("identity_id"))
     resp = session_response(request, {"token": tok, "expires_at": iso(exp), "unlocked": vault.unlocked}, tok, exp)
     resp.delete_cookie(SSO_COOKIE, path=SSO_COOKIE_PATH)
     return resp
@@ -1535,6 +1636,7 @@ def sso_config(request: Request):
         "local_login": cfg["local_login"],
         "local_login_effective": local_login_enabled(),
         "local_login_forced": FORCE_LOCAL_LOGIN,
+        "reauth_fresh": _recent_sso(u),
         "redirect_uri": _sso_redirect_uri(request),
         "presets": sso.PRESETS,
         "identities": idents,
@@ -1579,8 +1681,9 @@ def _sso_provider_from(j: dict, old: dict | None = None) -> dict:
 
 @app.post("/api/sso/providers")
 async def sso_create_provider(request: Request):
-    _require_admin(request)
+    u = _require_admin(request)
     j = await body_json(request)
+    _reauth(u, j)
     p = _sso_provider_from(j)
     p["id"] = crypto.random_id()
     p.setdefault("enabled", True)
@@ -1592,13 +1695,21 @@ async def sso_create_provider(request: Request):
 
 @app.put("/api/sso/providers/{pid}")
 async def sso_update_provider(pid: str, request: Request):
-    _require_admin(request)
+    u = _require_admin(request)
     j = await body_json(request)
+    _reauth(u, j)
     cfg = _sso_cfg()
     for i, old in enumerate(cfg["providers"]):
         if old["id"] == pid:
             cfg["providers"][i] = p = _sso_provider_from(j, old)
             _sso_save(cfg)
+            c = store.conn()
+            if sso.resolve_issuer(p) != sso.resolve_issuer(old) or p["client_id"] != old.get("client_id"):
+                # A different provider behind the same entry: its old links no longer mean anything.
+                _revoke_identity_sessions("provider_id=?", (pid,))
+                c.execute("DELETE FROM user_identities WHERE provider_id=?", (pid,))
+            elif not p.get("enabled", True):
+                _revoke_identity_sessions("provider_id=?", (pid,))
             return _sso_admin_out(p)
     if pid == "env":
         raise ApiError(409, "This provider is configured with SCANVAULT_OIDC_* environment variables")
@@ -1613,6 +1724,7 @@ def sso_delete_provider(pid: str, request: Request):
     cfg = _sso_cfg()
     cfg["providers"] = [p for p in cfg["providers"] if p["id"] != pid]
     _sso_save(cfg)
+    _revoke_identity_sessions("provider_id=?", (pid,))
     store.conn().execute("DELETE FROM user_identities WHERE provider_id=?", (pid,))
     return {"ok": True, "local_login": local_login_enabled()}
 
@@ -1635,6 +1747,8 @@ async def sso_settings(request: Request):
     cfg = _sso_cfg()
     if "local_login" in j:
         want = bool(j["local_login"])
+        if not want and cfg["local_login"]:
+            _reauth(u, j)
         if not want:
             ids = {p["id"] for p in _sso_providers()}
             mine = [r for r in store.conn().execute("SELECT provider_id FROM user_identities WHERE user_id=?", (u["id"],)) if r["provider_id"] in ids]
@@ -1648,6 +1762,7 @@ async def sso_settings(request: Request):
 @app.delete("/api/sso/identities/{iid}")
 def sso_unlink(iid: str, request: Request):
     u = require_user(request)
+    _revoke_identity_sessions("id=? AND user_id=?", (iid, u["id"]))
     store.conn().execute("DELETE FROM user_identities WHERE id=? AND user_id=?", (iid, u["id"]))
     if _linked_identity_count() == 0 and not _sso_cfg()["local_login"]:
         cfg = _sso_cfg()

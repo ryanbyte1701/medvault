@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import re
 import secrets
 import tempfile
 import time
@@ -20,6 +21,7 @@ from app.store import Store
 H = {"X-ScanVault": "1"}
 ISS = "https://idp.example.com"
 PASS = "orbit-cedar-lantern-quill"
+PW = "pw-1234567890"
 KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 OTHER_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
@@ -69,6 +71,7 @@ def env(monkeypatch):
     monkeypatch.setattr(main, "oidc", sso.OIDC())
     main._sso_requests.clear()
     main._sso_tickets.clear()
+    main._start_hits.clear()
     idp = IdP()
     with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
         idp.install(rsps)
@@ -80,7 +83,7 @@ def env(monkeypatch):
 
 
 def add_provider(c, B, **kw):
-    r = c.post("/api/sso/providers", json={"preset": "generic", "name": "Home IdP", "issuer": ISS, "client_id": "sv-client", "client_secret": "s3cret", **kw}, headers={**B, **H})
+    r = c.post("/api/sso/providers", json={"preset": "generic", "name": "Home IdP", "issuer": ISS, "client_id": "sv-client", "client_secret": "s3cret", "password": PW, **kw}, headers={**B, **H})
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -96,14 +99,24 @@ def follow_to_idp(c, idp, resp):
     return f"/api/auth/sso/callback?code=abc&state={q['state']}"
 
 
+def confirm(c, page, action="allow"):
+    """The app flow stops on a ScanVault confirmation page before any ticket is issued."""
+    assert page.status_code == 200 and "Sign in to the ScanVault app?" in page.text, page.text
+    assert "ticket" not in page.text
+    cid = re.search(r'name="cid" value="([^"]+)"', page.text).group(1)
+    r = c.post("/api/auth/sso/app-confirm", data={"cid": cid, "action": action}, follow_redirects=False)
+    assert r.status_code == 303
+    return r
+
+
 def fragment_params(location):
     path, _, qs = location.partition("?")
     return path, {k: v[0] for k, v in parse_qs(qs).items()}
 
 
-def link(c, idp, B):
-    pid = c.get("/api/sso/config", headers=B).json()["providers"][0]["id"]
-    r = c.post(f"/api/auth/sso/{pid}/link", headers={**B, **H})
+def link(c, idp, B, pid=None):
+    pid = pid or c.get("/api/sso/config", headers=B).json()["providers"][0]["id"]
+    r = c.post(f"/api/auth/sso/{pid}/link", json={"password": PW}, headers={**B, **H})
     assert r.status_code == 200, r.text
     # The browser goes to the IdP directly; emulate it by reading the URL we got back.
     loc = urlparse(r.json()["url"])
@@ -121,11 +134,11 @@ def test_provider_admin_and_status(env):
     assert "client_secret" not in p and p["has_secret"] and p["resolved_issuer"] == ISS
     assert c.get("/api/status").json()["sso"] == [{"id": p["id"], "name": "Home IdP", "preset": "generic"}]
     # secrets are write-only and kept on update
-    p2 = c.put(f"/api/sso/providers/{p['id']}", json={"name": "Renamed", "client_secret": ""}, headers={**B, **H}).json()
+    p2 = c.put(f"/api/sso/providers/{p['id']}", json={"name": "Renamed", "client_secret": "", "password": PW}, headers={**B, **H}).json()
     assert p2["has_secret"] and p2["name"] == "Renamed"
     assert "s3cret" not in json.dumps(c.get("/api/sso/config", headers=B).json())
     # bad issuer is rejected before saving
-    r = c.post("/api/sso/providers", json={"preset": "generic", "issuer": "http://evil.example.com", "client_id": "x"}, headers={**B, **H})
+    r = c.post("/api/sso/providers", json={"preset": "generic", "issuer": "http://evil.example.com", "client_id": "x", "password": PW}, headers={**B, **H})
     assert r.status_code == 400
     # presets fill the issuer from fields
     assert sso.resolve_issuer({"preset": "keycloak", "fields": {"base_url": "https://kc.example.com/", "realm": "home"}}) == "https://kc.example.com/realms/home"
@@ -223,7 +236,7 @@ def test_mobile_app_flow(env):
     r = c.get(f"/api/auth/sso/{pid}/start?app_redirect=scanvault://sso&app_state=xyz&code_challenge={challenge}", follow_redirects=False)
     assert "sv_sso" not in r.cookies  # apps are bound by PKCE, not cookies
     cb = follow_to_idp(c, idp, r)
-    r = c.get(cb, follow_redirects=False)
+    r = confirm(c, c.get(cb, follow_redirects=False))
     loc = urlparse(r.headers["location"])
     assert loc.scheme == "scanvault" and loc.netloc == "sso"
     q = {k: v[0] for k, v in parse_qs(loc.query).items()}
@@ -231,7 +244,7 @@ def test_mobile_app_flow(env):
     assert c.post("/api/auth/sso/exchange", json={"ticket": q["ticket"], "code_verifier": "wrong" * 10}).status_code == 400
     # the failed attempt consumed the ticket; run again
     cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{pid}/start?app_redirect=scanvault://sso&code_challenge={challenge}", follow_redirects=False))
-    q = {k: v[0] for k, v in parse_qs(urlparse(c.get(cb, follow_redirects=False).headers["location"]).query).items()}
+    q = {k: v[0] for k, v in parse_qs(urlparse(confirm(c, c.get(cb, follow_redirects=False)).headers["location"]).query).items()}
     r = c.post("/api/auth/sso/exchange", json={"ticket": q["ticket"], "code_verifier": verifier})
     assert r.status_code == 200, r.text
     tok = r.json()["token"]
@@ -248,9 +261,9 @@ def test_password_login_can_be_turned_off_safely(env, monkeypatch):
     c, idp, B = env
     p = add_provider(c, B)
     # refused until this user has a linked identity
-    assert c.put("/api/sso/settings", json={"local_login": False}, headers={**B, **H}).status_code == 400
+    assert c.put("/api/sso/settings", json={"local_login": False, "password": PW}, headers={**B, **H}).status_code == 400
     link(c, idp, B)
-    assert c.put("/api/sso/settings", json={"local_login": False}, headers={**B, **H}).json()["local_login"] is False
+    assert c.put("/api/sso/settings", json={"local_login": False, "password": PW}, headers={**B, **H}).json()["local_login"] is False
     assert c.get("/api/status").json()["local_login"] is False
     r = c.post("/api/auth/login", json={"username": "ryan", "password": "pw-1234567890"})
     assert r.status_code == 403 and r.json()["code"] == "local_login_disabled"
@@ -262,7 +275,7 @@ def test_password_login_can_be_turned_off_safely(env, monkeypatch):
     iid = c.get("/api/sso/config", headers=B).json()["identities"][0]["id"]
     assert c.delete(f"/api/sso/identities/{iid}", headers={**B, **H}).json()["local_login"] is True
     link(c, idp, B)
-    c.put("/api/sso/settings", json={"local_login": False}, headers={**B, **H})
+    c.put("/api/sso/settings", json={"local_login": False, "password": PW}, headers={**B, **H})
     assert c.delete(f"/api/sso/providers/{p['id']}", headers={**B, **H}).json()["local_login"] is True
 
 
@@ -276,7 +289,7 @@ def test_identity_linked_to_one_account_only(env):
     tok, _ = main.new_session(uid)
     B2 = {"Authorization": f"Bearer {tok}"}
     pid = c.get("/api/sso/config", headers=B2).json()["providers"][0]["id"]
-    r = c.post(f"/api/auth/sso/{pid}/link", headers={**B2, **H})
+    r = c.post(f"/api/auth/sso/{pid}/link", json={"password": "pw-0987654321"}, headers={**B2, **H})
     q = {k: v[0] for k, v in parse_qs(urlparse(r.json()["url"]).query).items()}
     idp.nonce = q["nonce"]
     loc = c.get(f"/api/auth/sso/callback?code=abc&state={q['state']}", follow_redirects=False).headers["location"]
@@ -291,7 +304,7 @@ def test_env_provider(env, monkeypatch):
     monkeypatch.setenv("SCANVAULT_OIDC_PRESET", "authentik")
     st = c.get("/api/status").json()
     assert st["sso"] == [{"id": "env", "name": "Authentik", "preset": "authentik"}]
-    assert c.put("/api/sso/providers/env", json={"name": "x"}, headers={**B, **H}).status_code == 409
+    assert c.put("/api/sso/providers/env", json={"name": "x", "password": PW}, headers={**B, **H}).status_code == 409
     link(c, idp, B)
 
 
@@ -313,3 +326,122 @@ def test_microsoft_multi_tenant_issuer(monkeypatch):
         bad = jwt.encode({"iss": "https://login.microsoftonline.com/other/v2.0", "tid": tid, "sub": "s", "aud": "app", "iat": now, "exp": now + 60, "nonce": "n"}, KEY, "RS256", headers={"kid": "k1"})
         with pytest.raises(sso.SSOError):
             o.validate_id_token(p, bad, "n")
+
+
+def test_app_confirmation_can_be_cancelled(env):
+    c, idp, B = env
+    add_provider(c, B)
+    pid = link(c, idp, B)
+    challenge = "a" * 43
+    cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{pid}/start?app_redirect=scanvault://sso&app_state=s&code_challenge={challenge}", follow_redirects=False))
+    r = confirm(c, c.get(cb, follow_redirects=False), action="cancel")
+    assert r.headers["location"] == "scanvault://sso?error=cancelled&state=s"
+    # the confirmation id is single use
+    assert c.post("/api/auth/sso/app-confirm", data={"cid": "nope", "action": "allow"}).status_code == 400
+
+
+def test_reauth_required_and_sessions_revoked(env):
+    c, idp, B = env
+    BH = {**B, **H}
+    # a session alone can't add a provider, link an account or turn password sign-in off
+    assert c.post("/api/sso/providers", json={"preset": "generic", "issuer": ISS, "client_id": "sv-client"}, headers=BH).json()["code"] == "reauth_required"
+    assert c.post("/api/sso/providers", json={"preset": "generic", "issuer": ISS, "client_id": "sv-client", "password": "wrong"}, headers=BH).status_code == 403
+    p = add_provider(c, B)
+    assert c.post(f"/api/auth/sso/{p['id']}/link", json={}, headers=BH).json()["code"] == "reauth_required"
+    assert c.put(f"/api/sso/providers/{p['id']}", json={"name": "x"}, headers=BH).status_code == 403
+    link(c, idp, B)
+    assert c.put("/api/sso/settings", json={"local_login": False}, headers=BH).json()["code"] == "reauth_required"
+
+    # sign in with SSO: that fresh session may make changes without the password
+    c.cookies.clear()
+    cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{p['id']}/start", follow_redirects=False))
+    ticket = fragment_params(c.get(cb, follow_redirects=False).headers["location"])[1]["ticket"]
+    S = {"Authorization": "Bearer " + c.post("/api/auth/sso/exchange", json={"ticket": ticket}).json()["token"]}
+    c.cookies.clear()
+    assert c.get("/api/sso/config", headers=S).json()["reauth_fresh"] is True
+    assert c.put(f"/api/sso/providers/{p['id']}", json={"name": "Fresh"}, headers={**S, **H}).status_code == 200
+    # ...but not once it is older than 10 minutes
+    main.store.conn().execute("UPDATE sessions SET created_at=created_at-3600 WHERE identity_id IS NOT NULL")
+    assert c.put(f"/api/sso/providers/{p['id']}", json={"name": "Old"}, headers={**S, **H}).status_code == 403
+
+    # unlinking ends sessions that the link created; the password session survives
+    iid = c.get("/api/sso/config", headers=B).json()["identities"][0]["id"]
+    assert c.delete(f"/api/sso/identities/{iid}", headers=BH).status_code == 200
+    assert c.get("/api/status", headers=S).json()["authenticated"] is False
+    assert c.get("/api/status", headers=B).json()["authenticated"] is True
+
+    # removing a provider does too
+    link(c, idp, B)
+    cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{p['id']}/start", follow_redirects=False))
+    ticket = fragment_params(c.get(cb, follow_redirects=False).headers["location"])[1]["ticket"]
+    S = {"Authorization": "Bearer " + c.post("/api/auth/sso/exchange", json={"ticket": ticket}).json()["token"]}
+    c.cookies.clear()
+    assert c.get("/api/status", headers=S).json()["authenticated"]
+    c.delete(f"/api/sso/providers/{p['id']}", headers=BH)
+    assert c.get("/api/status", headers=S).json()["authenticated"] is False
+
+
+def test_identity_signs_in_only_through_its_provider(env):
+    c, idp, B = env
+    a = add_provider(c, B, name="A")
+    b = add_provider(c, B, name="B", client_id="sv-client")  # same issuer, separate entry
+    link(c, idp, B, a["id"])
+    c.cookies.clear()
+    cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{b['id']}/start", follow_redirects=False))
+    assert "isn't linked" in fragment_params(c.get(cb, follow_redirects=False).headers["location"])[1]["sso_error"]
+    cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{a['id']}/start", follow_redirects=False))
+    assert fragment_params(c.get(cb, follow_redirects=False).headers["location"])[0] == "/#/sso"
+
+
+def test_response_iss_must_match(env):
+    c, idp, B = env
+    p = add_provider(c, B)
+    link(c, idp, B)
+    c.cookies.clear()
+    cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{p['id']}/start", follow_redirects=False))
+    loc = c.get(cb + "&iss=https%3A%2F%2Fevil.example.com", follow_redirects=False).headers["location"]
+    assert "different provider" in fragment_params(loc)[1]["sso_error"]
+
+
+@pytest.mark.parametrize("bad", [
+    {"issuer": "https://login.microsoftonline.com/{tenantid}/v2.0"},   # template from a non-Microsoft host
+    {"authorization_endpoint": "javascript:alert(document.cookie)"},
+    {"token_endpoint": "http://10.0.0.5/token"},
+    {"jwks_uri": "file:///etc/passwd"},
+])
+def test_discovery_document_is_validated(bad):
+    o = sso.OIDC()
+    iss = "https://bad.example.com"
+    doc = {"issuer": iss, "authorization_endpoint": iss + "/a", "token_endpoint": iss + "/t", "jwks_uri": iss + "/k", **bad}
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, iss + "/.well-known/openid-configuration", json=doc)
+        with pytest.raises(sso.SSOError):
+            o.discover(iss)
+
+
+def test_tenant_template_only_for_microsoft_preset():
+    o = sso.OIDC()
+    tpl = "https://login.microsoftonline.com/{tenantid}/v2.0"
+    base = "https://login.microsoftonline.com/common/v2.0"
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, base + "/.well-known/openid-configuration", json={
+            "issuer": tpl, "authorization_endpoint": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            "token_endpoint": "https://login.microsoftonline.com/common/oauth2/v2.0/token", "jwks_uri": "https://login.microsoftonline.com/common/discovery/v2.0/keys"})
+        rsps.add(responses.GET, "https://login.microsoftonline.com/common/discovery/v2.0/keys", json=jwks())
+        now = int(time.time())
+        tok = jwt.encode({"iss": "https://accounts.google.com", "tid": "x/../../accounts.google.com", "sub": "s", "aud": "app", "iat": now, "exp": now + 60, "nonce": "n"}, KEY, "RS256", headers={"kid": "k1"})
+        with pytest.raises(sso.SSOError):
+            o.validate_id_token({"preset": "microsoft", "fields": {"tenant": "common"}, "client_id": "app"}, tok, "n")
+        tid = "9188040d-6c67-4c5b-b112-36a304b66dad"
+        ok = jwt.encode({"iss": f"https://login.microsoftonline.com/{tid}/v2.0", "tid": tid, "sub": "s", "aud": "app", "iat": now, "exp": now + 60, "nonce": "n"}, KEY, "RS256", headers={"kid": "k1"})
+        with pytest.raises(sso.SSOError):  # same issuer configured as a generic provider
+            o.validate_id_token({"preset": "generic", "issuer": base, "client_id": "app"}, ok, "n")
+
+
+def test_app_redirect_allow_list(monkeypatch):
+    monkeypatch.setenv("SCANVAULT_SSO_APP_REDIRECTS", "scanvault://,https://app.example.com/sso")
+    ok = ["scanvault://sso", "https://app.example.com/sso", "https://app.example.com/sso/done"]
+    bad = ["https://app.example.com.evil.net/sso", "https://app.example.com/ssox", "http://app.example.com/sso",
+           "https://user@app.example.com/sso", "javascript:alert(1)", "intent://x", ""]
+    assert all(sso.app_redirect_allowed(u) for u in ok)
+    assert not any(sso.app_redirect_allowed(u) for u in bad)

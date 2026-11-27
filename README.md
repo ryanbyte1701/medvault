@@ -87,7 +87,10 @@ Password sign-in keeps working unless you turn it off.
    redirect URI it shows (`<your address>/api/auth/sso/callback`) into the
    provider's app registration, and paste the client ID and secret back.
    ScanVault checks the provider's configuration before saving.
-2. **Link my account.** You sign in at the provider once; that identity is now
+2. **Link my account.** You confirm your ScanVault password (adding a
+   provider, linking an account and turning password sign-in off all ask for
+   it, unless you signed in with SSO in the last 10 minutes), then sign in at
+   the provider once; that identity is now
    tied to your ScanVault login. Only linked identities can sign in, so being
    known to the provider is never enough on its own.
 3. Optionally untick **Allow password sign-in**. ScanVault refuses to do this
@@ -118,6 +121,9 @@ Notes:
   the `/data` volume and inside encrypted backups), not under the vault key,
   because sign-in has to work while the vault is locked. Use
   `SCANVAULT_OIDC_CLIENT_SECRET_FILE` with a Docker secret if you prefer.
+- An identity signs in only through the provider entry it was linked with.
+  Unlinking it, removing or disabling its provider, or pointing the provider
+  at a different issuer or client ID ends the sessions it created.
 - SAML is not supported. Every provider listed above speaks OpenID Connect.
 
 ## Backup destinations
@@ -214,11 +220,23 @@ A locked vault returns **423** `{code: "locked"}`; unlock with
    in a browser tab (Android Custom Tab, iOS ASWebAuthenticationSession).
    `app_redirect` must start with a prefix from `SCANVAULT_SSO_APP_REDIRECTS`
    (default `scanvault://`).
-3. ScanVault redirects to `scanvault://sso?ticket=…&state=<app_state>`, or
-   `scanvault://sso?error=…&state=…` on failure. Check `state`.
+3. After the provider, ScanVault shows its own confirmation page ("Sign in
+   to the ScanVault app?") in the tab. Only when the person taps Continue does
+   it redirect to `scanvault://sso?ticket=…&state=<app_state>`. Failures and
+   Cancel go to `scanvault://sso?error=…&state=…`. Check `state`, and ignore
+   callbacks when no sign-in is in progress.
 4. `POST /api/auth/sso/exchange {ticket, code_verifier}` within 2 minutes
    returns `{token, expires_at, unlocked}`, the same as password sign-in.
    Unlock the vault with the encryption key as usual if `unlocked` is false.
+
+What protects this flow: PKCE stops another app that *intercepts* the
+redirect from using the ticket. It does not stop another app on the phone from
+*starting its own* sign-in, because no app owns the `scanvault://` scheme. The
+confirmation page is the defence against that, and Google and Microsoft are
+also asked to show their account picker (`prompt=select_account`). If you
+control a fixed domain for the app, you can instead list a verified Android App
+Link such as `https://app.example.com/sso` in `SCANVAULT_SSO_APP_REDIRECTS`;
+https entries match scheme, host and port exactly.
 
 | Method | Path | |
 |---|---|---|

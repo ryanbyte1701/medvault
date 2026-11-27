@@ -1040,14 +1040,34 @@ async function ssoCard() {
   $$("[data-edit]", el).forEach(b => b.onclick = () => ssoProviderForm(c, c.providers.find(p => p.id === b.dataset.edit)));
   $$("[data-link]", el).forEach(b => b.onclick = async () => {
     if (API.demo) return toast("Single sign-on isn't available in this preview.");
-    try { const r = await API.req("POST", `/api/auth/sso/${encodeURIComponent(b.dataset.link)}/link`); location.href = r.url; } catch (e) { handleErr(e); }
+    const password = c.reauth_fresh ? "" : await askPassword("Link account", "Linking adds a new way into your vault, so confirm it's you.");
+    if (password === null) return;
+    try {
+      const r = await API.req("POST", `/api/auth/sso/${encodeURIComponent(b.dataset.link)}/link`, { password });
+      if (!/^https?:\/\//i.test(r.url)) throw new Error("The provider returned an unsafe sign-in address");
+      location.href = r.url;
+    } catch (e) { handleErr(e); }
   });
   $$("[data-unlink]", el).forEach(b => b.onclick = async () => {
     if (!await confirmBox("Unlink account", "You won't be able to sign in with this account until you link it again.", "Unlink")) return;
     try { const r = await API.req("DELETE", `/api/sso/identities/${encodeURIComponent(b.dataset.unlink)}`); if (r.local_login && !c.local_login) toast("Password sign-in was turned back on"); ssoCard(); } catch (e) { handleErr(e); }
   });
   const cb = $("#ssolocal", el);
-  if (cb) cb.onchange = async () => { try { await API.req("PUT", "/api/sso/settings", { local_login: cb.checked }); toast(cb.checked ? "Password sign-in on" : "Password sign-in off"); } catch (e) { cb.checked = !cb.checked; handleErr(e); } };
+  if (cb) cb.onchange = async () => {
+    const password = cb.checked || c.reauth_fresh ? "" : await askPassword("Turn off password sign-in", "After this, only linked single sign-on accounts can sign in.");
+    if (password === null) { cb.checked = !cb.checked; return; }
+    try { await API.req("PUT", "/api/sso/settings", { local_login: cb.checked, password }); toast(cb.checked ? "Password sign-in on" : "Password sign-in off"); c.local_login = cb.checked; } catch (e) { cb.checked = !cb.checked; handleErr(e); }
+  };
+}
+
+function askPassword(title, text) {
+  return new Promise(res => {
+    let done = false;
+    const mm = modal(title, `<form class="form" id="rf"><p class="small">${esc(text)}</p><label class="f">Your ScanVault password<input name="pw" type="password" required autocomplete="current-password"></label></form>`,
+      { footer: `<button class="btn" data-close>Cancel</button><button class="btn primary" form="rf">Continue</button>` });
+    $("#rf", mm.el).onsubmit = e => { e.preventDefault(); done = true; const v = e.target.pw.value; mm.close(); res(v); };
+    mm.el.addEventListener("click", e => { if (!done && (e.target === mm.el || e.target.closest("[data-close]"))) res(null); });
+  });
 }
 
 function ssoProviderForm(c, p) {
@@ -1067,6 +1087,7 @@ function ssoProviderForm(c, p) {
       <label class="f">Client secret ${p && p.has_secret ? '<span class="hint">saved; leave blank to keep</span>' : '<span class="hint">leave blank for a public client</span>'}<input name="client_secret" type="password" autocomplete="off"></label>
       <label class="f">Scopes<input name="scopes" value="${esc(p ? p.scopes : "openid email profile")}"></label>
       <label class="row small" style="gap:8px"><input type="checkbox" name="enabled" ${!p || p.enabled ? "checked" : ""}> Show on the sign-in page</label>
+      ${c.reauth_fresh ? "" : `<label class="f">Your ScanVault password <span class="hint">confirms it's you</span><input name="reauth" type="password" required autocomplete="current-password"></label>`}
       <p class="err" id="serr"></p>`;
     $("select", f).onchange = e => { preset = e.target.value; draw(); };
     $("#cpy", f).onclick = () => copyText(c.redirect_uri);
@@ -1078,6 +1099,7 @@ function ssoProviderForm(c, p) {
     if (E("issuer")) body.issuer = E("issuer").value;
     presets[preset].fields.forEach(x => body.fields[x.key] = E("fld_" + x.key).value);
     if (E("client_secret").value) body.client_secret = E("client_secret").value;
+    if (E("reauth")) body.password = E("reauth").value;
     const btn = $("#ssave", mm.el); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Checking provider…';
     try { await API.req(p ? "PUT" : "POST", p ? `/api/sso/providers/${encodeURIComponent(p.id)}` : "/api/sso/providers", body); mm.close(); toast(p ? "Provider saved" : "Provider added. Now link your account."); ssoCard(); }
     catch (er) { $("#serr", f).textContent = er.message; btn.disabled = false; btn.textContent = "Save"; }

@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import re
 import secrets
 import threading
 import time
@@ -128,14 +129,31 @@ def resolve_issuer(p: dict) -> str:
     return issuer
 
 
-def validate_issuer_url(issuer: str) -> None:
-    u = urlparse(issuer)
-    if u.scheme not in ("https", "http") or not u.netloc:
-        raise SSOError("The issuer must be an https:// URL")
+def validate_url(url: str, what: str = "The issuer") -> None:
+    """Only https (or http on localhost / an explicitly trusted LAN) is accepted,
+    for the issuer and for every endpoint its discovery document names."""
+    u = urlparse(url if isinstance(url, str) else "")
+    if u.scheme not in ("https", "http") or not u.hostname or u.username or u.password:
+        raise SSOError(f"{what} must be an https:// URL")
     if u.scheme == "http" and u.hostname not in ("localhost", "127.0.0.1") and os.environ.get("SCANVAULT_OIDC_ALLOW_HTTP") != "1":
-        raise SSOError("The issuer must use https:// (set SCANVAULT_OIDC_ALLOW_HTTP=1 to allow http on a trusted LAN)")
-    if "{" in issuer:
-        raise SSOError("Fill in every field of the provider")
+        raise SSOError(f"{what} must use https:// (set SCANVAULT_OIDC_ALLOW_HTTP=1 to allow http on a trusted LAN)")
+    if "{" in url or any(c in url for c in "\r\n\t <>\"\\"):
+        raise SSOError(f"{what} is not a valid URL" if what != "The issuer" else "Fill in every field of the provider")
+
+
+def validate_issuer_url(issuer: str) -> None:
+    validate_url(issuer, "The issuer")
+
+
+# Microsoft's multi-tenant endpoints (common/organizations/consumers) publish a
+# templated issuer; the real issuer contains the signing-in user's tenant id.
+MS_HOST = "login.microsoftonline.com"
+MS_TEMPLATE = f"https://{MS_HOST}/{{tenantid}}/v2.0"
+_TENANT_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def ms_template_allowed(issuer: str, doc_issuer: str) -> bool:
+    return urlparse(issuer).hostname == MS_HOST and issuer.startswith(f"https://{MS_HOST}/") and doc_issuer == MS_TEMPLATE
 
 
 def _norm(u: str) -> str:
@@ -185,14 +203,16 @@ class OIDC:
         for k in ("issuer", "authorization_endpoint", "token_endpoint", "jwks_uri"):
             if not doc.get(k):
                 raise SSOError(f"Provider configuration is missing {k}")
-        # Microsoft's multi-tenant endpoints publish a templated issuer.
-        if "{tenantid}" not in doc["issuer"] and _norm(doc["issuer"]) != _norm(issuer):
+        if _norm(doc["issuer"]) != _norm(issuer) and not ms_template_allowed(issuer, doc["issuer"]):
             raise SSOError(f"Issuer mismatch: the provider calls itself {doc['issuer']}")
+        validate_url(doc["authorization_endpoint"], "The provider's authorization endpoint")
+        validate_url(doc["token_endpoint"], "The provider's token endpoint")
+        validate_url(doc["jwks_uri"], "The provider's key (JWKS) endpoint")
         with self._lock:
             self._disc[issuer] = _Cached(doc, time.time())
         return doc
 
-    def authorization_url(self, p: dict, redirect_uri: str, state: str, nonce: str, challenge: str) -> str:
+    def authorization_url(self, p: dict, redirect_uri: str, state: str, nonce: str, challenge: str, prompt: str | None = None) -> str:
         doc = self.discover(resolve_issuer(p))
         q = {
             "response_type": "code",
@@ -204,8 +224,8 @@ class OIDC:
             "code_challenge": challenge,
             "code_challenge_method": "S256",
         }
-        if p.get("prompt"):
-            q["prompt"] = p["prompt"]
+        if prompt or p.get("prompt"):
+            q["prompt"] = prompt or p["prompt"]
         sep = "&" if "?" in doc["authorization_endpoint"] else "?"
         return doc["authorization_endpoint"] + sep + urlencode(q)
 
@@ -279,8 +299,12 @@ class OIDC:
         except jwt.PyJWTError as exc:
             raise SSOError(f"ID token rejected: {exc}") from exc
         expected_iss = doc["issuer"]
-        if "{tenantid}" in expected_iss:
-            expected_iss = expected_iss.replace("{tenantid}", str(claims.get("tid", "")))
+        if expected_iss == MS_TEMPLATE:
+            # Only the Microsoft preset may use the template, and the tenant must be a real tenant id.
+            tid = str(claims.get("tid", ""))
+            if p.get("preset") != "microsoft" or not ms_template_allowed(resolve_issuer(p), expected_iss) or not _TENANT_RE.match(tid):
+                raise SSOError("ID token issuer does not match the provider")
+            expected_iss = MS_TEMPLATE.replace("{tenantid}", tid)
         if _norm(claims["iss"]) != _norm(expected_iss):
             raise SSOError("ID token issuer does not match the provider")
         aud = claims["aud"]
@@ -296,7 +320,7 @@ class OIDC:
 class PendingStore:
     """Short-lived in-memory records (auth requests and login tickets)."""
 
-    def __init__(self, ttl: int, cap: int = 500):
+    def __init__(self, ttl: int, cap: int = 5000):
         self.ttl, self.cap = ttl, cap
         self._d: dict[str, tuple[dict, float]] = {}
         self._lock = threading.Lock()
@@ -351,10 +375,24 @@ def env_provider() -> dict | None:
 
 
 def app_redirect_allowed(uri: str) -> bool:
-    """Mobile apps receive their one-time ticket on a custom-scheme URI."""
+    """Mobile apps receive their one-time ticket on a custom-scheme URI, or on a
+    verified https App Link if the operator lists one."""
     prefixes = [p.strip() for p in os.environ.get("SCANVAULT_SSO_APP_REDIRECTS", "scanvault://").split(",") if p.strip()]
-    u = urlparse(uri or "")
-    if not u.scheme or u.scheme in ("http", "https", "javascript", "data", "file"):
-        # Only explicitly listed http(s) prefixes (e.g. an app link domain) are allowed.
-        return bool(uri) and u.scheme in ("http", "https") and any(uri.startswith(p) and urlparse(p).scheme in ("http", "https") for p in prefixes)
-    return any(uri.startswith(p) for p in prefixes)
+    if not uri or any(c in uri for c in "\r\n\t <>\"\\"):
+        return False
+    u = urlparse(uri)
+    if u.scheme in ("javascript", "data", "file", "vbscript", "blob", "about", "intent", "content"):
+        return False
+    for p in prefixes:
+        pu = urlparse(p)
+        if pu.scheme != u.scheme:
+            continue
+        if u.scheme in ("http", "https"):
+            # Exact scheme, host and port; the path must be the prefix's path or below it.
+            if u.scheme == "https" and u.netloc.lower() == pu.netloc.lower() and not u.username and not u.password:
+                base = pu.path.rstrip("/")
+                if u.path == pu.path or u.path.startswith(base + "/"):
+                    return True
+        elif uri.startswith(p):
+            return True
+    return False
