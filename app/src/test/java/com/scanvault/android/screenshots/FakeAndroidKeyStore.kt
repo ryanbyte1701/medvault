@@ -30,7 +30,7 @@ object FakeAndroidKeyStore {
         Security.insertProviderAt(FakeProvider(), 1)
     }
 
-    class FakeProvider : Provider("AndroidKeyStore", "1.0", "In-memory AndroidKeyStore for tests") {
+    class FakeProvider : Provider("AndroidKeyStore", 1.0, "In-memory AndroidKeyStore for tests") {
         init {
             put("KeyStore.AndroidKeyStore", FakeKeyStore::class.java.name)
             put("KeyGenerator.AES", FakeKeyGenerator::class.java.name)
@@ -41,7 +41,7 @@ object FakeAndroidKeyStore {
         override fun engineGetKey(alias: String, password: CharArray?): Key? = keys[alias]
         override fun engineGetCertificateChain(alias: String): Array<Certificate>? = null
         override fun engineGetCertificate(alias: String): Certificate? = null
-        override fun engineGetCreationDate(alias: String): Date? = if (alias in keys) Date() else null
+        override fun engineGetCreationDate(alias: String): Date? = if (keys.containsKey(alias)) Date() else null
         override fun engineSetKeyEntry(alias: String, key: Key, password: CharArray?, chain: Array<out Certificate>?) {
             keys[alias] = key as SecretKey
         }
@@ -50,9 +50,9 @@ object FakeAndroidKeyStore {
         override fun engineSetCertificateEntry(alias: String, cert: Certificate) = throw UnsupportedOperationException()
         override fun engineDeleteEntry(alias: String) { keys.remove(alias) }
         override fun engineAliases(): Enumeration<String> = Collections.enumeration(keys.keys.toList())
-        override fun engineContainsAlias(alias: String) = alias in keys
+        override fun engineContainsAlias(alias: String) = keys.containsKey(alias)
         override fun engineSize() = keys.size
-        override fun engineIsKeyEntry(alias: String) = alias in keys
+        override fun engineIsKeyEntry(alias: String) = keys.containsKey(alias)
         override fun engineIsCertificateEntry(alias: String) = false
         override fun engineGetCertificateAlias(cert: Certificate): String? = null
         override fun engineStore(stream: OutputStream?, password: CharArray?) = Unit
