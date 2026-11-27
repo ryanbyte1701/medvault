@@ -48,6 +48,24 @@ android {
         compose = true
         buildConfig = true
     }
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
+}
+
+// README screenshots (app/src/test/.../screenshots) render the real screens with sample data under
+// Robolectric. They are slow, so they only run when asked:
+//   ./gradlew testDebugUnitTest -Pscreenshots --tests '*screenshots*'
+// and write PNGs to app/build/screenshots/.
+val screenshots = project.hasProperty("screenshots")
+tasks.withType<Test>().configureEach {
+    if (screenshots) {
+        systemProperty("roborazzi.test.record", "true")
+        systemProperty("scanvault.screenshots.dir", layout.buildDirectory.dir("screenshots").get().asFile.absolutePath)
+        maxHeapSize = "4g"
+    } else {
+        exclude("**/screenshots/**")
+    }
 }
 
 dependencies {
@@ -74,4 +92,10 @@ dependencies {
     testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.okhttp.tls)
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.roborazzi)
+    testImplementation(libs.roborazzi.compose)
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.androidx.compose.ui.test.junit4)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
