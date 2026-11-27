@@ -994,9 +994,7 @@ def _target_out(row, master: bytes) -> dict:
     cls = targets.TYPES[row["type"]]
     public = {k: v for k, v in cfg.items() if k not in cls.secret_fields and not k.startswith("_")}
     secrets_set = {k: bool(cfg.get(k)) for k in cls.secret_fields}
-    connected = True
-    if row["type"] in ("gdrive", "box") and cfg.get("auth_mode", "oauth") == "oauth":
-        connected = bool(cfg.get("refresh_token"))
+    connected = not targets.needs_connect(row["type"], cfg)
     return {
         "id": row["id"],
         "type": row["type"],
@@ -1020,12 +1018,15 @@ def _merge_config(type_: str, old: dict, new: dict) -> dict:
             continue
         if k in cls.secret_fields and (v is None or v == ""):
             continue  # blank = keep existing secret
-        cfg[k] = v.strip() if isinstance(v, str) and k not in ("private_key", "service_account_json") else v
+        cfg[k] = v.strip() if isinstance(v, str) and k not in ("private_key", "service_account_json", "password", "secret_access_key", "client_secret", "app_secret") else v
     if type_ == "sftp":
         if old.get("host") and (cfg.get("host") != old.get("host") or str(cfg.get("port")) != str(old.get("port"))):
             if new.get("host_key") in (None, old.get("host_key")):
                 cfg["host_key"] = ""  # host changed: re-pin
     return cfg
+
+
+TARGET_NAMES = {"gdrive": "Google Drive", "box": "Box", "dropbox": "Dropbox", "onedrive": "OneDrive", "s3": "S3 storage", "webdav": "WebDAV", "sftp": "SFTP server", "smb": "Network share", "local": "USB / local disk"}
 
 
 @app.get("/api/backups/targets")
@@ -1040,7 +1041,7 @@ async def create_target(request: Request):
     j = await body_json(request)
     t = j.get("type")
     if t not in targets.TYPES:
-        raise ApiError(400, "type must be gdrive, box or sftp")
+        raise ApiError(400, "type must be one of " + ", ".join(targets.TYPES))
     tid = crypto.random_id()
     cfg = _merge_config(t, {}, j.get("config") or {})
     store.conn().execute(
@@ -1048,7 +1049,7 @@ async def create_target(request: Request):
         (
             tid,
             t,
-            _str(j.get("name"), 100) or {"gdrive": "Google Drive", "box": "Box", "sftp": "SFTP server"}[t],
+            _str(j.get("name"), 100) or TARGET_NAMES[t],
             1 if j.get("enabled", True) else 0,
             max(0, int(j.get("schedule_hours", 24) or 0)),
             max(0, int(j.get("keep_last", 14) or 0)),
@@ -1244,15 +1245,14 @@ def _redirect_uri(request: Request, provider: str) -> str:
 def oauth_start(provider: str, target_id: str, request: Request):
     master = data_access(request)
     row = _target_row(target_id)
-    if row["type"] != provider or provider not in ("gdrive", "box"):
+    if row["type"] != provider or provider not in targets.OAUTH_TYPES:
         raise ApiError(400, "Provider mismatch")
     cfg = _target_config(row, master)
-    if not cfg.get("client_id") or not cfg.get("client_secret"):
-        raise ApiError(400, "Enter the OAuth client ID and secret first, then Save")
+    if not targets.oauth_client_id(provider, cfg):
+        raise ApiError(400, "Enter the app's client ID and secret first, then Save")
     state = secrets.token_urlsafe(24)
     _oauth_states[state] = (target_id, time.time())
-    cls = targets.TYPES[provider]
-    return RedirectResponse(cls.auth_url(cfg["client_id"], _redirect_uri(request, provider), state))  # type: ignore[attr-defined]
+    return RedirectResponse(targets.oauth_auth_url(provider, cfg, _redirect_uri(request, provider), state))
 
 
 @app.get("/api/oauth/{provider}/redirect-uri")

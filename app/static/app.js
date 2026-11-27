@@ -789,7 +789,28 @@ async function viewUploadPage() {
 }
 
 // ------------------------------------------------------------------ backups
-const TT = { gdrive: ["Google Drive", I.drive], box: ["Box", I.box], sftp: ["SFTP / SCP server", I.server] };
+const TT = {
+  gdrive: ["Google Drive", I.drive, "Cloud"], onedrive: ["OneDrive", I.cloud, "Cloud"], dropbox: ["Dropbox", I.box, "Cloud"], box: ["Box", I.box, "Cloud"],
+  s3: ["S3 / object storage", I.cloud, "Object storage"],
+  sftp: ["SFTP / SCP server", I.server, "Network"], smb: ["Network share (SMB)", I.server, "Network"], webdav: ["WebDAV / Nextcloud", I.server, "Network"],
+  local: ["USB / local disk", I.server, "Local"],
+};
+const TT_DESC = {
+  gdrive: "Your Google account (OAuth) or a Shared Drive via service account.",
+  onedrive: "OneDrive personal or OneDrive for Business / SharePoint, via a Microsoft app registration.",
+  dropbox: "Your Dropbox, in an app folder or a folder you choose.",
+  box: "Your Box account (OAuth) or a Box Custom App (client credentials).",
+  s3: "Amazon S3, Backblaze B2, Wasabi, Cloudflare R2, Synology C2, MinIO or any S3-compatible bucket.",
+  sftp: "Any server you can SSH into: NAS, VPS, Synology, TrueNAS. SFTP or SCP.",
+  smb: "A Windows or NAS shared folder (Synology, QNAP, TrueNAS, Samba). SMB 2/3 with optional encryption.",
+  webdav: "Nextcloud, ownCloud, Synology WebDAV Server, Koofr, pCloud or any WebDAV server.",
+  local: "A USB drive, second disk or NFS mount, mapped into the container.",
+};
+const targetSummary = t => {
+  const c = t.config || {};
+  return { sftp: () => `${(c.protocol || "sftp").toUpperCase()} ${c.host || ""}`, s3: () => `${c.bucket || ""}${c.prefix ? "/" + c.prefix : ""}`, smb: () => `\\\\${c.host || ""}\\${c.share || ""}`,
+    webdav: () => (c.url || "").replace(/^https?:\/\//, "").split("/")[0], local: () => c.path || "/backups", dropbox: () => "/" + (c.folder || "ScanVault"), onedrive: () => "/" + (c.folder || "ScanVault") }[t.type]?.() || "";
+};
 async function viewBackups() {
   const [tg, runs] = await Promise.all([API.req("GET", "/api/backups/targets"), API.req("GET", "/api/backups/runs")]);
   const m = main();
@@ -797,11 +818,11 @@ async function viewBackups() {
   m.innerHTML = `${mobileHead()}<div class="top"><div><h1>Backups</h1><p class="sub">Each backup is one archive, encrypted here with your key before upload. Providers only ever see ciphertext.</p></div>
     <div class="row"><a class="btn" href="${esc(API.backupDownloadUrl())}" id="dlb">${I.dl} Download backup</a><button class="btn primary" id="all" ${tg.length ? "" : "disabled"}>Back up now</button></div></div>
   <div class="targets">${tg.map(t => `<div class="card target">
-      <div class="row"><div class="logo">${TT[t.type][1]}</div><div style="flex:1"><h3>${esc(t.name)}</h3><div class="small muted">${esc(TT[t.type][0])}${t.type === "sftp" ? " · " + esc((t.config.protocol || "sftp").toUpperCase()) + " " + esc(t.config.host || "") : ""}</div></div>${t.enabled ? badge(t.last_status) : '<span class="badge gray">Paused</span>'}</div>
+      <div class="row"><div class="logo">${TT[t.type][1]}</div><div style="flex:1"><h3>${esc(t.name)}</h3><div class="small muted">${esc(TT[t.type][0])}${targetSummary(t) ? " · " + esc(targetSummary(t)) : ""}</div></div>${t.enabled ? badge(t.last_status) : '<span class="badge gray">Paused</span>'}</div>
       <div class="small"><div>Schedule: <b>${t.schedule_hours ? `every ${t.schedule_hours} h` : "manual only"}</b> · keep last <b>${t.keep_last || "all"}</b></div><div class="muted">Last run ${esc(fmtDT(t.last_run))}</div></div>
       ${!t.connected ? `<div class="note">${I.warn}<div>Not connected yet. <button class="btn sm" data-conn="${esc(t.id)}" data-type="${esc(t.type)}">Connect ${esc(TT[t.type][0])} account</button></div></div>` : ""}
       <div class="row"><button class="btn sm" data-run="${esc(t.id)}">Run now</button><button class="btn sm" data-test="${esc(t.id)}">Test</button><button class="btn sm ghost" data-edit="${esc(t.id)}">Edit</button></div></div>`).join("")}
-    <button class="addtarget" id="add">${I.plus}<span>Add destination</span><span class="small" style="font-weight:400">Google Drive · Box · SFTP/SCP</span></button></div>
+    <button class="addtarget" id="add">${I.plus}<span>Add destination</span><span class="small" style="font-weight:400">Google Drive · OneDrive · Dropbox · Box · S3 · B2 · SFTP · SMB · WebDAV · USB</span></button></div>
   <div class="section-h"><h2>History</h2></div>
   <div class="card scroll">${runs.length ? `<table class="stk"><thead><tr><th>When</th><th>Destination</th><th>Status</th><th>Details</th><th style="text-align:right">Size</th></tr></thead><tbody>
     ${runs.map(r => `<tr><td class="nowrap">${esc(fmtDT(r.started_at))}</td><td>${esc(r.target_name)}</td><td>${badge(r.status)}</td><td class="small">${esc(r.message || r.filename || "")}</td><td class="num">${r.size ? fmtBytes(r.size) : ""}</td></tr>`).join("")}</tbody></table>`
@@ -820,7 +841,8 @@ async function viewBackups() {
 }
 
 function chooseTargetType() {
-  const m = modal("Add backup destination", `<div class="choice">${Object.entries(TT).map(([k, [l, ic]]) => `<button data-t="${k}">${ic}<b>${l}</b><span>${{ gdrive: "Your Google account (OAuth) or a Shared Drive via service account.", box: "Your Box account (OAuth) or a Box Custom App (client credentials).", sftp: "Any server you can SSH into: NAS, VPS, Synology, TrueNAS. SFTP or SCP." }[k]}</span></button>`).join("")}</div>`);
+  const groups = [...new Set(Object.values(TT).map(v => v[2]))];
+  const m = modal("Add backup destination", groups.map(g => `<h3 class="small muted" style="margin:14px 0 8px">${g}</h3><div class="choice">${Object.entries(TT).filter(([, v]) => v[2] === g).map(([k, [l, ic]]) => `<button data-t="${k}">${ic}<b>${l}</b><span>${TT_DESC[k]}</span></button>`).join("")}</div>`).join(""));
   $$("[data-t]", m.el).forEach(b => b.onclick = () => { m.close(); targetForm(b.dataset.t); });
 }
 
@@ -828,7 +850,7 @@ async function targetForm(type, t) {
   const c = t?.config || {}, sec = t?.secrets_set || {};
   const ph = k => sec[k] ? 'placeholder="•••••• saved (leave blank to keep)"' : "";
   let redirect = "";
-  if (type !== "sftp") { try { redirect = (await API.req("GET", `/api/oauth/${type}/redirect-uri`)).redirect_uri; } catch { redirect = location.origin + `/api/oauth/${type}/callback`; } }
+  if (["gdrive", "box", "dropbox", "onedrive"].includes(type)) { try { redirect = (await API.req("GET", `/api/oauth/${type}/redirect-uri`)).redirect_uri; } catch { redirect = location.origin + `/api/oauth/${type}/callback`; } }
   const common = `<div class="grid3"><label class="f">Name<input name="name" value="${esc(t?.name || TT[type][0])}"></label>
     <label class="f">Every (hours) <span class="hint">0 = manual</span><input name="schedule_hours" type="number" min="0" value="${t ? t.schedule_hours : 24}"></label>
     <label class="f">Keep last<input name="keep_last" type="number" min="0" value="${t ? t.keep_last : 14}"></label></div>
@@ -851,6 +873,33 @@ async function targetForm(type, t) {
     <label class="f">Private key <span class="hint">OpenSSH or PEM. Use instead of, or with, a password.</span><textarea name="private_key" class="mono" ${ph("private_key")}></textarea></label>
     <div class="grid2"><label class="f">Key passphrase<input name="key_passphrase" type="password" ${ph("key_passphrase")}></label><label class="f">Remote folder<input name="remote_dir" value="${esc(c.remote_dir || "scanvault-backups")}"></label></div>
     <label class="f">Pinned host key <span class="hint">Filled in automatically on the first successful test; a different key later blocks the connection.</span><input name="host_key" class="mono" value="${esc(c.host_key)}"></label>`;
+  if (type === "dropbox") fields = `<div class="note info">${I.info}<div>At dropbox.com/developers create an app (Scoped access, "App folder" is enough) with the <code>files.content.write</code>, <code>files.content.read</code> and <code>files.metadata.read</code> permissions, and add the redirect URI <code>${esc(redirect)}</code>.</div></div>
+    <div class="grid2"><label class="f">App key<input name="app_key" value="${esc(c.app_key)}"></label><label class="f">App secret<input name="app_secret" type="password" ${ph("app_secret")}></label></div>
+    <label class="f">Folder <span class="hint">Inside the app folder or your Dropbox</span><input name="folder" value="${esc(c.folder || "ScanVault")}"></label>`;
+  if (type === "onedrive") fields = `<div class="note info">${I.info}<div>In the Microsoft Entra admin center register an app (accounts: personal and work, or your org only), add a Web redirect URI <code>${esc(redirect)}</code>, create a client secret, and grant the delegated <code>Files.ReadWrite</code> and <code>offline_access</code> permissions.</div></div>
+    <div class="grid2"><label class="f">Application (client) ID<input name="client_id" value="${esc(c.client_id)}"></label><label class="f">Client secret<input name="client_secret" type="password" ${ph("client_secret")}></label></div>
+    <div class="grid2"><label class="f">Account type<select name="tenant">${[["common", "Personal or work/school"], ["consumers", "Personal only"], ["organizations", "Work/school only"]].map(([v, l]) => `<option value="${v}" ${(c.tenant || "common") === v ? "selected" : ""}>${l}</option>`).join("")}${c.tenant && !["common", "consumers", "organizations"].includes(c.tenant) ? `<option selected value="${esc(c.tenant)}">${esc(c.tenant)}</option>` : ""}</select></label>
+    <label class="f">Folder<input name="folder" value="${esc(c.folder || "ScanVault")}"></label></div>`;
+  if (type === "s3") fields = `<label class="f">Provider<select name="provider" id="s3p">${[["aws", "Amazon S3"], ["b2", "Backblaze B2"], ["wasabi", "Wasabi"], ["r2", "Cloudflare R2"], ["c2", "Synology C2 Object Storage"], ["minio", "MinIO / self-hosted"], ["other", "Other S3-compatible"]].map(([v, l]) => `<option value="${v}" ${(c.provider || "aws") === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+    <div class="grid2"><label class="f">Bucket<input name="bucket" value="${esc(c.bucket)}" autocapitalize="none"></label><label class="f">Folder prefix <span class="hint">Optional</span><input name="prefix" value="${esc(c.prefix || "scanvault")}" autocapitalize="none"></label></div>
+    <div class="grid2"><label class="f">Region <span class="hint" id="s3rh"></span><input name="region" value="${esc(c.region)}" autocapitalize="none"></label>
+      <label class="f" data-s3="r2">Cloudflare account ID<input name="account_id" value="${esc(c.account_id)}"></label>
+      <label class="f" data-s3="minio other">Endpoint URL<input name="endpoint_url" value="${esc(c.endpoint_url)}" placeholder="https://s3.example.com" autocapitalize="none"></label></div>
+    <div class="grid2"><label class="f">Access key ID<input name="access_key_id" value="${esc(c.access_key_id)}" autocapitalize="none"></label><label class="f">Secret access key<input name="secret_access_key" type="password" ${ph("secret_access_key")}></label></div>
+    <div class="grid2"><label class="f" data-s3="aws">Storage class<select name="storage_class">${["", "STANDARD_IA", "INTELLIGENT_TIERING", "GLACIER_IR"].map(v => `<option value="${v}" ${(c.storage_class || "") === v ? "selected" : ""}>${v || "Standard"}</option>`).join("")}</select></label>
+      <label class="check" data-s3="minio other"><input type="checkbox" name="path_style" ${c.path_style ? "checked" : ""}> Path-style URLs</label></div>
+    <div class="note info">${I.info}<div>Use a key that can only reach this bucket. Turning on bucket versioning or object lock protects backups from ransomware.</div></div>`;
+  if (type === "webdav") fields = `<label class="f">WebDAV URL <span class="hint">Nextcloud: https://cloud.example.com/remote.php/dav/files/USERNAME</span><input name="url" value="${esc(c.url)}" placeholder="https://" autocapitalize="none"></label>
+    <div class="grid2"><label class="f">Username<input name="username" value="${esc(c.username)}" autocapitalize="none"></label><label class="f">Password or app password<input name="password" type="password" ${ph("password")}></label></div>
+    <label class="f">Folder<input name="folder" value="${esc(c.folder || "ScanVault")}"></label>
+    <label class="check"><input type="checkbox" name="insecure_tls" ${c.insecure_tls ? "checked" : ""}> Allow a self-signed certificate (LAN only)</label>`;
+  if (type === "smb") fields = `<div class="grid3"><label class="f" style="grid-column:span 2">Server<input name="host" value="${esc(c.host)}" placeholder="nas.local or 192.168.1.20" autocapitalize="none"></label><label class="f">Port<input name="port" type="number" value="${esc(c.port || 445)}"></label></div>
+    <div class="grid2"><label class="f">Share<input name="share" value="${esc(c.share)}" placeholder="backup"></label><label class="f">Folder in share<input name="folder" value="${esc(c.folder || "scanvault")}"></label></div>
+    <div class="grid2"><label class="f">Username <span class="hint">DOMAIN\\user if needed</span><input name="username" value="${esc(c.username)}" autocapitalize="none"></label><label class="f">Password<input name="password" type="password" ${ph("password")}></label></div>
+    <label class="check"><input type="checkbox" name="require_encryption" ${c.require_encryption !== false ? "checked" : ""}> Require SMB3 encryption in transit</label>`;
+  if (type === "local") fields = `<div class="note info">${I.info}<div>Map a USB drive, second disk or NFS mount into the container under <code>/backups</code> (see the docker-compose file), then point this at it.</div></div>
+    <label class="f">Folder<input name="path" value="${esc(c.path || "/backups/usb1/scanvault")}" autocapitalize="none"></label>
+    <label class="check"><input type="checkbox" name="require_mount" ${c.require_mount !== false ? "checked" : ""}> Fail if the disk isn't mounted (so backups never fill the NAS's own drive)</label>`;
   const m = modal((t ? "Edit " : "Add ") + TT[type][0], `<form class="form" id="tf">${common}${fields}<p class="err" id="err"></p></form>`,
     { footer: `${t ? '<button class="btn danger" id="del">Remove</button><span class="spacer"></span>' : ""}<button class="btn" data-close>Cancel</button><button class="btn primary" form="tf" id="save">Save</button>` });
   let auth = c.auth_mode || "oauth", proto = c.protocol || "sftp";
@@ -858,16 +907,24 @@ async function targetForm(type, t) {
   $$("#am button", m.el).forEach(b => b.onclick = () => { auth = b.dataset.a; $$("#am button", m.el).forEach(x => x.classList.toggle("on", x === b)); showMode(); });
   $$("#pr button", m.el).forEach(b => b.onclick = () => { proto = b.dataset.p; $$("#pr button", m.el).forEach(x => x.classList.toggle("on", x === b)); });
   showMode();
+  const s3p = $("#s3p", m.el);
+  if (s3p) {
+    const hints = { aws: "e.g. us-east-1", b2: "e.g. us-west-004", wasabi: "e.g. us-east-1", r2: "auto", c2: "e.g. us-001 or eu-002", minio: "usually us-east-1", other: "" };
+    const sync = () => { $$("[data-s3]", m.el).forEach(el => el.hidden = !el.dataset.s3.split(" ").includes(s3p.value)); $("#s3rh", m.el).textContent = hints[s3p.value] || ""; };
+    s3p.onchange = sync; sync();
+  }
   $("#tf", m.el).onsubmit = async e => {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(e.target));
     const top = { name: fd.name, schedule_hours: +fd.schedule_hours || 0, keep_last: +fd.keep_last || 0, enabled: !!e.target.enabled.checked };
     ["name", "schedule_hours", "keep_last", "enabled"].forEach(k => delete fd[k]);
-    if (type === "sftp") fd.protocol = proto; else fd.auth_mode = auth;
+    if (type === "sftp") fd.protocol = proto; else if (type === "gdrive" || type === "box") fd.auth_mode = auth;
+    $$("#tf input[type=checkbox]", m.el).forEach(cb => { if (cb.name && cb.name !== "enabled") fd[cb.name] = cb.checked; });
+    if (fd.port) fd.port = +fd.port;
     try {
       const r = t ? await API.req("PUT", `/api/backups/targets/${t.id}`, { ...top, config: fd }) : await API.req("POST", "/api/backups/targets", { type, ...top, config: fd });
       m.close(); toast("Saved");
-      if (!r.connected && type !== "sftp") { if (await confirmBox(`Connect ${TT[type][0]}?`, `You'll sign in to ${TT[type][0]} and allow ScanVault to store backups there.`, "Connect", false)) return API.oauthStart(type, r.id); }
+      if (!r.connected) { if (await confirmBox(`Connect ${TT[type][0]}?`, `You'll sign in to ${TT[type][0]} and allow ScanVault to store backups there.`, "Connect", false)) return API.oauthStart(type, r.id); }
       viewBackups();
     } catch (er) { $("#err", m.el).textContent = er.message; }
   };

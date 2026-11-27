@@ -108,6 +108,7 @@ db.files.filter(f => f._img && f._img[0] === "CT" && db.studies.find(s => s.id =
 db.targets.push(
   { id: id(), type: "gdrive", name: "Google Drive", enabled: true, schedule_hours: 24, keep_last: 14, config: { auth_mode: "oauth", client_id: "1234-abc.apps.googleusercontent.com", folder_id: "1AbCdEfScanVault" }, secrets_set: { client_secret: true, refresh_token: true, service_account_json: false }, connected: true, last_run: iso(0.3), last_status: "ok" },
   { id: id(), type: "sftp", name: "Home NAS", enabled: true, schedule_hours: 6, keep_last: 30, config: { protocol: "sftp", host: "nas.local", port: 22, username: "scanvault", remote_dir: "backups/scanvault", host_key: "SHA256:q2Vx4Jw0b6Tq3yZ6m3Q1nqk2sLr8m8uZ7v0c4p9X1aA" }, secrets_set: { password: false, private_key: true, key_passphrase: false }, connected: true, last_run: iso(0.1), last_status: "ok" },
+  { id: id(), type: "s3", name: "Backblaze B2", enabled: true, schedule_hours: 24, keep_last: 30, config: { provider: "b2", bucket: "doe-family-scans", prefix: "scanvault", region: "us-west-004", access_key_id: "004a1b2c3d4e5f0000000001" }, secrets_set: { secret_access_key: true }, connected: true, last_run: iso(0.25), last_status: "ok" },
   { id: id(), type: "box", name: "Box", enabled: true, schedule_hours: 168, keep_last: 8, config: { auth_mode: "oauth", client_id: "boxclient123" }, secrets_set: { client_secret: true, refresh_token: false }, connected: false, last_run: null, last_status: null });
 const size0 = () => db.files.reduce((a, f) => a + f.size_bytes, 0);
 const bname = d => "scanvault-backup-" + new Date(now - d * 86400000).toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-") + "Z.svb";
@@ -138,7 +139,7 @@ function runBackup(ts) {
   const name = bname(0), size = Math.round(size0() * 1.002);
   return ts.map(t => {
     let status = "ok", message = `Uploaded ${name} (${size.toLocaleString()} bytes)`;
-    if (!t.connected) { status = "error"; message = `${t.type === "box" ? "Box" : "Google Drive"} is not connected yet: click 'Connect account'`; }
+    if (!t.connected) { status = "error"; message = `${t.name} is not connected yet: click 'Connect account'`; }
     t.last_run = new Date().toISOString(); t.last_status = status;
     db.runs.unshift({ id: id(), target_id: t.id, target_name: t.name, target_type: t.type, started_at: t.last_run, finished_at: t.last_run, status, message, size, filename: name });
     return { target_id: t.id, name: t.name, status, message };
@@ -193,10 +194,11 @@ async function req(method, path, body) {
   if ((m = url.match(/^\/api\/files\/([^/]+)$/)) && method === "DELETE") { db.files = db.files.filter(f => f.id !== m[1]); return { ok: true }; }
   if (url === "/api/backups/targets" && method === "GET") return db.targets;
   if (url === "/api/backups/targets" && method === "POST") {
-    const secretKeys = { gdrive: ["client_secret", "refresh_token", "service_account_json"], box: ["client_secret", "refresh_token"], sftp: ["password", "private_key", "key_passphrase"] }[body.type];
+    const secretKeys = { gdrive: ["client_secret", "refresh_token", "service_account_json"], box: ["client_secret", "refresh_token"], sftp: ["password", "private_key", "key_passphrase"],
+      dropbox: ["app_secret", "refresh_token"], onedrive: ["client_secret", "refresh_token"], s3: ["secret_access_key"], webdav: ["password"], smb: ["password"], local: [] }[body.type];
     const cfg = { ...body.config }, sec = {};
     secretKeys.forEach(k => { sec[k] = !!cfg[k]; delete cfg[k]; });
-    const oauth = body.type !== "sftp" && (cfg.auth_mode || "oauth") === "oauth";
+    const oauth = ["gdrive", "box", "dropbox", "onedrive"].includes(body.type) && (cfg.auth_mode || "oauth") === "oauth";
     const t = { id: id(), type: body.type, name: body.name, enabled: body.enabled, schedule_hours: body.schedule_hours, keep_last: body.keep_last, config: cfg, secrets_set: sec, connected: oauth ? !!sec.refresh_token : true, last_run: null, last_status: null };
     db.targets.push(t); return t;
   }
@@ -206,14 +208,14 @@ async function req(method, path, body) {
     const cfg = { ...body.config };
     Object.keys(t.secrets_set).forEach(k => { if (cfg[k]) t.secrets_set[k] = true; delete cfg[k]; });
     Object.assign(t, { name: body.name, enabled: body.enabled, schedule_hours: body.schedule_hours, keep_last: body.keep_last, config: { ...t.config, ...cfg } });
-    if (t.type === "sftp" || cfg.auth_mode && cfg.auth_mode !== "oauth") t.connected = true;
+    if (!["gdrive", "box", "dropbox", "onedrive"].includes(t.type) || cfg.auth_mode && cfg.auth_mode !== "oauth") t.connected = true;
     return t;
   }
   if ((m = url.match(/^\/api\/backups\/targets\/([^/]+)\/test$/))) {
     await wait(600); const t = findT(m[1]);
     if (!t.connected) err(502, `${t.name} is not connected yet: click 'Connect account'`);
     if (t.type === "sftp" && !t.config.host_key) t.config.host_key = "SHA256:demoPinnedHostKey0b6Tq3yZ6m3Q1nqk2sLr8m8uZ7v";
-    return { ok: true, message: t.type === "sftp" ? `Connected over ${(t.config.protocol || "sftp").toUpperCase()}. Host key pinned.` : `Connected. Backups go to folder 'ScanVault'.` };
+    return { ok: true, message: { sftp: `Connected over ${(t.config.protocol || "sftp").toUpperCase()}. Host key pinned.`, s3: `Connected. Backups go to s3://${t.config.bucket || "bucket"}/${t.config.prefix || ""}`, local: "Writable. 3,712.4 GB free in " + (t.config.path || "/backups"), smb: `Connected. Backups go to \\\\${t.config.host || "nas"}\\${t.config.share || "backup"}` }[t.type] || "Connected. Backups go to folder 'ScanVault'." };
   }
   if ((m = url.match(/^\/api\/backups\/targets\/([^/]+)\/run$/))) { await wait(1100); return { results: runBackup([findT(m[1])]) }; }
   if (url === "/api/backups/run") { await wait(1400); return { results: runBackup(db.targets.filter(t => t.enabled)) }; }
@@ -301,7 +303,7 @@ window.SV_API = {
   fileUrl: fid => { const f = fileById(fid); return f._blob || (f._img ? scan(f._img[0], f._img[1], 768) : "#"); },
   reportImage: f => { const r = fileById(f.id)._report; if (!r) return null; const s = db.studies.find(x => x.id === f.study_id) || {}; return reportPage(s.title || "Report", s.facility || "Imaging center", s.study_date || "", r.lines); },
   backupDownloadUrl: () => "#",
-  oauthStart: (type, tid) => { const t = findT(tid); t.connected = true; t.secrets_set.refresh_token = true; document.dispatchEvent(new CustomEvent("sv-demo-toast", { detail: `${type === "box" ? "Box" : "Google"} sign-in would open here. Marked as connected for the preview.` })); document.querySelector('[data-go="backups"]')?.click(); },
+  oauthStart: (type, tid) => { const t = findT(tid); t.connected = true; t.secrets_set.refresh_token = true; document.dispatchEvent(new CustomEvent("sv-demo-toast", { detail: `${({ box: "Box", dropbox: "Dropbox", onedrive: "Microsoft", gdrive: "Google" })[type]} sign-in would open here. Marked as connected for the preview.` })); document.querySelector('[data-go="backups"]')?.click(); },
 };
 window.SV_DEMO_SKIP = () => { state.setup = state.authed = state.unlocked = true; state.recovery = recoveryText(); };
 })();
