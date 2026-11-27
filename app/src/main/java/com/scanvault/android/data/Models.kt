@@ -143,3 +143,35 @@ class RenderedImage(
     val rgb: Boolean,
     val modality: String?,
 )
+
+/** One entry of the server's activity log (who did what, and when). */
+@Serializable
+data class ActivityEntry(
+    val seq: Long,
+    val at: String,
+    val action: String,
+    val label: String = "",
+    val category: String = "",
+    val outcome: String? = null,
+    @SerialName("user_id") val userId: String? = null,
+    val username: String? = null,
+    @SerialName("patient_id") val patientId: String? = null,
+    @SerialName("patient_name") val patientName: String? = null,
+    @SerialName("study_id") val studyId: String? = null,
+    @SerialName("study_title") val studyTitle: String? = null,
+    val client: String? = null,
+    val ip: String? = null,
+    val details: JsonObject? = null,
+) {
+    val failed: Boolean get() = outcome != null && outcome != "ok"
+
+    /** A string detail such as "filename", or null. */
+    fun detail(key: String): String? =
+        (details?.get(key) as? kotlinx.serialization.json.JsonPrimitive)?.takeUnless { it is kotlinx.serialization.json.JsonNull }?.content
+}
+
+@Serializable
+data class ActivityPage(
+    val entries: List<ActivityEntry> = emptyList(),
+    @SerialName("next_before") val nextBefore: Long? = null,
+)

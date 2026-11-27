@@ -44,6 +44,10 @@ patient data. They are rendered by the screenshot tests described under [Buildin
 - Import DICOM files or a zipped imaging-CD export into a patient; the server groups them into studies.
 - View images full-screen with pinch-zoom; open PDFs and other files in another app.
 - Delete patients, studies and files (long-press a file).
+- See **recent activity** from the server's activity log (who signed in, uploaded, edited, deleted,
+  viewed or downloaded what, and when): the clock icon on the Patients screen shows everything,
+  and **Activity** in a patient's or study's menu narrows it to that patient or study. Requests
+  carry a `ScanVault-Android/<version>` User-Agent so the log shows they came from the app.
 
 Encryption and the Google Drive / Box / SFTP backups all happen on the server. The phone never
 stores the vault passphrase or recovery key.
@@ -106,6 +110,7 @@ The app expects these endpoints (all JSON, `Authorization: Bearer <token>`, erro
 | DELETE | `/api/files/{id}` | |
 | GET | `/api/files/{id}/content` | decrypted bytes |
 | GET | `/api/files/{id}/thumbnail` | JPEG, when `has_thumbnail` |
+| GET | `/api/activity` | `patient_id?`, `study_id?`, `before?`, `limit` → `{entries, next_before}`, newest first |
 
 A locked vault answers data endpoints with HTTP 423 `{"code": "locked"}`; the app then shows the unlock dialog.
 

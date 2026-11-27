@@ -163,6 +163,7 @@ object HttpClients {
         return OkHttpClient.Builder()
             .sslSocketFactory(ssl.socketFactory, trust)
             .hostnameVerifier(PinningHostnameVerifier(pins))
+            .addInterceptor { chain -> chain.proceed(chain.request().newBuilder().header("User-Agent", USER_AGENT).build()) }
             .addNetworkInterceptor(CleartextPolicyInterceptor(allowLanHttp))
             .followRedirects(false)
             .followSslRedirects(false)
@@ -170,6 +171,15 @@ object HttpClients {
             .readTimeout(5, TimeUnit.MINUTES)
             .writeTimeout(10, TimeUnit.MINUTES)
             .build()
+    }
+
+    /** Lets the server's activity log show "Android app" and the app version for this device's requests. */
+    val USER_AGENT: String by lazy {
+        val release = runCatching { android.os.Build.VERSION.RELEASE }.getOrNull()
+        val model = runCatching { android.os.Build.MODEL }.getOrNull()
+        "ScanVault-Android/${com.scanvault.android.BuildConfig.VERSION_NAME}" +
+            listOfNotNull(model?.takeIf { it.isNotBlank() }, release?.takeIf { it.isNotBlank() }?.let { "Android $it" })
+                .takeIf { it.isNotEmpty() }?.joinToString("; ", " (", ")").orEmpty()
     }
 
     /** Finds an [UntrustedCertificateException] anywhere in a failure's cause chain. */

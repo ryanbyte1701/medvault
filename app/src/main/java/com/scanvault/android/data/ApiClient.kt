@@ -216,6 +216,26 @@ class ApiClient(
         }
     }
 
+    // --- Activity log --------------------------------------------------------------------
+
+    /** Newest first. Pass the previous page's [ActivityPage.nextBefore] as [before] for older entries. */
+    suspend fun activity(
+        patientId: String? = null,
+        studyId: String? = null,
+        before: Long? = null,
+        limit: Int = 50,
+    ): ActivityPage = withContext(Dispatchers.IO) {
+        val url = url("api/activity").newBuilder().apply {
+            patientId?.let { addQueryParameter("patient_id", it) }
+            studyId?.let { addQueryParameter("study_id", it) }
+            before?.let { addQueryParameter("before", it.toString()) }
+            addQueryParameter("limit", limit.toString())
+        }.build()
+        val builder = Request.Builder().url(url).header("Accept", "application/json")
+        authHeader()?.let { builder.header("Authorization", it) }
+        execute(builder.build()) { json.decodeFromString(ActivityPage.serializer(), it) }
+    }
+
     // --- Plumbing ------------------------------------------------------------------------
 
     private fun seg(id: String): String = java.net.URLEncoder.encode(id, "UTF-8").replace("+", "%20")

@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.MoreVert
@@ -246,6 +247,7 @@ fun StudyScreen(
     studyId: String,
     onBack: () -> Unit,
     onOpenImage: (fileId: String, name: String, isDicom: Boolean) -> Unit,
+    onOpenActivity: (studyTitle: String) -> Unit = {},
 ) {
     val vm: StudyViewModel = viewModel(key = "study-$studyId") { StudyViewModel(container, studyId) }
     val state by vm.state.collectAsStateWithLifecycle()
@@ -335,6 +337,14 @@ fun StudyScreen(
                     IconButton(onClick = vm::load) { Icon(Icons.Default.Refresh, "Refresh") }
                     IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "More") }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Activity") },
+                            leadingIcon = { Icon(Icons.Default.History, null) },
+                            onClick = {
+                                menu = false
+                                onOpenActivity((state as? Loadable.Loaded<StudyDetail>)?.value?.study?.title.orEmpty())
+                            },
+                        )
                         DropdownMenuItem(
                             text = { Text("Delete study") },
                             leadingIcon = { Icon(Icons.Default.Delete, null) },
