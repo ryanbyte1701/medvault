@@ -237,7 +237,7 @@ def test_labs_survive_rekey_and_restore(vault):
     p = _patient(c, B)
     d = _upload(c, B, p["id"], lab_samples.labcorp_classic())
     assert c.put(f"/api/labs/reports/{d['id']}", json={"save": True}, headers=B).status_code == 200
-    r = c.post("/api/vault/rekey", json={"passphrase": PASS, "new_passphrase": "rotated-passphrase-9"}, headers=B)
+    r = c.post("/api/vault/rekey", json={"passphrase": PASS, "new_passphrase": "rotated-quartz-passphrase-9"}, headers=B)
     assert r.status_code == 200, r.text
     assert c.get(f"/api/patients/{p['id']}/labs/analytes/tsh", headers=B).json()["points"][0]["value"] == "5.120"
     assert c.get(f"/api/labs/reports/{d['id']}", headers=B).json()["lab_name"] == "Labcorp"
