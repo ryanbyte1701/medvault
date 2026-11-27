@@ -11,6 +11,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      HAS_SIGNING_KEY: ${{ secrets.SCANVAULT_KEYSTORE_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: gradle/actions/wrapper-validation@v4
@@ -31,7 +33,7 @@ jobs:
       - name: Decode release keystore
         env:
           KEYSTORE_B64: ${{ secrets.SCANVAULT_KEYSTORE_BASE64 }}
-        if: ${{ env.KEYSTORE_B64 != '' }}
+        if: env.HAS_SIGNING_KEY == 'true'
         run: |
           echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
           echo "SCANVAULT_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
