@@ -51,6 +51,12 @@ patient data. They are rendered by the screenshot tests described under [Buildin
   viewed or downloaded what, and when): the clock icon on the Patients screen shows everything,
   and **Activity** in a patient's or study's menu narrows it to that patient or study. Requests
   carry a `ScanVault-Android/<version>` User-Agent so the log shows they came from the app.
+- **Explain or translate with AI** (when the server has it turned on): a plain-language,
+  non-medical explanation or a translation of a study's report and chosen images. The server
+  prepares the exact payload, with names, IDs and dates removed by default, and the app shows it
+  (text, images and where it will go) before anything is sent; nothing goes out until you tick
+  "Send this" and tap Send. The AI provider's API key is set up in the web app and never reaches
+  the phone. Answers carry a "not medical advice" notice; Copy marks the clipboard as sensitive.
 - **Lab results (LabsVault)**: from a patient, tap the flask to see every lab test with its latest
   value, flag and a sparkline. Upload a Labcorp, Quest or Sonora Quest report PDF (or a photo of
   one); the server reads it and the app shows a review screen where you correct values, ranges and

@@ -39,6 +39,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
@@ -131,6 +132,9 @@ fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
 
             HorizontalDivider()
             SecuritySection(container)
+
+            HorizontalDivider()
+            AiSection(container)
 
             HorizontalDivider()
             Text("Account", style = MaterialTheme.typography.titleMedium)
@@ -292,4 +296,33 @@ private fun SecuritySection(container: AppContainer) {
             },
         )
     }
+}
+
+/** Read-only: AI explanations and the provider key are managed in the web app, so the key never reaches the phone. */
+@Composable
+private fun AiSection(container: AppContainer) {
+    val session by container.session.collectAsStateWithLifecycle()
+    var status by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(session) {
+        if (session != SessionState.Ready) return@LaunchedEffect
+        status = container.call { it.aiSettings() }.fold(
+            onSuccess = { s ->
+                if (s.enabled) "On: ${s.providerName}, model ${s.model} at ${s.endpoint}. Use the sparkle button on a study."
+                else "Off. An administrator can turn it on in the ScanVault web app's Settings."
+            },
+            onFailure = { e ->
+                if (e is com.scanvault.android.data.ApiException && e.status == 404) "Not available on this server."
+                else null
+            },
+        )
+    }
+    Text("AI explanations", style = MaterialTheme.typography.titleMedium)
+    Text(
+        (status?.let { "$it\n\n" } ?: "") +
+            "Plain-language explanations and translations of reports, using the AI provider set up on your server. " +
+            "Each request shows exactly what will be sent and waits for your OK. Answers are not medical advice. " +
+            "The provider's API key stays on the server.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }

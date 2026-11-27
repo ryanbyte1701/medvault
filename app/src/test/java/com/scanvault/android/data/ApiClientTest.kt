@@ -302,4 +302,40 @@ class ApiClientTest {
         assertEquals("20", url.queryParameter("limit"))
         assertEquals(null, url.queryParameter("study_id"))
     }
+
+    @Test fun aiPrepareSendsEveryChoiceAndParsesThePreview() = runTest {
+        server.enqueue(json("""{"token":"t1","provider":"Anthropic Claude","model":"claude-opus-5-5","endpoint":"api.anthropic.com",
+            "task":"explain","language":"Spanish","remove_identifiers":true,"removed":{"name":2},"warnings":["w"],
+            "text":"[NAME] has a tear","images":[{"label":"Image 1","width":64,"height":64,"data_url":"data:image/jpeg;base64,AAAA"}],
+            "pdfs":[],"instructions":"rules","disclaimer":"not medical advice"}"""))
+        val pv = api.aiPrepare(AiPrepareRequest("s1", listOf("f1", "f2"), "explain", "Spanish", removeIdentifiers = true, question = ""))
+        assertEquals("t1", pv.token)
+        assertEquals(2, pv.removed["name"])
+        assertEquals("Image 1", pv.images.single().label)
+        val req = server.takeRequest()
+        assertEquals("/api/ai/prepare", req.path)
+        val body = req.body.readUtf8()
+        assertTrue(body, body.contains("\"remove_identifiers\":true"))
+        assertTrue(body, body.contains("\"file_ids\":[\"f1\",\"f2\"]"))
+        assertTrue(body, body.contains("\"question\":\"\""))
+    }
+
+    @Test fun aiSendAlwaysCarriesTheConfirmation() = runTest {
+        server.enqueue(json("""{"text":"Plain words","model":"m","disclaimer":"d","truncated":false}"""))
+        server.enqueue(json("""{"text":"x"}"""))
+        assertEquals("Plain words", api.aiSend(AiSendRequest(token = "t1", text = "edited", confirm = true)).text)
+        val body = server.takeRequest().body.readUtf8()
+        assertTrue(body, body.contains("\"confirm\":true") && body.contains("\"text\":\"edited\""))
+        api.aiSend(AiSendRequest(token = "t2", text = null, confirm = true))
+        val body2 = server.takeRequest().body.readUtf8()
+        assertTrue(body2, body2.contains("\"confirm\":true") && !body2.contains("\"text\""))
+    }
+
+    @Test fun aiSettingsNeverNeedAKey() = runTest {
+        server.enqueue(json("""{"enabled":true,"provider":"openai","model":"llava","endpoint":"10.0.0.5:11434","key_set":true,
+            "providers":{"openai":"OpenAI-compatible server"}}"""))
+        val s = api.aiSettings()
+        assertTrue(s.enabled)
+        assertEquals("OpenAI-compatible server", s.providerName)
+    }
 }
