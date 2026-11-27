@@ -97,6 +97,56 @@ Open the server's address on the phone and use **Add to Home Screen**. Outside
 your LAN, put ScanVault behind HTTPS (Caddy, Traefik, Tailscale Serve,
 Cloudflare Tunnel) and set `SCANVAULT_PUBLIC_URL`.
 
+### Single sign-on (SSO)
+
+ScanVault can sign you in through any OpenID Connect provider: Google,
+Microsoft (personal or Entra ID), Authentik, Authelia, Keycloak, Synology SSO
+Server, or anything else that publishes `/.well-known/openid-configuration`.
+Password sign-in keeps working unless you turn it off.
+
+1. **Settings > Single sign-on > Add provider.** Pick a preset, copy the
+   redirect URI it shows (`<your address>/api/auth/sso/callback`) into the
+   provider's app registration, and paste the client ID and secret back.
+   ScanVault checks the provider's configuration before saving.
+2. **Link my account.** You confirm your ScanVault password (adding a
+   provider, linking an account and turning password sign-in off all ask for
+   it, unless you signed in with SSO in the last 10 minutes), then sign in at
+   the provider once; that identity is now
+   tied to your ScanVault login. Only linked identities can sign in, so being
+   known to the provider is never enough on its own.
+3. Optionally untick **Allow password sign-in**. ScanVault refuses to do this
+   until an account is linked, and turns it back on if the last link is
+   removed. If the provider is ever down, start the container with
+   `SCANVAULT_FORCE_LOCAL_LOGIN=1` to get password sign-in back.
+
+**SSO does not unlock the vault.** It replaces the sign-in password only. The
+encryption key never goes to the identity provider, so after a restart you
+still enter the encryption key (or upload the recovery key file, or use
+`SCANVAULT_PASSPHRASE_FILE`) exactly as before.
+
+Notes:
+
+- Set `SCANVAULT_PUBLIC_URL` when ScanVault sits behind a reverse proxy, so the
+  redirect URI matches what you registered.
+- Self-hosted providers need a certificate ScanVault trusts. For a private CA
+  (for example a Synology self-signed certificate), mount the CA file and set
+  `REQUESTS_CA_BUNDLE=/path/to/ca.pem`. Plain `http://` issuers are refused
+  unless you set `SCANVAULT_OIDC_ALLOW_HTTP=1` (trusted LAN only).
+- Instead of the UI you can configure one provider with environment variables:
+  `SCANVAULT_OIDC_ISSUER`, `SCANVAULT_OIDC_CLIENT_ID`,
+  `SCANVAULT_OIDC_CLIENT_SECRET` or `SCANVAULT_OIDC_CLIENT_SECRET_FILE`,
+  and optionally `SCANVAULT_OIDC_NAME`, `SCANVAULT_OIDC_PRESET`
+  (`google`, `microsoft`, `authentik`, `authelia`, `keycloak`, `synology`,
+  `generic`) and `SCANVAULT_OIDC_SCOPES`.
+- Client secrets entered in the UI are stored in the server's database (inside
+  the `/data` volume and inside encrypted backups), not under the vault key,
+  because sign-in has to work while the vault is locked. Use
+  `SCANVAULT_OIDC_CLIENT_SECRET_FILE` with a Docker secret if you prefer.
+- An identity signs in only through the provider entry it was linked with.
+  Unlinking it, removing or disabling its provider, or pointing the provider
+  at a different issuer or client ID ends the sessions it created.
+- SAML is not supported. Every provider listed above speaks OpenID Connect.
+
 ## Backup destinations
 
 Every backup is a single `scanvault-backup-<vault id>-YYYYMMDD-HHMMSSZ-<rand>.svb`
@@ -191,6 +241,12 @@ restore turned on.
   and PDFs; everything else is forced to download. The service worker never
   caches `/api/` responses. `/api/docs` is off unless `SCANVAULT_API_DOCS=1`.
   The container runs as a non-root user.
+- **SSO**: OpenID Connect authorization code flow with PKCE (S256), `state`
+  and `nonce`. ID tokens are checked against the provider's JWKS (asymmetric
+  algorithms only), issuer, audience, expiry and nonce. The browser that
+  started a sign-in is bound to it with a short-lived cookie; the session is
+  then issued by a same-origin request that trades a one-time, 2-minute ticket.
+  Identities are matched by issuer and subject, never by e-mail.
 
 ### HIPAA and privacy notes
 
@@ -215,6 +271,33 @@ failed sign-ins or key checks return **429** with `Retry-After`.
 A locked vault returns **423** `{code: "locked"}`; unlock with
 `POST /api/vault/unlock {passphrase}`.
 
+**SSO from an app.** `GET /api/status` lists `sso: [{id, name, preset}]` and
+`local_login`. To sign in with a provider:
+
+1. Make a PKCE pair: `code_verifier` (43 to 128 random URL-safe characters)
+   and `code_challenge = base64url(sha256(code_verifier))` without padding.
+2. Open `GET /api/auth/sso/{id}/start?app_redirect=scanvault://sso&app_state=<random>&code_challenge=<challenge>`
+   in a browser tab (Android Custom Tab, iOS ASWebAuthenticationSession).
+   `app_redirect` must start with a prefix from `SCANVAULT_SSO_APP_REDIRECTS`
+   (default `scanvault://`).
+3. After the provider, ScanVault shows its own confirmation page ("Sign in
+   to the ScanVault app?") in the tab. Only when the person taps Continue does
+   it redirect to `scanvault://sso?ticket=…&state=<app_state>`. Failures and
+   Cancel go to `scanvault://sso?error=…&state=…`. Check `state`, and ignore
+   callbacks when no sign-in is in progress.
+4. `POST /api/auth/sso/exchange {ticket, code_verifier}` within 2 minutes
+   returns `{token, expires_at, unlocked}`, the same as password sign-in.
+   Unlock the vault with the encryption key as usual if `unlocked` is false.
+
+What protects this flow: PKCE stops another app that *intercepts* the
+redirect from using the ticket. It does not stop another app on the phone from
+*starting its own* sign-in, because no app owns the `scanvault://` scheme. The
+confirmation page is the defence against that, and Google and Microsoft are
+also asked to show their account picker (`prompt=select_account`). If you
+control a fixed domain for the app, you can instead list a verified Android App
+Link such as `https://app.example.com/sso` in `SCANVAULT_SSO_APP_REDIRECTS`;
+https entries match scheme, host and port exactly.
+
 | Method | Path | |
 |---|---|---|
 | GET | `/api/health`, `/api/status` | liveness; setup/lock/auth state |
@@ -226,6 +309,13 @@ A locked vault returns **423** `{code: "locked"}`; unlock with
 | GET/POST | `/api/studies/{id}/files` | list / multipart `file` (repeatable) |
 | GET | `/api/files/{id}`, `/content`, `/thumbnail` | metadata, decrypted bytes, JPEG preview |
 | GET | `/api/files/{id}/render?wc=&ww=&frame=` | DICOM rendered with a window center/width in modality units (HU for CT). `X-Window-*`, `X-Default-*`, `X-Min/Max`, `X-Frames`, `X-Modality` headers |
+| GET | `/api/auth/sso/{id}/start` | begin SSO sign-in (browser navigation; apps add `app_redirect`, `app_state`, `code_challenge`) |
+| POST | `/api/auth/sso/exchange` | `{ticket, code_verifier?}` → session |
+| POST | `/api/auth/sso/{id}/link` | signed in: returns `{url}` to link a provider account |
+| GET | `/api/sso/config` | providers (secrets write-only), redirect URI, presets, your linked accounts |
+| POST/PUT/DELETE | `/api/sso/providers[/{id}]` | `{preset, name, issuer?, fields?, client_id, client_secret?, scopes?, enabled?}` |
+| PUT | `/api/sso/settings` | `{local_login: bool}` |
+| DELETE | `/api/sso/identities/{id}` | unlink |
 | GET/PUT | `/api/prefs` | `{theme: system\|light\|dark, dark_color: "#rrggbb"}` per user |
 | POST | `/api/auth/logout-others` | sign out every other session |
 | GET/PUT | `/api/vault/settings` | `{passphrase_restore: bool}` |

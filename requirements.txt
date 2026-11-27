@@ -9,6 +9,7 @@ pillow==13.0.0.post1
 pylibjpeg==2.1.0
 pylibjpeg-libjpeg==2.5.0
 pylibjpeg-openjpeg==2.6.0
+PyJWT[crypto]==2.15.0
 requests==2.34.2
 google-auth==2.63.1
 paramiko==5.1.0

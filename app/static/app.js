@@ -94,6 +94,9 @@ const I = {
   sun: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
   moon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
   auto: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg>',
+  home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 10.5 9-7 9 7V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  chev: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>',
   x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
   dl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5M12 15V3"/></svg>',
 };
@@ -141,13 +144,13 @@ function cycleTheme() { const next = { system: "light", light: "dark", dark: "sy
 document.body.insertAdjacentHTML("beforeend", `<svg width="0" height="0" style="position:absolute" aria-hidden="true"><filter id="svwl" color-interpolation-filters="sRGB"><feComponentTransfer><feFuncR type="linear" slope="1" intercept="0"/><feFuncG type="linear" slope="1" intercept="0"/><feFuncB type="linear" slope="1" intercept="0"/></feComponentTransfer></filter></svg>`);
 
 // ------------------------------------------------------------------ state + router
-const S = { status: null, patients: null, route: { name: "patients" } };
+const S = { status: null, patients: null, route: { name: "home" } };
 
 function parseHash() {
   if (API.demo) return S.route;
   const h = location.hash.replace(/^#\/?/, "").split("?")[0];
   const [name, id] = h.split("/");
-  return { name: name || "patients", id };
+  return { name: name || "home", id };
 }
 function go(name, id) {
   S.route = { name, id };
@@ -161,7 +164,17 @@ document.addEventListener("click", e => {
   if (a) { e.preventDefault(); const [n, id] = a.dataset.go.split("/"); go(n, id); }
 });
 
+async function finishSso() {
+  // The server redirects here after the identity provider; trade the one-time ticket for a session.
+  const m = !API.demo && location.hash.match(/^#\/sso\?ticket=([\w-]+)/);
+  if (!m) return;
+  history.replaceState(null, "", location.pathname + "#/patients");
+  try { await API.req("POST", "/api/auth/sso/exchange", { ticket: m[1] }); }
+  catch (e) { S.ssoError = e.message; }
+}
+
 async function boot() {
+  await finishSso();
   try { S.status = await API.req("GET", "/api/status"); }
   catch (e) { app.innerHTML = `<div class="empty"><h2>Can't reach ScanVault</h2><p>${esc(e.message)}</p><button class="btn" id="retry">Retry</button></div>`; $("#retry").onclick = () => location.reload(); return; }
   S.route = parseHash();
@@ -170,6 +183,8 @@ async function boot() {
   if (q.get("oauth") === "ok") toast("Account connected");
   const OAUTH_ERR = { denied: "the sign-in was cancelled or refused", expired: "the sign-in took too long, please try again", locked: "the vault is locked", exchange: "the provider did not accept the sign-in" };
   if (q.get("oauth") === "error") toast("Connecting the account failed: " + (OAUTH_ERR[q.get("msg")] || "unknown error"));
+  if (q.get("sso") === "linked") toast("Single sign-on account linked");
+  if (q.get("sso_error") && S.status.authenticated) toast(q.get("sso_error"));
 }
 
 function handleErr(e) {
@@ -188,18 +203,18 @@ function render() {
   if (!S.themeSynced) { S.themeSynced = true; syncTheme(); }
   if (st.recovery_key_saved === false && !sessionStorage.getItem("sv-rk-later")) return viewRecoveryNag();
   const r = S.route;
-  const view = { patients: viewPatients, patient: viewPatient, study: viewStudy, backups: viewBackups, settings: viewSettings, upload: viewUploadPage }[r.name] || viewPatients;
+  const view = { home: viewHome, patients: viewPatients, patient: viewPatient, study: viewStudy, backups: viewBackups, settings: viewSettings, upload: viewUploadPage }[r.name] || viewHome;
   shell(r.name);
   view(r.id).catch(handleErr);
 }
 
 function shell(active) {
-  const nav = [["patients", "Patients", I.users], ["upload", "Upload", I.upload], ["backups", "Backups", I.cloud], ["settings", "Settings", I.gear]];
+  const nav = [["home", "Home", I.home], ["patients", "Patients", I.users], ["upload", "Upload", I.upload], ["backups", "Backups", I.cloud], ["settings", "Settings", I.gear]];
   const on = n => (n === active || (n === "patients" && (active === "patient" || active === "study"))) ? "on" : "";
   app.innerHTML = `${API.demo ? '<div class="demo-banner">Interactive preview with sample patients. Nothing leaves your browser and nothing is stored.</div>' : ""}
   <div class="shell">
     <nav class="side" aria-label="Main">
-      <div class="brand">${I.logo}<span>ScanVault</span></div>
+      <a class="brand" href="#/home" data-go="home">${I.logo}<span>ScanVault</span></a>
       <div class="nav">${nav.map(([n, l, ic]) => `<a href="#/${n}" data-go="${n}" class="${on(n)}">${ic}${l}</a>`).join("")}</div>
       <div class="foot"><span class="lockchip">${I.shield} Vault unlocked</span><span>Signed in as ${esc(S.status.username)}</span><button class="btn ghost sm themebtn" data-theme-btn title="${themeLabel()}" aria-label="${themeLabel()}">${themeIcon()}</button></div>
     </nav>
@@ -308,7 +323,7 @@ function viewSetup() {
         <button id="rest">${I.restore}<b>Restore from a backup</b><span>Use a .svb backup plus your recovery key file or encryption key.</span></button>
         ${window.SV_DEMO_SKIP ? `<button id="skip">${I.users}<b>Skip to the sample vault</b><span>Preview only: open three sample patients with scans, reports and backups.</span></button>` : ""}
       </div>`);
-    const sk = $("#skip"); if (sk) sk.onclick = async () => { window.SV_DEMO_SKIP(); S.status = await API.req("GET", "/api/status"); go("patients"); };
+    const sk = $("#skip"); if (sk) sk.onclick = async () => { window.SV_DEMO_SKIP(); S.status = await API.req("GET", "/api/status"); go("home"); };
     $("#new").onclick = () => { setup.step = 1; viewSetup(); };
     $("#rest").onclick = viewRestoreSetup;
     return;
@@ -386,7 +401,7 @@ function viewSetup() {
       if (f.kf.files[0]) await API.req("POST", "/api/vault/recovery-key/confirm", { recovery_key: await f.kf.files[0].text() });
       else if (f.skip.checked) await API.req("POST", "/api/vault/recovery-key/confirm", { skip: true });
       else return $("#err").textContent = "Choose the key file to confirm, or tick the box to skip.";
-      setup.recovery = ""; S.status = await API.req("GET", "/api/status"); go("patients");
+      setup.recovery = ""; S.status = await API.req("GET", "/api/status"); go("home");
     } catch (er) { $("#err").textContent = er.message; }
   };
 }
@@ -413,7 +428,7 @@ function viewRestoreSetup() {
     if (mode === "file") { if (!f.kf.files[0]) return $("#err").textContent = "Choose your recovery key file."; fd.append("recovery_key", await f.kf.files[0].text()); }
     else fd.append("passphrase", f.k.value);
     $("#go").disabled = true; $("#go").innerHTML = '<span class="spin"></span> Restoring…';
-    try { const r = await API.upload("/api/setup/restore", fd, null, { "X-Setup-Code": f.code ? f.code.value.trim() : "" }); toast(`Restored ${r.patients} patients, ${r.files} files. Backup destinations are paused until you turn them back on.`); S.status = await API.req("GET", "/api/status"); go("patients"); }
+    try { const r = await API.upload("/api/setup/restore", fd, null, { "X-Setup-Code": f.code ? f.code.value.trim() : "" }); toast(`Restored ${r.patients} patients, ${r.files} files. Backup destinations are paused until you turn them back on.`); S.status = await API.req("GET", "/api/status"); go("home"); }
     catch (er) { $("#err").textContent = er.message; $("#go").disabled = false; $("#go").textContent = "Restore"; }
   };
 }
@@ -446,11 +461,18 @@ function viewRecoveryNag() {
 }
 
 function viewLogin() {
+  const st = S.status, providers = st.sso || [], local = st.local_login !== false;
+  const ssoErr = S.ssoError || new URLSearchParams(location.hash.split("?")[1] || "").get("sso_error") || "";
+  S.ssoError = null;
+  const ssoBtns = providers.map(p => `<a class="btn ${local ? "" : "primary"} ssobtn" href="/api/auth/sso/${encodeURIComponent(p.id)}/start">${I.key} Continue with ${esc(p.name)}</a>`).join("");
   authLayout(`<div><h1>Sign in</h1></div>
-    <form class="form" id="f">
+    ${providers.length ? `<div class="stack ssobtns">${ssoBtns}</div>${local ? '<div class="ordiv"><span>or use your password</span></div>' : ""}` : ""}
+    ${local ? `<form class="form" id="f">
       <label class="f">Username<input name="u" autocomplete="username" required autocapitalize="none"></label>
       <label class="f">Password<input name="p" type="password" autocomplete="current-password" required></label>
-      <p class="err" id="err"></p><button class="btn primary" id="go">Sign in</button></form>`, "Welcome back.");
+      <p class="err" id="err">${esc(ssoErr)}</p><button class="btn primary" id="go">Sign in</button></form>`
+      : `<p class="err" id="err">${esc(ssoErr)}</p><p class="small muted">Password sign-in is turned off for this vault.</p>`}`, "Welcome back.");
+  if (!local) return;
   $("#f").onsubmit = async e => {
     e.preventDefault(); const f = e.target; $("#go").disabled = true;
     try { await API.req("POST", "/api/auth/login", { username: f.u.value, password: f.p.value }); S.status = await API.req("GET", "/api/status"); render(); }
@@ -475,6 +497,107 @@ function viewUnlock() {
   $("#kfb").onclick = () => $("#kf").click();
   $("#kf").onchange = async e => { try { await API.req("POST", "/api/vault/unlock", { recovery_key: await e.target.files[0].text() }); await done(); } catch (er) { $("#err").textContent = er.message; } };
   $("#out").onclick = async () => { await API.req("POST", "/api/auth/logout"); S.status.authenticated = false; render(); };
+}
+
+// ------------------------------------------------------------------ home
+const greeting = () => { const h = new Date().getHours(); return h < 5 ? "Good evening" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"; };
+const until = t => { const s = (t - Date.now()) / 1000; if (s <= 60) return "due now"; if (s < 3600) return "in " + Math.round(s / 60) + " min"; if (s < 86400 * 2) return "in " + Math.round(s / 3600) + " h"; return "in " + Math.round(s / 86400) + " days"; };
+
+function backupHealth(tg, stats) {
+  const on = tg.filter(t => t.enabled);
+  const bad = on.filter(t => !t.connected || t.last_status === "error");
+  const due = on.filter(t => t.connected && t.schedule_hours).map(t => (t.last_run ? Date.parse(t.last_run) : Date.now()) + t.schedule_hours * 3600e3);
+  const next = due.length ? Math.min(...due) : null;
+  if (!tg.length) return { tone: "warn", title: "No backups yet", text: "Add a destination so a lost disk doesn't mean lost scans.", next };
+  if (bad.length) return { tone: "warn", title: `${bad.length} of ${on.length} destination${on.length === 1 ? "" : "s"} need${bad.length === 1 ? "s" : ""} attention`, text: bad.map(t => `${t.name}: ${t.connected ? "last run failed" : "not connected"}`).join(" · "), next };
+  if (!stats.last_backup_at) return { tone: "warn", title: "No backup has finished yet", text: `${on.length} destination${on.length === 1 ? "" : "s"} set up. Run one now to be safe.`, next };
+  return { tone: "ok", title: `Backed up ${ago(stats.last_backup_at)}`, text: `${on.length} destination${on.length === 1 ? "" : "s"}, encrypted before upload`, next };
+}
+
+async function viewHome() {
+  const [list, stats, recent, tg] = await Promise.all([
+    API.req("GET", "/api/patients"), API.req("GET", "/api/stats"), API.req("GET", "/api/studies/recent?limit=6"), API.req("GET", "/api/backups/targets")]);
+  S.patients = list;
+  const st = S.status, m = main(), bh = backupHealth(tg, stats);
+  const keyOk = st.recovery_key_saved !== false;
+  const steps = [
+    [list.length > 0, "Add a patient", "One record per person: you, a child, a parent.", "addp"],
+    [stats.files > 0, "Upload a scan or report", "DICOM, a CD/zip export, photos of films, PDFs.", "upl"],
+    [tg.length > 0, "Add a backup destination", "Cloud drives, S3, a NAS or a USB disk.", "backups"]];
+  const todo = steps.filter(x => !x[0]).length;
+  const tone = t => `<i class="dot ${t}" aria-hidden="true"></i>`;
+  const thumb = (id, big) => `<div class="t${big ? " big" : ""}"><img alt="" loading="lazy" src="${esc(API.thumbUrl(id))}"></div>`;
+  const studyRow = s => `<a class="rstudy" href="#/study/${esc(s.id)}" data-go="study/${esc(s.id)}">
+      <div class="film">${s.thumbnail_ids.length ? s.thumbnail_ids.map((id, i) => thumb(id, i === 0)).join("") : `<div class="t big">${s.report_count ? I.pdf : I.scan}</div>`}</div>
+      <div class="rs-body"><div class="rs-top">${s.modality ? `<span class="badge">${esc(s.modality)}</span>` : ""}${s.report_count ? `<span class="badge gray">${I.pdf}Report</span>` : ""}<span class="muted small nowrap">${esc(s.study_date ? fmtDate(s.study_date) : "No date")}</span></div>
+        <h3>${esc(s.title)}</h3>
+        <div class="small muted rs-meta"><span class="who"><span class="avatar xs">${esc(initials(s.patient_name))}</span>${esc(s.patient_name || "Unknown")}</span>${s.facility ? `<span>${esc(s.facility)}</span>` : ""}<span>${s.file_count} file${s.file_count === 1 ? "" : "s"}</span></div></div>
+      <span class="chev" aria-hidden="true">${I.chev}</span></a>`;
+  const personRow = p => `<a class="prow" href="#/patient/${esc(p.id)}" data-go="patient/${esc(p.id)}"><span class="avatar">${esc(initials(p.name))}</span>
+      <span class="pr-body"><b>${esc(p.name)}</b><span class="small muted">${[p.date_of_birth && `${age(p.date_of_birth)} yrs`, `${p.study_count} ${p.study_count === 1 ? "study" : "studies"}`, p.last_study_date && "last " + fmtDate(p.last_study_date)].filter(Boolean).map(esc).join(" · ")}</span></span>
+      <span class="chev" aria-hidden="true">${I.chev}</span></a>`;
+
+  m.innerHTML = `${mobileHead()}
+  <div class="home">
+  <header class="hhead"><div><p class="eyebrow">${esc(new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" }))}</p><h1>${greeting()}${st.username ? ", " + esc(st.username) : ""}</h1>
+    <p class="sub">${stats.patients} ${stats.patients === 1 ? "person" : "people"} · ${stats.studies} ${stats.studies === 1 ? "study" : "studies"} · ${fmtBytes(stats.bytes)} encrypted on this server</p></div>
+    <div class="row hactions"><button class="btn" id="addp">${I.plus} Add patient</button><button class="btn primary" id="upl">${I.upload} Upload</button></div></header>
+
+  <section class="health" aria-label="Vault status">
+    <div class="card hcard ok hc-vault">${tone("ok")}<div class="hc-body"><span class="hc-l">Vault</span><b>Unlocked</b><span class="small muted">AES-256-GCM${st.fingerprint ? ` · key <span class="mono">${esc(String(st.fingerprint).slice(0, 9))}</span>` : ""}</span></div>
+      <button class="btn sm ghost" id="lock">${I.lock}<span>Lock</span></button></div>
+    <div class="card hcard ${bh.tone}">${tone(bh.tone)}<div class="hc-body"><span class="hc-l">Backups</span><b>${esc(bh.title)}</b><span class="small muted">${esc(bh.text)}${bh.next ? ` · next ${esc(until(bh.next))}` : ""}</span></div>
+      ${tg.length ? `<button class="btn sm" id="bnow">Back up now</button>` : `<a class="btn sm" href="#/backups" data-go="backups">Set up</a>`}</div>
+    <div class="card hcard ${keyOk ? "ok" : "warn"}">${tone(keyOk ? "ok" : "warn")}<div class="hc-body"><span class="hc-l">Recovery key</span><b>${keyOk ? "Saved and confirmed" : "Not confirmed yet"}</b><span class="small muted">${keyOk ? "Keep the file offline or printed." : "Without it, a forgotten key locks your backups."}</span></div>
+      ${keyOk ? "" : `<a class="btn sm" href="#/settings" data-go="settings">Fix</a>`}</div>
+  </section>
+
+  ${todo ? `<section class="card pad onboard"><div class="section-h" style="margin:0 0 12px"><h2>Get set up</h2><span class="muted small">${steps.length - todo} of ${steps.length} done</span></div>
+    <ol class="steps2">${steps.map(([done, t, d, act]) => `<li class="${done ? "done" : ""}"><span class="tick">${done ? I.check : ""}</span><span><b>${t}</b><span class="small muted">${d}</span></span>${done ? "" : `<button class="btn sm" data-step="${act}">Start</button>`}</li>`).join("")}</ol></section>` : ""}
+
+  <div class="hgrid">
+    <div class="hmain">
+      ${list.length ? `<section class="card qup" aria-labelledby="qh">
+        <div class="qup-head"><h2 id="qh">Quick upload</h2>
+          <label class="qup-who"><span class="sr">Patient</span><select id="qpt">${list.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label></div>
+        <div class="drop" id="drop">${I.upload}<div><b>Drop scans or reports</b><div class="small muted">DICOM, CD/zip exports, film photos, PDFs. Encrypted as they arrive.</div></div></div>
+        <div class="qup-btns"><label class="btn b-files">${I.upload} Choose files<input type="file" id="fi" multiple hidden></label>
+          <label class="btn b-cam">${I.camera} Take photo<input type="file" id="cam" accept="image/*" capture="environment" hidden></label></div>
+        <div class="queue" id="queue"></div></section>` : ""}
+
+      <section aria-labelledby="rh"><div class="section-h"><h2 id="rh">Recently added</h2>${list.length ? `<a class="small" href="#/patients" data-go="patients">All patients</a>` : ""}</div>
+        ${recent.length ? `<div class="card rlist">${recent.map(studyRow).join("")}</div>`
+          : `<div class="card empty">${I.scan}<h2>No studies yet</h2><p>Studies you upload show up here, newest first.</p></div>`}</section>
+    </div>
+
+    <aside class="hside">
+      <section class="card" aria-labelledby="ph"><div class="side-h"><h2 id="ph">People</h2><button class="btn sm ghost" id="addp2" aria-label="Add patient">${I.plus}</button></div>
+        ${list.length ? `<div class="plist2">${list.slice(0, 6).map(personRow).join("")}</div>${list.length > 6 ? `<a class="more" href="#/patients" data-go="patients">See all ${list.length}</a>` : ""}`
+          : `<p class="pad small muted">No patients yet.</p>`}</section>
+      <section class="card storage" aria-label="Storage"><div><b>${stats.files}</b><span>files</span></div><div><b>${stats.studies}</b><span>studies</span></div><div><b>${fmtBytes(stats.bytes)}</b><span>encrypted</span></div></section>
+      ${tg.length ? `<section class="card" aria-labelledby="bh"><div class="side-h"><h2 id="bh">Destinations</h2><a class="small" href="#/backups" data-go="backups">Manage</a></div>
+        <ul class="dests">${tg.map(t => `<li>${tone(!t.enabled ? "gray" : !t.connected || t.last_status === "error" ? "warn" : t.last_status === "ok" ? "ok" : "gray")}<span><b>${esc(t.name)}</b><span class="small muted">${!t.enabled ? "Paused" : !t.connected ? "Not connected" : t.last_status === "error" ? "Last run failed " + esc(ago(t.last_run)) : t.last_run ? "Last run " + esc(ago(t.last_run)) : "Not run yet"}</span></span></li>`).join("")}</ul></section>` : ""}
+    </aside>
+  </div></div>`;
+
+  const addP = () => patientForm();
+  $("#addp").onclick = addP; $("#addp2").onclick = addP;
+  $("#upl").onclick = () => list.length ? ($("#fi") ? $("#fi").click() : go("upload")) : patientForm();
+  $("#lock").onclick = async () => { await API.req("POST", "/api/vault/lock"); S.status.unlocked = false; render(); };
+  const bn = $("#bnow");
+  if (bn) bn.onclick = async () => {
+    bn.disabled = true; bn.innerHTML = `<span class="spin"></span> Backing up`;
+    try { const r = await API.req("POST", "/api/backups/run"); const bad = (r.results || []).filter(x => x.status !== "ok").length; toast(bad ? `${bad} destination${bad === 1 ? "" : "s"} failed. See Backups.` : "Backup finished"); }
+    catch (e) { if (handleErr(e)) return; }
+    viewHome().catch(handleErr);
+  };
+  $$("[data-step]", m).forEach(b => b.onclick = () => { const a = b.dataset.step; a === "addp" ? addP() : a === "upl" ? $("#upl").click() : go(a); });
+  if (list.length) {
+    const send = fl => uploadFiles(`/api/patients/${$("#qpt").value}/import`, fl, () => viewHome().catch(handleErr));
+    wireDrop($("#drop"), send);
+    $("#fi").onchange = e => send([...e.target.files]);
+    $("#cam").onchange = e => send([...e.target.files]);
+  }
 }
 
 // ------------------------------------------------------------------ patients
@@ -1050,6 +1173,7 @@ async function viewSettings() {
       <div class="row"><button class="btn ghost" id="rekey">Replace the master key…</button></div></div>
     <div class="card pad stack"><h2>Account</h2><p class="small">Signed in as <b>${esc(st.username)}</b>.</p>
       <div class="row"><button class="btn" id="pw">Change password</button><button class="btn" id="others">Sign out other devices</button><button class="btn ghost" id="out">Sign out</button></div></div>
+    <div class="card pad stack" id="ssocard"><h2>Single sign-on</h2><div class="empty" style="padding:10px"><span class="spin"></span></div></div>
     <div class="card pad stack"><h2>Install on your phone</h2>
       <p class="small">Open this address in Safari (iPhone) or Chrome (Android) and choose <b>Add to Home Screen</b>. ScanVault opens full screen and can take photos of films and paper reports. Use HTTPS when you reach it from outside your home network.</p></div>
     <div class="card pad stack"><h2>Privacy and HIPAA</h2>
@@ -1097,6 +1221,96 @@ async function viewSettings() {
   };
   $("#lock").onclick = async () => { await API.req("POST", "/api/vault/lock"); S.status.unlocked = false; render(); };
   $("#out").onclick = async () => { await API.req("POST", "/api/auth/logout"); S.status.authenticated = false; render(); };
+  ssoCard().catch(handleErr);
+}
+
+// ------------------------------------------------------------------ single sign-on settings
+async function ssoCard() {
+  const el = $("#ssocard"); if (!el) return;
+  if (API.demo) { el.innerHTML = `<h2>Single sign-on</h2><p class="small muted">On your server you can sign in with Google, Microsoft, Authentik, Authelia, Keycloak, Synology SSO Server or any OpenID Connect provider. It isn't available in this preview.</p>`; return; }
+  const c = await API.req("GET", "/api/sso/config");
+  const linkedTo = new Set(c.identities.map(i => i.provider_id));
+  el.innerHTML = `<h2>Single sign-on</h2>
+    <p class="small muted">Sign in with Google, Microsoft, Authentik, Authelia, Keycloak, Synology SSO Server or any OpenID Connect provider. Single sign-on replaces your password only: after a restart you still unlock the vault with your encryption key, which never leaves ScanVault.</p>
+    ${c.providers.length ? `<div class="ssolist">${c.providers.map(p => `<div class="ssorow"><div><b>${esc(p.name)}</b>${p.enabled ? "" : ' <span class="small muted">(off)</span>'}<div class="small muted mono">${esc(p.resolved_issuer)}</div>
+        ${c.identities.filter(i => i.provider_id === p.id).map(i => `<div class="small">Linked: <b>${esc(i.email || "account")}</b>${i.last_login ? ` · last used ${esc(ago(i.last_login))}` : ""} <button class="btn ghost sm" data-unlink="${esc(i.id)}">Unlink</button></div>`).join("")}</div>
+        <div class="row">${p.enabled && !linkedTo.has(p.id) ? `<button class="btn sm primary" data-link="${esc(p.id)}">Link my account</button>` : ""}${p.managed ? '<span class="small muted">Set by environment</span>' : `<button class="btn sm" data-edit="${esc(p.id)}">Edit</button>`}</div></div>`).join("")}</div>` : ""}
+    <div class="row"><button class="btn" id="ssoadd">${I.plus} Add provider</button></div>
+    ${c.providers.length ? `<label class="row small" style="gap:8px"><input type="checkbox" id="ssolocal" ${c.local_login ? "checked" : ""} ${c.local_login_forced ? "disabled" : ""}> Allow password sign-in${c.local_login_forced ? " (forced on by SCANVAULT_FORCE_LOCAL_LOGIN)" : ""}</label>
+      <p class="small muted">Turn this off only after linking an account above. If your identity provider is ever unreachable, set <span class="mono">SCANVAULT_FORCE_LOCAL_LOGIN=1</span> and restart to get password sign-in back.</p>` : ""}`;
+  $("#ssoadd", el).onclick = () => ssoProviderForm(c);
+  $$("[data-edit]", el).forEach(b => b.onclick = () => ssoProviderForm(c, c.providers.find(p => p.id === b.dataset.edit)));
+  $$("[data-link]", el).forEach(b => b.onclick = async () => {
+    if (API.demo) return toast("Single sign-on isn't available in this preview.");
+    const password = c.reauth_fresh ? "" : await askPassword("Link account", "Linking adds a new way into your vault, so confirm it's you.");
+    if (password === null) return;
+    try {
+      const r = await API.req("POST", `/api/auth/sso/${encodeURIComponent(b.dataset.link)}/link`, { password });
+      if (!/^https?:\/\//i.test(r.url)) throw new Error("The provider returned an unsafe sign-in address");
+      location.href = r.url;
+    } catch (e) { handleErr(e); }
+  });
+  $$("[data-unlink]", el).forEach(b => b.onclick = async () => {
+    if (!await confirmBox("Unlink account", "You won't be able to sign in with this account until you link it again.", "Unlink")) return;
+    try { const r = await API.req("DELETE", `/api/sso/identities/${encodeURIComponent(b.dataset.unlink)}`); if (r.local_login && !c.local_login) toast("Password sign-in was turned back on"); ssoCard(); } catch (e) { handleErr(e); }
+  });
+  const cb = $("#ssolocal", el);
+  if (cb) cb.onchange = async () => {
+    const password = cb.checked || c.reauth_fresh ? "" : await askPassword("Turn off password sign-in", "After this, only linked single sign-on accounts can sign in.");
+    if (password === null) { cb.checked = !cb.checked; return; }
+    try { await API.req("PUT", "/api/sso/settings", { local_login: cb.checked, password }); toast(cb.checked ? "Password sign-in on" : "Password sign-in off"); c.local_login = cb.checked; } catch (e) { cb.checked = !cb.checked; handleErr(e); }
+  };
+}
+
+function askPassword(title, text) {
+  return new Promise(res => {
+    let done = false;
+    const mm = modal(title, `<form class="form" id="rf"><p class="small">${esc(text)}</p><label class="f">Your ScanVault password<input name="pw" type="password" required autocomplete="current-password"></label></form>`,
+      { footer: `<button class="btn" data-close>Cancel</button><button class="btn primary" form="rf">Continue</button>` });
+    $("#rf", mm.el).onsubmit = e => { e.preventDefault(); done = true; const v = e.target.pw.value; mm.close(); res(v); };
+    mm.el.addEventListener("click", e => { if (!done && (e.target === mm.el || e.target.closest("[data-close]"))) res(null); });
+  });
+}
+
+function ssoProviderForm(c, p) {
+  const presets = c.presets;
+  let preset = p ? p.preset : "google";
+  const mm = modal(p ? "Edit sign-in provider" : "Add sign-in provider", `<form class="form" id="sf"></form>`, { footer: `${p ? '<button class="btn danger" id="sdel" type="button">Remove</button><span class="spacer"></span>' : ""}<button class="btn" data-close>Cancel</button><button class="btn primary" form="sf" id="ssave">Save</button>`, wide: true });
+  const f = $("#sf", mm.el), E = n => f.elements.namedItem(n);
+  const draw = () => {
+    const pr = presets[preset], vals = p && p.preset === preset ? p.fields : {};
+    f.innerHTML = `<label class="f">Provider<select name="preset" ${p ? "disabled" : ""}>${Object.entries(presets).map(([k, v]) => `<option value="${k}" ${k === preset ? "selected" : ""}>${esc(v.name)}</option>`).join("")}</select></label>
+      <div class="note info">${I.info}<div class="small">${esc(pr.help)}</div></div>
+      <label class="f">Redirect URI <span class="hint">register this with the provider</span><div class="row" style="flex-wrap:nowrap"><input readonly value="${esc(c.redirect_uri)}" class="mono" style="flex:1"><button type="button" class="btn sm" id="cpy">Copy</button></div></label>
+      <label class="f">Button label<input name="name" value="${esc(p ? p.name : pr.name)}" maxlength="60"></label>
+      ${preset === "generic" ? `<label class="f">Issuer URL<input name="issuer" required placeholder="https://auth.example.com" value="${esc(p ? p.issuer : "")}"></label>` : ""}
+      ${pr.fields.map(x => `<label class="f">${esc(x.label)}<input name="fld_${x.key}" required placeholder="${esc(x.placeholder || "")}" value="${esc(vals[x.key] ?? x.default ?? "")}"></label>`).join("")}
+      <label class="f">Client ID<input name="client_id" required autocomplete="off" value="${esc(p ? p.client_id : "")}"></label>
+      <label class="f">Client secret ${p && p.has_secret ? '<span class="hint">saved; leave blank to keep</span>' : '<span class="hint">leave blank for a public client</span>'}<input name="client_secret" type="password" autocomplete="off"></label>
+      <label class="f">Scopes<input name="scopes" value="${esc(p ? p.scopes : "openid email profile")}"></label>
+      <label class="row small" style="gap:8px"><input type="checkbox" name="enabled" ${!p || p.enabled ? "checked" : ""}> Show on the sign-in page</label>
+      ${c.reauth_fresh ? "" : `<label class="f">Your ScanVault password <span class="hint">confirms it's you</span><input name="reauth" type="password" required autocomplete="current-password"></label>`}
+      <p class="err" id="serr"></p>`;
+    $("select", f).onchange = e => { preset = e.target.value; draw(); };
+    $("#cpy", f).onclick = () => copyText(c.redirect_uri);
+  };
+  draw();
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const body = { preset, name: E("name").value, client_id: E("client_id").value, scopes: E("scopes").value, enabled: E("enabled").checked, fields: {} };
+    if (E("issuer")) body.issuer = E("issuer").value;
+    presets[preset].fields.forEach(x => body.fields[x.key] = E("fld_" + x.key).value);
+    if (E("client_secret").value) body.client_secret = E("client_secret").value;
+    if (E("reauth")) body.password = E("reauth").value;
+    const btn = $("#ssave", mm.el); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Checking provider…';
+    try { await API.req(p ? "PUT" : "POST", p ? `/api/sso/providers/${encodeURIComponent(p.id)}` : "/api/sso/providers", body); mm.close(); toast(p ? "Provider saved" : "Provider added. Now link your account."); ssoCard(); }
+    catch (er) { $("#serr", f).textContent = er.message; btn.disabled = false; btn.textContent = "Save"; }
+  };
+  const del = $("#sdel", mm.el);
+  if (del) del.onclick = async () => {
+    if (!await confirmBox("Remove provider", `Accounts linked through ${esc(p.name)} will be unlinked.`, "Remove")) return;
+    try { await API.req("DELETE", `/api/sso/providers/${encodeURIComponent(p.id)}`); mm.close(); toast("Provider removed"); ssoCard(); } catch (er) { handleErr(er); }
+  };
 }
 
 boot();
