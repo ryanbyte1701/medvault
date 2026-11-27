@@ -1,5 +1,6 @@
 package com.scanvault.android.ui.login
 
+import com.scanvault.android.ui.components.GuardDialogTouches
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -59,7 +60,12 @@ fun LoginScreen(container: AppContainer, onOpenSettings: () -> Unit, onSignedIn:
     val scope = rememberCoroutineScope()
 
     val insecure = server.trim().startsWith("http://", ignoreCase = true)
-    var allowLanHttp by remember { mutableStateOf(container.store.allowLanHttp) }
+    val serverHost = remember(server) { runCatching { ApiClient.normalizeBaseUrl(server).host }.getOrNull() }
+    var allowLanHttp by remember(serverHost) {
+        mutableStateOf(serverHost != null && container.store.allowsLanHttp(serverHost))
+    }
+    // The status probe hit a certificate Android doesn't trust; offer to review it.
+    var probeCert by remember { mutableStateOf<UntrustedCertificateException?>(null) }
     // A self-signed certificate the user is being asked to approve (trust on first use).
     var untrusted by remember { mutableStateOf<UntrustedCertificateException?>(null) }
     val context = LocalContext.current
@@ -71,14 +77,14 @@ fun LoginScreen(container: AppContainer, onOpenSettings: () -> Unit, onSignedIn:
     // Bumped after the user approves a certificate, so the probe runs again.
     var probeKey by remember { mutableStateOf(0) }
     LaunchedEffect(server, probeKey) {
-        providers = emptyList(); localLogin = true
+        providers = emptyList(); localLogin = true; probeCert = null
         // SSO only over https: the ticket and session token must not cross the network in the clear.
         if (server.isBlank() || insecure) return@LaunchedEffect
         delay(600)
         runCatching { container.clientFor(server).status() }.onSuccess {
             providers = it.sso
             localLogin = it.localLogin || it.sso.isEmpty()
-        }
+        }.onFailure { probeCert = HttpClients.untrustedCertificate(it) }
     }
 
     fun startSso(provider: SsoProvider) {
@@ -116,7 +122,7 @@ fun LoginScreen(container: AppContainer, onOpenSettings: () -> Unit, onSignedIn:
     untrusted?.let { cert ->
         AlertDialog(
             onDismissRequest = { untrusted = null },
-            title = { Text("Trust this server's certificate?") },
+            title = { GuardDialogTouches(); Text("Trust this server's certificate?") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Your phone doesn't recognise the certificate this server uses. That's normal for a " +
@@ -131,11 +137,12 @@ fun LoginScreen(container: AppContainer, onOpenSettings: () -> Unit, onSignedIn:
             },
             confirmButton = {
                 TextButton(onClick = {
-                    container.store.addPin(cert.fingerprint)
+                    cert.pinKey?.let(container.store::addPin)
                     untrusted = null
+                    probeCert = null
                     probeKey++
                     if (localLogin && password.isNotEmpty()) signIn()
-                }) { Text("Trust and sign in") }
+                }) { Text(if (localLogin && password.isNotEmpty()) "Trust and sign in" else "Trust") }
             },
             dismissButton = { TextButton(onClick = { untrusted = null }) { Text("Cancel") } },
         )
@@ -181,10 +188,15 @@ fun LoginScreen(container: AppContainer, onOpenSettings: () -> Unit, onSignedIn:
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.weight(1f),
                     )
-                    Switch(checked = allowLanHttp, onCheckedChange = {
+                    Switch(checked = allowLanHttp, enabled = serverHost != null, onCheckedChange = {
                         allowLanHttp = it
-                        container.store.allowLanHttp = it
+                        container.store.lanHttpHost = if (it) serverHost else null
                     })
+                }
+            }
+            probeCert?.let { cert ->
+                TextButton(onClick = { untrusted = cert }) {
+                    Text("This server's certificate isn't trusted by Android. Review it")
                 }
             }
             providers.forEach { provider ->

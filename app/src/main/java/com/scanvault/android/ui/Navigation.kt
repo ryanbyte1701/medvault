@@ -4,7 +4,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import com.scanvault.android.ui.components.LockScreen
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -59,9 +59,13 @@ fun ScanVaultNavHost(container: AppContainer) {
         UnlockDialog(container)
     }
 
+    // While locked, the screens are not composed at all, so no dialog they opened (such as
+    // "Delete patient?") stays usable above the lock, and nothing can take keyboard or
+    // accessibility focus. Their saved state and view models are kept for after the unlock.
+    val saveable = rememberSaveableStateHolder()
     Box(Modifier.fillMaxSize()) {
+    if (!showLock) saveable.SaveableStateProvider("screens") {
     NavHost(
-        modifier = if (showLock) Modifier.clearAndSetSemantics {} else Modifier,
         navController = nav,
         startDestination = startDestination,
     ) {
@@ -120,6 +124,7 @@ fun ScanVaultNavHost(container: AppContainer) {
                 onBack = { nav.popBackStack() },
             )
         }
+    }
     }
     if (showLock) LockScreen(container.appLock)
     }

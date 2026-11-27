@@ -30,8 +30,21 @@ object Keystore {
 
     private val keyStore: KeyStore by lazy { KeyStore.getInstance(PROVIDER).apply { load(null) } }
 
+    /** Set at startup: whether the phone has a secure lock screen (KeyguardManager.isDeviceSecure). */
+    @Volatile var deviceSecure: () -> Boolean = { false }
+
+    /** True if a key had to be created without "unlocked device only" although that was wanted. */
+    @Volatile var unboundFallback = false
+        private set
+
     @Synchronized
-    fun existing(alias: String): SecretKey? = keyStore.getKey(alias, null) as? SecretKey
+    fun existing(alias: String): SecretKey? = try {
+        keyStore.getKey(alias, null) as? SecretKey
+    } catch (e: java.security.UnrecoverableKeyException) {
+        // The Keystore entry is damaged (seen after OS updates on some phones). Drop it so a new
+        // key can be made; what it protected is lost and the user signs in again.
+        delete(alias); null
+    }
 
     @Synchronized
     fun delete(alias: String) { runCatching { keyStore.deleteEntry(alias) } }
@@ -53,13 +66,18 @@ object Keystore {
             }
             .build()
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER)
-        // Strongest first; StrongBox or "unlocked only" can be unavailable (no secure lock screen).
-        val attempts = listOf(true to true, false to true, true to false, false to false)
+        // Strongest first. StrongBox can be missing. A key that is not bound to the unlocked
+        // device is only acceptable on Android 8 (no such option) or a phone with no lock screen.
+        val needsBinding = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && deviceSecure()
+        val attempts = if (needsBinding) listOf(true to true, false to true)
+            else listOf(true to true, false to true, true to false, false to false)
         var last: Exception? = null
         for ((strongBox, unlockedOnly) in attempts) {
             try {
                 generator.init(spec(strongBox, unlockedOnly))
-                return generator.generateKey()
+                return generator.generateKey().also {
+                    if (!unlockedOnly && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) unboundFallback = true
+                }
             } catch (e: Exception) {
                 last = e
             }
@@ -69,7 +87,14 @@ object Keystore {
 
     fun encrypt(alias: String, plain: ByteArray, aad: ByteArray? = null): ByteArray {
         val cipher = Cipher.getInstance(TRANSFORM)
-        cipher.init(Cipher.ENCRYPT_MODE, key(alias))
+        try {
+            cipher.init(Cipher.ENCRYPT_MODE, key(alias))
+        } catch (e: android.security.keystore.KeyPermanentlyInvalidatedException) {
+            // The key can never be used again (for example the lock screen was removed and re-added).
+            // Replace it; data under the old key is unreadable and is treated as missing.
+            delete(alias)
+            cipher.init(Cipher.ENCRYPT_MODE, key(alias))
+        }
         aad?.let { cipher.updateAAD(it) }
         return cipher.iv + cipher.doFinal(plain)
     }

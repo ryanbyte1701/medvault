@@ -1,6 +1,11 @@
 package com.scanvault.android.ui.components
 
+import android.app.Activity
+import android.app.KeyguardManager
+import android.content.Context
 import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
 import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_WEAK
@@ -40,7 +45,11 @@ fun lockAuthenticators(): Int =
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) BIOMETRIC_STRONG or DEVICE_CREDENTIAL
     else BIOMETRIC_WEAK or DEVICE_CREDENTIAL
 
-fun phoneHasScreenLock(activity: FragmentActivity): Boolean =
+/** Whether the phone has a PIN, pattern or password at all (biometrics need one too). */
+fun phoneHasScreenLock(context: Context): Boolean =
+    (context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager).isDeviceSecure
+
+private fun canUseBiometricPrompt(activity: FragmentActivity): Boolean =
     BiometricManager.from(activity).canAuthenticate(lockAuthenticators()) == BiometricManager.BIOMETRIC_SUCCESS
 
 /**
@@ -51,11 +60,24 @@ fun phoneHasScreenLock(activity: FragmentActivity): Boolean =
 fun LockScreen(lock: AppLock) {
     val activity = LocalContext.current as FragmentActivity
     var message by remember { mutableStateOf<String?>(null) }
+    // Only a phone with no screen lock at all opens without a check; Settings warns about it.
     val hasLock = remember { phoneHasScreenLock(activity) }
+    // Fallback for phones where BiometricPrompt can't offer the device credential (some API 26-29).
+    val confirmCredential = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        if (it.resultCode == Activity.RESULT_OK) lock.unlock() else message = "Not unlocked"
+    }
 
     fun prompt() {
-        if (!hasLock) { lock.unlock(); return } // nothing to check against; Settings explains
+        if (!hasLock) { lock.unlock(); return }
         message = null
+        if (!canUseBiometricPrompt(activity)) {
+            val keyguard = activity.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+            @Suppress("DEPRECATION")
+            val intent = keyguard.createConfirmDeviceCredentialIntent("Unlock ScanVault",
+                "Medical records are protected by your screen lock")
+            if (intent != null) confirmCredential.launch(intent) else message = "This phone's screen lock can't be checked"
+            return
+        }
         val prompt = BiometricPrompt(
             activity,
             ContextCompat.getMainExecutor(activity),

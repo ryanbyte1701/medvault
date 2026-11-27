@@ -182,18 +182,18 @@ class ApiClient(
             authHeader()?.let { builder.header("Authorization", it) }
             http.newCall(builder.build()).await().use { r ->
                 if (!r.isSuccessful) throw errorFor(r)
-                fun d(name: String) = r.header(name)?.toDoubleOrNull()
+                fun d(name: String) = r.header(name)?.toDoubleOrNull()?.takeIf { it.isFinite() }
                 fun i(name: String) = r.header(name)?.toIntOrNull()
                 RenderedImage(
                     bytes = readBounded(r, MAX_RENDER_BYTES).let { buf -> buf.readByteArray() },
                     center = d("X-Window-Center") ?: center ?: 0.0,
-                    width = d("X-Window-Width") ?: width ?: 1.0,
+                    width = d("X-Window-Width")?.takeIf { it > 0 } ?: width ?: 1.0,
                     defaultCenter = d("X-Default-Center"),
                     defaultWidth = d("X-Default-Width"),
                     min = d("X-Min"),
                     max = d("X-Max"),
-                    frames = i("X-Frames") ?: 1,
-                    frame = i("X-Frame") ?: frame ?: 0,
+                    frames = (i("X-Frames") ?: 1).coerceIn(1, 100_000),
+                    frame = (i("X-Frame") ?: frame ?: 0).coerceAtLeast(0),
                     rgb = r.header("X-Rgb").let { it == "1" || it.equals("true", true) },
                     modality = r.header("X-Modality"),
                 )
@@ -314,13 +314,21 @@ class ApiClient(
         override fun contentType() = part.contentType.toMediaType()
         override fun contentLength() = if (part.exactSize && part.size >= 0) part.size else -1L
         override fun writeTo(sink: okio.BufferedSink) {
-            part.open().use { input ->
-                val buffer = ByteArray(64 * 1024)
-                while (true) {
-                    val read = input.read(buffer)
-                    if (read == -1) break
-                    sink.write(buffer, 0, read)
+            try {
+                part.open().use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read == -1) break
+                        sink.write(buffer, 0, read)
+                    }
                 }
+            } catch (e: java.io.IOException) {
+                throw e
+            } catch (e: Exception) {
+                // Another app's document provider can throw anything (SecurityException,
+                // IllegalStateException...). On OkHttp's thread that would crash the app.
+                throw java.io.IOException("Couldn't read ${part.filename}", e)
             }
         }
     }
@@ -328,7 +336,7 @@ class ApiClient(
     companion object {
         private val JSON = "application/json; charset=utf-8".toMediaType()
         private const val MAX_JSON_BYTES = 32L * 1024 * 1024
-        private const val MAX_RENDER_BYTES = 256L * 1024 * 1024
+        private const val MAX_RENDER_BYTES = 64L * 1024 * 1024
 
         /** Plain client for tests; the app uses [com.scanvault.android.data.net.HttpClients.create]. */
         fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()

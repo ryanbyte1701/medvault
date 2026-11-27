@@ -20,8 +20,18 @@ class SecureStore(context: Context) {
     }
 
     var serverUrl: String?
-        get() = prefs.getString(KEY_SERVER)
-        set(value) = prefs.putString(KEY_SERVER, value)
+        get() {
+            if (!serverLoaded) {
+                serverCache = runCatching { prefs.getString(KEY_SERVER) }.getOrNull()
+                serverLoaded = true
+            }
+            return serverCache
+        }
+        set(value) {
+            prefs.putString(KEY_SERVER, value)
+            serverCache = value
+            serverLoaded = true
+        }
 
     var username: String?
         get() = prefs.getString(KEY_USER)
@@ -54,17 +64,38 @@ class SecureStore(context: Context) {
         get() = tokenExpiresAt?.let { runCatching { java.time.OffsetDateTime.parse(it) }.getOrNull() }
             ?.isBefore(java.time.OffsetDateTime.now()) ?: false
 
-    /** User opted in to unencrypted http, and only to private (LAN/VPN) addresses. */
-    @Volatile var allowLanHttp: Boolean = prefs.getBoolean(KEY_ALLOW_HTTP, false)
-        set(value) { field = value; prefs.putBoolean(KEY_ALLOW_HTTP, value) }
+    // Read on every request, so decrypted once and kept in memory (the Keystore is slow on StrongBox).
+    @Volatile private var serverCache: String? = null
+    @Volatile private var serverLoaded = false
 
-    /** SHA-256 fingerprints of self-signed server certificates the user approved. */
+    /**
+     * The one host the user allowed unencrypted http to (their LAN/VPN server), or null.
+     * Bound to that host so the opt-in doesn't carry over to other servers or networks' addresses.
+     */
+    @Volatile var lanHttpHost: String? = loadLanHttpHost()
+        set(value) { field = value?.lowercase(); prefs.putString(KEY_HTTP_HOST, field) }
+
+    fun allowsLanHttp(host: String): Boolean = lanHttpHost?.equals(host, ignoreCase = true) == true
+
+    private fun loadLanHttpHost(): String? {
+        prefs.getString(KEY_HTTP_HOST)?.let { return it }
+        // 0.4.0 stored a global on/off switch; bind it to the saved server.
+        if (prefs.getBoolean(KEY_ALLOW_HTTP, false)) {
+            prefs.remove(KEY_ALLOW_HTTP)
+            val host = serverUrl?.let { runCatching { java.net.URI(it).host }.getOrNull() }?.lowercase()
+            prefs.putString(KEY_HTTP_HOST, host)
+            return host
+        }
+        return null
+    }
+
+    /** Self-signed server certificates the user approved, as "host:port SHA256" (see CertPins). */
     @Volatile var certPins: Set<String> =
-        prefs.getString(KEY_PINS)?.split(",")?.filter { it.isNotBlank() }?.toSet() ?: emptySet()
+        prefs.getString(KEY_PINS)?.split(",")?.filter { it.contains(' ') }?.toSet() ?: emptySet()
         private set
 
-    fun addPin(fingerprint: String) {
-        certPins = certPins + fingerprint
+    fun addPin(pinKey: String) {
+        certPins = certPins + pinKey
         prefs.putString(KEY_PINS, certPins.joinToString(","))
     }
 
@@ -72,6 +103,11 @@ class SecureStore(context: Context) {
         certPins = emptySet()
         prefs.remove(KEY_PINS)
     }
+
+    /** "url\ntoken" of a signed-out session the server hasn't confirmed revoking yet. */
+    var pendingRevocation: String?
+        get() = prefs.getString(KEY_REVOKE)
+        set(value) = prefs.putString(KEY_REVOKE, value)
 
     /** Minutes in the background before the app lock is required again (0 = immediately). */
     var lockTimeoutMinutes: Int
@@ -103,6 +139,8 @@ class SecureStore(context: Context) {
         const val KEY_TOKEN = "token"
         const val KEY_EXPIRES = "token_expires_at"
         const val KEY_ALLOW_HTTP = "allow_lan_http"
+        const val KEY_HTTP_HOST = "lan_http_host"
+        const val KEY_REVOKE = "pending_revocation"
         const val KEY_PINS = "cert_pins"
         const val KEY_LOCK_TIMEOUT = "lock_timeout_min"
         const val LEGACY_TOKEN = "token_enc"

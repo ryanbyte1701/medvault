@@ -1,5 +1,6 @@
 package com.scanvault.android.ui.patients
 
+import com.scanvault.android.ui.components.GuardDialogTouches
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -214,7 +215,7 @@ fun PatientDetailScreen(
     if (confirmDelete) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
-            title = { Text("Delete patient?") },
+            title = { GuardDialogTouches(); Text("Delete patient?") },
             text = { Text("This removes the patient and all of their studies and files from the vault. Existing backups are not touched.") },
             confirmButton = {
                 TextButton(onClick = {
@@ -259,7 +260,7 @@ private fun AddStudyDialog(onDismiss: () -> Unit, onSave: suspend (StudyInput) -
 
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
-        title = { Text("New study") },
+        title = { GuardDialogTouches(); Text("New study") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(title, { title = it }, label = { Text("Title, e.g. MRI left knee") }, singleLine = true)

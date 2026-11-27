@@ -243,7 +243,9 @@ private fun SecuritySection(container: AppContainer) {
     val activity = androidx.compose.ui.platform.LocalContext.current as androidx.fragment.app.FragmentActivity
     val hasScreenLock = remember { com.scanvault.android.ui.components.phoneHasScreenLock(activity) }
     var timeout by remember { mutableStateOf(container.store.lockTimeoutMinutes) }
-    var allowHttp by remember { mutableStateOf(container.store.allowLanHttp) }
+    val serverHost = remember { container.store.serverUrl?.let { runCatching { java.net.URI(it).host }.getOrNull() } }
+    val httpServer = remember { container.store.serverUrl?.startsWith("http://") == true }
+    var allowHttp by remember { mutableStateOf(container.store.lanHttpHost != null) }
     var pins by remember { mutableStateOf(container.store.certPins) }
 
     Text("Security", style = MaterialTheme.typography.titleMedium)
@@ -266,13 +268,17 @@ private fun SecuritySection(container: AppContainer) {
             ) { Text(label) }
         }
     }
-    ListItem(
-        headlineContent = { Text("Allow http on my local network") },
+    if (httpServer || allowHttp) ListItem(
+        headlineContent = { Text("Allow http to ${serverHost ?: "this server"}") },
         supportingContent = {
-            Text("Unencrypted, and only to home or VPN addresses. The vault key is never sent over http.")
+            Text("Unencrypted, only to this server, and only when it is reached directly at a home or VPN " +
+                "address. The vault key is never sent over http.")
         },
         trailingContent = {
-            Switch(checked = allowHttp, onCheckedChange = { allowHttp = it; container.store.allowLanHttp = it })
+            Switch(checked = allowHttp, enabled = serverHost != null || allowHttp, onCheckedChange = {
+                allowHttp = it
+                container.store.lanHttpHost = if (it) serverHost else null
+            })
         },
     )
     if (pins.isNotEmpty()) {

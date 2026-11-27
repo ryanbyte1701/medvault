@@ -1,5 +1,6 @@
 package com.scanvault.android.ui.patients
 
+import com.scanvault.android.ui.components.GuardDialogTouches
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -161,7 +162,7 @@ private fun AddPatientDialog(onDismiss: () -> Unit, onSave: suspend (PatientInpu
 
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
-        title = { Text("New patient") },
+        title = { GuardDialogTouches(); Text("New patient") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true)
