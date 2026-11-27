@@ -249,3 +249,26 @@ def test_all_target_types_via_api(client, setup):
             loc = client.get(f"/api/oauth/{t}/start?target_id={out['id']}", headers=B, follow_redirects=False).headers["location"]
             assert loc.startswith({"dropbox": "https://www.dropbox.com/oauth2/authorize", "onedrive": "https://login.microsoftonline.com/consumers/"}[t])
     assert client.post("/api/backups/targets", json={"type": "ftp", "config": {}}, headers=B).status_code == 400
+
+
+def test_recent_studies_for_home(client, setup):
+    B = {"Authorization": f"Bearer {setup['token']}"}
+    p = client.post("/api/patients", json={"name": "Recent Person"}, headers=B).json()
+    old = client.post(f"/api/patients/{p['id']}/studies", json={"title": "Older study", "study_date": "2020-01-01"}, headers=B).json()
+    new = client.post(f"/api/patients/{p['id']}/studies", json={"title": "Newer study", "modality": "CT"}, headers=B).json()
+    r = client.get("/api/studies/recent?limit=50", headers=B)
+    assert r.status_code == 200, r.text
+    rows = r.json()
+    ids = [s["id"] for s in rows]
+    assert ids.index(new["id"]) < ids.index(old["id"])
+    top = rows[ids.index(new["id"])]
+    assert top["patient_name"] == "Recent Person" and top["title"] == "Newer study"
+    assert top["thumbnail_ids"] == [] and top["report_count"] == 0 and top["last_activity"]
+
+    # adding a file to the older study moves it ahead
+    client.post(f"/api/studies/{old['id']}/files", files=[("file", ("film.png", png_bytes(), "image/png"))], headers=B)
+    rows = client.get("/api/studies/recent?limit=2", headers=B).json()
+    assert len(rows) == 2 and rows[0]["id"] == old["id"] and len(rows[0]["thumbnail_ids"]) == 1
+    # still routes to a single study by id
+    assert client.get(f"/api/studies/{old['id']}", headers=B).json()["title"] == "Older study"
+    assert client.get("/api/studies/recent").status_code in (401, 403)
