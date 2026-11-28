@@ -307,7 +307,7 @@ def _parse_upload(sp, filename: str, pid: str, patient: dict, master: bytes) -> 
         pid,
         {
             "title": f"{lab_name or 'Lab'} lab report",
-            "modality": "LAB",
+            "modality": M.LAB_MODALITY,
             "study_date": fields.get("collected"),
             "facility": lab_name,
             "lab_report": True,

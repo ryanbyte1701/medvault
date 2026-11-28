@@ -287,3 +287,19 @@ def test_lab_actions_reach_the_activity_log(vault, monkeypatch):
     assert [a for a, _ in seen] == ["lab.upload", "lab.save", "lab.export", "lab.delete"]
     assert all(kw["patient_id"] == p["id"] for _, kw in seen)
     assert "5.120" not in repr(seen)  # no lab values in the log
+
+
+def test_patient_record_counts_scans_and_labs(vault):
+    """A patient record holds both: imaging studies (Scans) and lab reports (Labs)."""
+    c, B, _ = vault
+    p = _patient(c, B)
+    c.post(f"/api/patients/{p['id']}/studies", json={"title": "MRI left knee", "modality": "MR"}, headers=B)
+    got = c.get(f"/api/patients/{p['id']}", headers=B).json()
+    assert (got["scan_count"], got["lab_report_count"], got["lab_draft_count"]) == (1, 0, 0)
+    d = _upload(c, B, p["id"], lab_samples.labcorp())
+    got = c.get(f"/api/patients/{p['id']}", headers=B).json()
+    # the report's PDF is filed in a LAB study, which is not a scan
+    assert (got["study_count"], got["scan_count"], got["lab_report_count"], got["lab_draft_count"]) == (2, 1, 0, 1)
+    assert c.put(f"/api/labs/reports/{d['id']}", json={"save": True}, headers=B).status_code == 200
+    listed = {x["id"]: x for x in c.get("/api/patients", headers=B).json()}[p["id"]]
+    assert (listed["scan_count"], listed["lab_report_count"], listed["lab_draft_count"]) == (1, 1, 0)

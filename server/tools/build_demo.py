@@ -14,6 +14,7 @@ STATIC = ROOT / "app" / "static"
 def main(out: str) -> None:
     css = (STATIC / "styles.css").read_text()
     app = (STATIC / "app.js").read_text()
+    labs = (STATIC / "labs.js").read_text()
     demo = (ROOT / "tools" / "demo" / "demo.js").read_text()
     icon = (STATIC / "icon.svg").read_text()
     import base64
@@ -38,6 +39,9 @@ def main(out: str) -> None:
 </script>
 <script>
 {app}
+</script>
+<script>
+{labs}
 </script>
 </body>
 </html>
