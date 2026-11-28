@@ -1,12 +1,12 @@
 """Directory sign-in over LDAPS or LDAP + StartTLS.
 
-ScanVault looks the person up with a service account (or anonymously), checks
+MedVault looks the person up with a service account (or anonymously), checks
 an optional group allow list, then binds as that person with the password they
 typed. Only encrypted connections are used, and the server certificate is
 checked against trusted CAs and the host name, or against a pinned SHA-256
 fingerprint, *before* any credential is sent.
 
-Like OIDC, a directory account can only sign in after a ScanVault user has
+Like OIDC, a directory account can only sign in after a MedVault user has
 linked it, and it never unlocks the vault: the encryption key is still needed
 after a restart.
 """
@@ -37,7 +37,7 @@ PRESETS: dict[str, dict] = {
         "user_filter": "(&(objectCategory=person)(objectClass=user)(|(sAMAccountName={username})(userPrincipalName={username})))",
         "id_attr": "objectGUID",
         "nested_groups": True,
-        "help": "Windows Active Directory or Synology Directory Server. Use ldaps://dc.example.com (port 636), a service account such as CN=scanvault,CN=Users,DC=example,DC=com, and your domain as the base DN.",
+        "help": "Windows Active Directory or Synology Directory Server. Use ldaps://dc.example.com (port 636), a service account such as CN=medvault,CN=Users,DC=example,DC=com, and your domain as the base DN.",
     },
     "synology_ldap": {
         "name": "Synology LDAP Server",
@@ -114,7 +114,7 @@ def check_config(cfg: dict) -> None:
 
 
 def bind_password(cfg: dict) -> str:
-    f = os.environ.get("SCANVAULT_LDAP_BIND_PASSWORD_FILE")
+    f = os.environ.get("MEDVAULT_LDAP_BIND_PASSWORD_FILE")
     if f and Path(f).exists():
         return Path(f).read_text().strip()
     return cfg.get("bind_password") or ""
@@ -339,18 +339,18 @@ def test(cfg: dict) -> dict:
 
 
 def env_overrides(cfg: dict) -> dict:
-    """SCANVAULT_LDAP_* variables, for setups that prefer env/Docker secrets."""
+    """MEDVAULT_LDAP_* variables, for setups that prefer env/Docker secrets."""
     out = dict(cfg)
-    m = {"SCANVAULT_LDAP_URL": "url", "SCANVAULT_LDAP_BIND_DN": "bind_dn", "SCANVAULT_LDAP_BASE_DN": "base_dn",
-         "SCANVAULT_LDAP_PRESET": "preset", "SCANVAULT_LDAP_PIN_SHA256": "pin_sha256", "SCANVAULT_LDAP_NAME": "name"}
+    m = {"MEDVAULT_LDAP_URL": "url", "MEDVAULT_LDAP_BIND_DN": "bind_dn", "MEDVAULT_LDAP_BASE_DN": "base_dn",
+         "MEDVAULT_LDAP_PRESET": "preset", "MEDVAULT_LDAP_PIN_SHA256": "pin_sha256", "MEDVAULT_LDAP_NAME": "name"}
     for env, key in m.items():
         if os.environ.get(env):
             out[key] = os.environ[env].strip()
-    if os.environ.get("SCANVAULT_LDAP_PIN_SHA256"):
+    if os.environ.get("MEDVAULT_LDAP_PIN_SHA256"):
         out["verify"] = "pin"
-    if os.environ.get("SCANVAULT_LDAP_GROUPS"):
-        out["groups"] = [g.strip() for g in os.environ["SCANVAULT_LDAP_GROUPS"].split(";") if g.strip()]
-    if os.environ.get("SCANVAULT_LDAP_URL"):
+    if os.environ.get("MEDVAULT_LDAP_GROUPS"):
+        out["groups"] = [g.strip() for g in os.environ["MEDVAULT_LDAP_GROUPS"].split(";") if g.strip()]
+    if os.environ.get("MEDVAULT_LDAP_URL"):
         out.setdefault("enabled", True)
         out["managed"] = "env"
     return out

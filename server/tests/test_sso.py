@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from app import crypto, main, sso
 from app.store import Store
 
-H = {"X-ScanVault": "1"}
+H = {"X-MedVault": "1"}
 ISS = "https://idp.example.com"
 PASS = "orbit-cedar-lantern-quill"
 PW = "pw-1234567890"
@@ -102,8 +102,8 @@ def follow_to_idp(c, idp, resp):
 
 
 def confirm(c, page, action="allow"):
-    """The app flow stops on a ScanVault confirmation page before any ticket is issued."""
-    assert page.status_code == 200 and "Sign in to the ScanVault app?" in page.text, page.text
+    """The app flow stops on a MedVault confirmation page before any ticket is issued."""
+    assert page.status_code == 200 and "Sign in to the MedVault app?" in page.text, page.text
     assert "ticket" not in page.text
     cid = re.search(r'name="cid" value="([^"]+)"', page.text).group(1)
     r = c.post("/api/auth/sso/app-confirm", data={"cid": cid, "action": action}, follow_redirects=False)
@@ -244,19 +244,19 @@ def test_mobile_app_flow(env):
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
 
     assert c.get(f"/api/auth/sso/{pid}/start?app_redirect=https://evil.example.com/&code_challenge={challenge}", follow_redirects=False).status_code == 400
-    assert c.get(f"/api/auth/sso/{pid}/start?app_redirect=scanvault://sso", follow_redirects=False).status_code == 400
+    assert c.get(f"/api/auth/sso/{pid}/start?app_redirect=medvault://sso", follow_redirects=False).status_code == 400
 
-    r = c.get(f"/api/auth/sso/{pid}/start?app_redirect=scanvault://sso&app_state=xyz&code_challenge={challenge}", follow_redirects=False)
+    r = c.get(f"/api/auth/sso/{pid}/start?app_redirect=medvault://sso&app_state=xyz&code_challenge={challenge}", follow_redirects=False)
     assert "sv_sso" not in r.cookies  # apps are bound by PKCE, not cookies
     cb = follow_to_idp(c, idp, r)
     r = confirm(c, c.get(cb, follow_redirects=False))
     loc = urlparse(r.headers["location"])
-    assert loc.scheme == "scanvault" and loc.netloc == "sso"
+    assert loc.scheme == "medvault" and loc.netloc == "sso"
     q = {k: v[0] for k, v in parse_qs(loc.query).items()}
     assert q["state"] == "xyz"
     assert c.post("/api/auth/sso/exchange", json={"ticket": q["ticket"], "code_verifier": "wrong" * 10}).status_code == 400
     # the failed attempt consumed the ticket; run again
-    cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{pid}/start?app_redirect=scanvault://sso&code_challenge={challenge}", follow_redirects=False))
+    cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{pid}/start?app_redirect=medvault://sso&code_challenge={challenge}", follow_redirects=False))
     q = {k: v[0] for k, v in parse_qs(urlparse(confirm(c, c.get(cb, follow_redirects=False)).headers["location"]).query).items()}
     r = c.post("/api/auth/sso/exchange", json={"ticket": q["ticket"], "code_verifier": verifier})
     assert r.status_code == 200, r.text
@@ -265,9 +265,9 @@ def test_mobile_app_flow(env):
     assert c.get("/api/status", headers={"Authorization": f"Bearer {tok}"}).json()["authenticated"]
 
     # app errors go back to the app too
-    cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{pid}/start?app_redirect=scanvault://sso&app_state=s1&code_challenge={challenge}", follow_redirects=False))
+    cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{pid}/start?app_redirect=medvault://sso&app_state=s1&code_challenge={challenge}", follow_redirects=False))
     r = c.get(cb.replace("code=abc", "error=access_denied"), follow_redirects=False)
-    assert r.headers["location"].startswith("scanvault://sso?error=access_denied")
+    assert r.headers["location"].startswith("medvault://sso?error=access_denied")
 
 
 def test_password_login_can_be_turned_off_safely(env, monkeypatch):
@@ -296,7 +296,7 @@ def test_identity_linked_to_one_account_only(env):
     c, idp, B = env
     add_provider(c, B)
     link(c, idp, B)
-    # a second ScanVault user cannot claim the same IdP account
+    # a second MedVault user cannot claim the same IdP account
     uid = crypto.random_id()
     main.store.conn().execute("INSERT INTO users(id,username,password_hash,role,created_at) VALUES(?,?,?,?,?)", (uid, "sam", crypto.hash_password("pw-0987654321"), "admin", time.time()))
     tok, _ = main.new_session(uid)
@@ -311,10 +311,10 @@ def test_identity_linked_to_one_account_only(env):
 
 def test_env_provider(env, monkeypatch):
     c, idp, B = env
-    monkeypatch.setenv("SCANVAULT_OIDC_ISSUER", ISS)
-    monkeypatch.setenv("SCANVAULT_OIDC_CLIENT_ID", "sv-client")
-    monkeypatch.setenv("SCANVAULT_OIDC_CLIENT_SECRET", "s3cret")
-    monkeypatch.setenv("SCANVAULT_OIDC_PRESET", "authentik")
+    monkeypatch.setenv("MEDVAULT_OIDC_ISSUER", ISS)
+    monkeypatch.setenv("MEDVAULT_OIDC_CLIENT_ID", "sv-client")
+    monkeypatch.setenv("MEDVAULT_OIDC_CLIENT_SECRET", "s3cret")
+    monkeypatch.setenv("MEDVAULT_OIDC_PRESET", "authentik")
     st = c.get("/api/status").json()
     assert st["sso"] == [{"id": "env", "name": "Authentik", "preset": "authentik"}]
     assert c.put("/api/sso/providers/env", json={"name": "x", "password": PW}, headers={**B, **H}).status_code == 409
@@ -346,9 +346,9 @@ def test_app_confirmation_can_be_cancelled(env):
     add_provider(c, B)
     pid = link(c, idp, B)
     challenge = "a" * 43
-    cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{pid}/start?app_redirect=scanvault://sso&app_state=s&code_challenge={challenge}", follow_redirects=False))
+    cb = follow_to_idp(c, idp, c.get(f"/api/auth/sso/{pid}/start?app_redirect=medvault://sso&app_state=s&code_challenge={challenge}", follow_redirects=False))
     r = confirm(c, c.get(cb, follow_redirects=False), action="cancel")
-    assert r.headers["location"] == "scanvault://sso?error=cancelled&state=s"
+    assert r.headers["location"] == "medvault://sso?error=cancelled&state=s"
     # the confirmation id is single use
     assert c.post("/api/auth/sso/app-confirm", data={"cid": "nope", "action": "allow"}).status_code == 400
 
@@ -452,8 +452,8 @@ def test_tenant_template_only_for_microsoft_preset():
 
 
 def test_app_redirect_allow_list(monkeypatch):
-    monkeypatch.setenv("SCANVAULT_SSO_APP_REDIRECTS", "scanvault://,https://app.example.com/sso")
-    ok = ["scanvault://sso", "https://app.example.com/sso", "https://app.example.com/sso/done"]
+    monkeypatch.setenv("MEDVAULT_SSO_APP_REDIRECTS", "medvault://,https://app.example.com/sso")
+    ok = ["medvault://sso", "https://app.example.com/sso", "https://app.example.com/sso/done"]
     bad = ["https://app.example.com.evil.net/sso", "https://app.example.com/ssox", "http://app.example.com/sso",
            "https://user@app.example.com/sso", "javascript:alert(1)", "intent://x", ""]
     assert all(sso.app_redirect_allowed(u) for u in ok)

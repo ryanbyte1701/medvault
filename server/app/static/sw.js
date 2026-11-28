@@ -1,6 +1,6 @@
-// ScanVault service worker: caches only the app shell. API responses (patient
+// MedVault service worker: caches only the app shell. API responses (patient
 // data, images) are never cached so nothing decrypted lingers on the device.
-const CACHE = "scanvault-shell-v2";
+const CACHE = "medvault-shell-v2";
 const SHELL = ["/", "/static/app.js", "/static/labs.js", "/static/styles.css", "/static/icon.svg", "/manifest.webmanifest"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k))))); self.clients.claim(); });

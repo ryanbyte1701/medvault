@@ -1,6 +1,6 @@
 """Single sign-on with OpenID Connect.
 
-ScanVault acts as an OIDC relying party (authorization code flow with PKCE).
+MedVault acts as an OIDC relying party (authorization code flow with PKCE).
 One generic implementation covers Google, Microsoft Entra ID, Authentik,
 Authelia, Keycloak, Synology SSO Server and any other standards-compliant
 provider; the presets below only pre-fill the issuer and explain where to
@@ -9,11 +9,11 @@ register the app.
 SSO replaces the *sign-in password* only. The vault encryption key is a
 separate secret that never reaches the identity provider: after a restart the
 vault stays locked until someone enters the encryption key (or the recovery
-key file, or ``SCANVAULT_PASSPHRASE_FILE`` auto-unlocks it), exactly as with a
+key file, or ``MEDVAULT_PASSPHRASE_FILE`` auto-unlocks it), exactly as with a
 local sign-in.
 
 Sign-in is only possible for identities that a signed-in user has linked to
-their ScanVault account first (Settings > Single sign-on). Nobody gets an
+their MedVault account first (Settings > Single sign-on). Nobody gets an
 account just because the identity provider knows them.
 """
 from __future__ import annotations
@@ -57,7 +57,7 @@ PRESETS: dict[str, dict] = {
         "issuer": "{base_url}/application/o/{slug}/",
         "fields": [
             {"key": "base_url", "label": "Authentik URL", "placeholder": "https://auth.example.com"},
-            {"key": "slug", "label": "Application slug", "placeholder": "scanvault"},
+            {"key": "slug", "label": "Application slug", "placeholder": "medvault"},
         ],
         "help": "Applications > Providers > Create > OAuth2/OpenID Provider (confidential client), redirect URI below, then create an Application with the slug you enter here.",
     },
@@ -80,13 +80,13 @@ PRESETS: dict[str, dict] = {
         "name": "Synology SSO",
         "issuer": "{base_url}/webman/sso",
         "fields": [{"key": "base_url", "label": "NAS address", "placeholder": "https://nas.example.com:5001"}],
-        "help": "Install SSO Server from Package Center, enable OIDC under Service, then Application > Add with the redirect URI below. Your NAS needs a certificate ScanVault trusts (see README).",
+        "help": "Install SSO Server from Package Center, enable OIDC under Service, then Application > Add with the redirect URI below. Your NAS needs a certificate MedVault trusts (see README).",
     },
     "generic": {
         "name": "OpenID Connect",
         "issuer": "",
         "fields": [],
-        "help": "Any OpenID Connect provider. Enter its issuer URL; ScanVault reads /.well-known/openid-configuration from it.",
+        "help": "Any OpenID Connect provider. Enter its issuer URL; MedVault reads /.well-known/openid-configuration from it.",
     },
 }
 
@@ -135,8 +135,8 @@ def validate_url(url: str, what: str = "The issuer") -> None:
     u = urlparse(url if isinstance(url, str) else "")
     if u.scheme not in ("https", "http") or not u.hostname or u.username or u.password:
         raise SSOError(f"{what} must be an https:// URL")
-    if u.scheme == "http" and u.hostname not in ("localhost", "127.0.0.1") and os.environ.get("SCANVAULT_OIDC_ALLOW_HTTP") != "1":
-        raise SSOError(f"{what} must use https:// (set SCANVAULT_OIDC_ALLOW_HTTP=1 to allow http on a trusted LAN)")
+    if u.scheme == "http" and u.hostname not in ("localhost", "127.0.0.1") and os.environ.get("MEDVAULT_OIDC_ALLOW_HTTP") != "1":
+        raise SSOError(f"{what} must use https:// (set MEDVAULT_OIDC_ALLOW_HTTP=1 to allow http on a trusted LAN)")
     if "{" in url or any(c in url for c in "\r\n\t <>\"\\"):
         raise SSOError(f"{what} is not a valid URL" if what != "The issuer" else "Fill in every field of the provider")
 
@@ -352,23 +352,23 @@ class PendingStore:
 
 def env_provider() -> dict | None:
     """A provider configured through environment variables (read-only in the UI)."""
-    issuer = os.environ.get("SCANVAULT_OIDC_ISSUER", "").strip()
-    client_id = os.environ.get("SCANVAULT_OIDC_CLIENT_ID", "").strip()
+    issuer = os.environ.get("MEDVAULT_OIDC_ISSUER", "").strip()
+    client_id = os.environ.get("MEDVAULT_OIDC_CLIENT_ID", "").strip()
     if not issuer or not client_id:
         return None
-    secret = os.environ.get("SCANVAULT_OIDC_CLIENT_SECRET", "")
-    sf = os.environ.get("SCANVAULT_OIDC_CLIENT_SECRET_FILE")
+    secret = os.environ.get("MEDVAULT_OIDC_CLIENT_SECRET", "")
+    sf = os.environ.get("MEDVAULT_OIDC_CLIENT_SECRET_FILE")
     if sf and Path(sf).exists():
         secret = Path(sf).read_text().strip()
-    preset = os.environ.get("SCANVAULT_OIDC_PRESET", "generic")
+    preset = os.environ.get("MEDVAULT_OIDC_PRESET", "generic")
     return {
         "id": "env",
-        "name": os.environ.get("SCANVAULT_OIDC_NAME") or PRESETS.get(preset, PRESETS["generic"])["name"],
+        "name": os.environ.get("MEDVAULT_OIDC_NAME") or PRESETS.get(preset, PRESETS["generic"])["name"],
         "preset": preset if preset in PRESETS else "generic",
         "issuer": issuer,
         "client_id": client_id,
         "client_secret": secret,
-        "scopes": os.environ.get("SCANVAULT_OIDC_SCOPES") or DEFAULT_SCOPES,
+        "scopes": os.environ.get("MEDVAULT_OIDC_SCOPES") or DEFAULT_SCOPES,
         "enabled": True,
         "managed": "env",
     }
@@ -377,7 +377,7 @@ def env_provider() -> dict | None:
 def app_redirect_allowed(uri: str) -> bool:
     """Mobile apps receive their one-time ticket on a custom-scheme URI, or on a
     verified https App Link if the operator lists one."""
-    prefixes = [p.strip() for p in os.environ.get("SCANVAULT_SSO_APP_REDIRECTS", "scanvault://").split(",") if p.strip()]
+    prefixes = [p.strip() for p in os.environ.get("MEDVAULT_SSO_APP_REDIRECTS", "medvault://,scanvault://").split(",") if p.strip()]
     if not uri or any(c in uri for c in "\r\n\t <>\"\\"):
         return False
     u = urlparse(uri)

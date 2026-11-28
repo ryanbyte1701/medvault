@@ -1,4 +1,4 @@
-"""ScanVault cryptography.
+"""MedVault cryptography.
 
 Key hierarchy
 -------------
@@ -7,7 +7,7 @@ Key hierarchy
 * Passphrase key (KEK): derived from the user's passphrase with scrypt. It wraps
   the MK with AES-256-GCM; the wrapped MK lives in ``keystore.json``.
 * Recovery key file: a text file holding the MK itself (base32). With that file
-  alone any ScanVault backup can be decrypted, even without the app
+  alone any MedVault backup can be decrypted, even without the app
   (see ``tools/restore.py``).
 
 Stream format (files at rest and backup archives)
@@ -111,14 +111,14 @@ def recovery_file_text(master_key: bytes, vault_id: str, created: str) -> str:
     lines = [groups[i : i + 40].strip() for i in range(0, len(groups), 40)]
     return "\n".join(
         [
-            "SCANVAULT EMERGENCY RECOVERY KEY",
+            "MEDVAULT EMERGENCY RECOVERY KEY",
             "================================",
             "",
             f"Vault ID:         {vault_id}",
             f"Key fingerprint:  {fingerprint(master_key)}",
             f"Created:          {created}",
             "",
-            "This file can decrypt EVERY ScanVault backup of this vault, including",
+            "This file can decrypt EVERY MedVault backup of this vault, including",
             "backups stored in the cloud, on servers or on USB disks. Anyone who holds it",
             "can read the medical records inside. Print it or store it offline",
             "(password manager, safe, USB key in a drawer). Do not email it and do not",
@@ -129,10 +129,10 @@ def recovery_file_text(master_key: bytes, vault_id: str, created: str) -> str:
             RECOVERY_END,
             "",
             "To restore:",
-            "  1. In a fresh ScanVault install choose 'Restore from backup' and upload",
+            "  1. In a fresh MedVault install choose 'Restore from backup' and upload",
             "     the backup file plus this key file, or",
-            "  2. Without ScanVault at all:",
-            "       python3 tools/restore.py --key scanvault-recovery-key.txt \\",
+            "  2. Without MedVault at all:",
+            "       python3 tools/restore.py --key medvault-recovery-key.txt \\",
             "              --backup scanvault-backup-XXXX.svb --out ./restored",
             "",
         ]
@@ -209,7 +209,7 @@ def encrypt_stream(master_key: bytes, src: BinaryIO, dst: BinaryIO, aad: bytes =
 def decrypt_stream_iter(master_key: bytes, src: BinaryIO, aad: bytes = b"") -> Iterator[bytes]:
     head = src.read(20)
     if len(head) != 20 or head[:4] != MAGIC:
-        raise CryptoError("Not a ScanVault encrypted stream")
+        raise CryptoError("Not a MedVault encrypted stream")
     aes = AESGCM(_subkey(master_key, head[4:], b"scanvault-stream-v1"))
     counter = 0
     while True:

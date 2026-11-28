@@ -35,11 +35,11 @@ def test_s3_moto(tmp_path, monkeypatch):
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
     with mock_aws():
         boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="vault")
-        t = targets.make("s3", {"provider": "aws", "bucket": "vault", "prefix": "nas/scanvault", "access_key_id": "AK", "secret_access_key": "SK", "region": "us-east-1"})
-        assert "s3://vault/nas/scanvault/" in t.test()
+        t = targets.make("s3", {"provider": "aws", "bucket": "vault", "prefix": "nas/medvault", "access_key_id": "AK", "secret_access_key": "SK", "region": "us-east-1"})
+        assert "s3://vault/nas/medvault/" in t.test()
         _roundtrip(t, tmp_path)
         keys = [o["Key"] for o in boto3.client("s3", region_name="us-east-1").list_objects_v2(Bucket="vault")["Contents"]]
-        assert all(k.startswith("nas/scanvault/scanvault-backup-") for k in keys)
+        assert all(k.startswith("nas/medvault/scanvault-backup-") for k in keys)
         bad = targets.make("s3", {"provider": "aws", "bucket": "nope", "access_key_id": "AK", "secret_access_key": "SK"})
         with pytest.raises(targets.TargetError):
             bad.test()
@@ -70,21 +70,21 @@ def test_dropbox_chunked_upload_list_prune(tmp_path):
     responses.post("https://content.dropboxapi.com/2/files/upload_session/start", json={"session_id": "S1"})
     responses.post("https://content.dropboxapi.com/2/files/upload_session/append_v2", json=None)
     responses.post("https://content.dropboxapi.com/2/files/upload_session/finish", json={"name": "x"})
-    entries = [{".tag": "file", "name": n, "path_lower": "/scanvault/" + n} for n in NAMES] + [{".tag": "folder", "name": "other", "path_lower": "/scanvault/other"}]
+    entries = [{".tag": "file", "name": n, "path_lower": "/medvault/" + n} for n in NAMES] + [{".tag": "folder", "name": "other", "path_lower": "/medvault/other"}]
     responses.post("https://api.dropboxapi.com/2/files/list_folder", json={"entries": entries[:2], "cursor": "C", "has_more": True})
     responses.post("https://api.dropboxapi.com/2/files/list_folder/continue", json={"entries": entries[2:], "cursor": "C", "has_more": False})
     responses.post("https://api.dropboxapi.com/2/files/delete_v2", json={})
-    t = targets.make("dropbox", {"app_key": "k", "app_secret": "s", "refresh_token": "R", "folder": "ScanVault"})
+    t = targets.make("dropbox", {"app_key": "k", "app_secret": "s", "refresh_token": "R", "folder": "MedVault"})
     p = tmp_path / "big.svb"
     with open(p, "wb") as f:
         f.truncate(200 * 1024 * 1024)
     t.upload(p, NAMES[0])
     fin = [c for c in responses.calls if c.request.url.endswith("/finish")][0]
     arg = json.loads(fin.request.headers["Dropbox-API-Arg"])
-    assert arg["commit"]["path"] == "/ScanVault/" + NAMES[0] and arg["cursor"]["offset"] == 192 * 1024 * 1024
+    assert arg["commit"]["path"] == "/MedVault/" + NAMES[0] and arg["cursor"]["offset"] == 192 * 1024 * 1024
     assert t.prune(2) == 2
     dels = [json.loads(c.request.body)["path"] for c in responses.calls if c.request.url.endswith("/delete_v2")]
-    assert dels == ["/scanvault/" + NAMES[0], "/scanvault/" + NAMES[1]]
+    assert dels == ["/medvault/" + NAMES[0], "/medvault/" + NAMES[1]]
 
 
 def test_dropbox_needs_connect():
@@ -96,14 +96,14 @@ def test_dropbox_needs_connect():
 @responses.activate
 def test_onedrive_upload_session_and_token_rotation(tmp_path):
     responses.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", json={"access_token": "AT", "refresh_token": "R2"})
-    responses.post("https://graph.microsoft.com/v1.0/me/drive/special/approot:/Backups/ScanVault/" + NAMES[0] + ":/createUploadSession", json={"uploadUrl": "https://up.example/s"})
+    responses.post("https://graph.microsoft.com/v1.0/me/drive/special/approot:/Backups/MedVault/" + NAMES[0] + ":/createUploadSession", json={"uploadUrl": "https://up.example/s"})
     responses.put("https://up.example/s", status=202, json={})
     responses.put("https://up.example/s", status=201, json={"id": "F"})
-    responses.get("https://graph.microsoft.com/v1.0/me/drive/special/approot:/Backups/ScanVault:/children", json={"value": [{"id": f"id{i}", "name": n, "file": {}} for i, n in enumerate(NAMES)]})
+    responses.get("https://graph.microsoft.com/v1.0/me/drive/special/approot:/Backups/MedVault:/children", json={"value": [{"id": f"id{i}", "name": n, "file": {}} for i, n in enumerate(NAMES)]})
     for i in range(3):
         responses.delete(f"https://graph.microsoft.com/v1.0/me/drive/items/id{i}", status=204)
     saved = {}
-    t = targets.make("onedrive", {"client_id": "c", "client_secret": "s", "refresh_token": "R1", "tenant": "consumers", "folder": "Backups/ScanVault"}, saved.update)
+    t = targets.make("onedrive", {"client_id": "c", "client_secret": "s", "refresh_token": "R1", "tenant": "consumers", "folder": "Backups/MedVault"}, saved.update)
     p = tmp_path / "b.svb"
     p.write_bytes(b"\1" * (12 * 1024 * 1024))
     t.upload(p, NAMES[0])
@@ -173,7 +173,7 @@ def test_webdav_nextcloud_style(tmp_path, dav_server):
     url, info = dav_server
     root = info["root"]
     saved = {}
-    cfg = {"url": url, "username": "ryan", "password": "pw", "folder": "Backups/ScanVault"}
+    cfg = {"url": url, "username": "ryan", "password": "pw", "folder": "Backups/MedVault"}
     # an untrusted self-signed certificate is refused unless the user opts in to pinning it
     with pytest.raises(targets.TargetError, match="not trusted"):
         targets.make("webdav", dict(cfg)).test()
@@ -181,7 +181,7 @@ def test_webdav_nextcloud_style(tmp_path, dav_server):
     msg = t.test()
     assert "Connected" in msg and "pinned" in msg and saved["tls_fingerprint"].count(":") == 31
     _roundtrip(t, tmp_path)
-    assert sorted(p.name for p in (root / "Backups" / "ScanVault").iterdir()) == NAMES[-2:]
+    assert sorted(p.name for p in (root / "Backups" / "MedVault").iterdir()) == NAMES[-2:]
     bad = targets.make("webdav", {**cfg, "self_signed": True, "tls_fingerprint": saved["tls_fingerprint"], "password": "nope"})
     with pytest.raises(targets.TargetError, match=r"HTTP 401"):
         bad.test()
@@ -244,8 +244,8 @@ def test_smb(tmp_path, monkeypatch):
     for name in ("register_session", "makedirs", "open_file", "remove", "rename", "listdir"):
         setattr(mod, name, getattr(fake, name))
     monkeypatch.setitem(sys.modules, "smbclient", mod)
-    t = targets.make("smb", {"host": "nas.local", "share": "backup", "folder": "scanvault/nightly", "username": "u", "password": "pw", "require_encryption": True})
-    assert "\\\\nas.local\\backup\\scanvault\\nightly" in t.test()
+    t = targets.make("smb", {"host": "nas.local", "share": "backup", "folder": "medvault/nightly", "username": "u", "password": "pw", "require_encryption": True})
+    assert "\\\\nas.local\\backup\\medvault\\nightly" in t.test()
     _roundtrip(t, tmp_path)
     assert fake.sessions[0][1]["encrypt"] is True
     assert not list((tmp_path / "smb").rglob("*.part"))
@@ -255,17 +255,17 @@ def test_smb(tmp_path, monkeypatch):
 
 # ------------------------------------------------------------------ local folder
 def test_local_folder(tmp_path, monkeypatch):
-    monkeypatch.setenv("SCANVAULT_LOCAL_BACKUP_ROOT", str(tmp_path / "backups"))
+    monkeypatch.setenv("MEDVAULT_LOCAL_BACKUP_ROOT", str(tmp_path / "backups"))
     monkeypatch.setattr(targets, "_mount_root", lambda p: tmp_path)  # pretend a disk is mounted
-    t = targets.make("local", {"path": "usb1/scanvault"})
+    t = targets.make("local", {"path": "usb1/medvault"})
     assert "free" in t.test()
     _roundtrip(t, tmp_path)
-    assert (tmp_path / "backups" / "usb1" / "scanvault" / NAMES[-1]).exists()
+    assert (tmp_path / "backups" / "usb1" / "medvault" / NAMES[-1]).exists()
     # confined to the backup root
     for bad in ("/etc", str(tmp_path), "../../x", str(tmp_path / "backups" / ".." / "elsewhere")):
         with pytest.raises(targets.TargetError, match="under"):
             targets.LocalFolder.validate({"path": bad})
-    with pytest.raises(targets.TargetError, match="Not a ScanVault backup"):
+    with pytest.raises(targets.TargetError, match="Not a MedVault backup"):
         t.download("../../etc/passwd", tmp_path / "x")
     # require_mount is on unless explicitly turned off
     monkeypatch.setattr(targets, "_mount_root", lambda p: Path("/"))  # e.g. USB disk not mounted

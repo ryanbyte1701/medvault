@@ -4,6 +4,6 @@ __pycache__/
 data/
 *.svb
 *recovery-key*.txt
-scanvault_passphrase.txt
+medvault_passphrase.txt
 .env
 preview/

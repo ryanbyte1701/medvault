@@ -1,8 +1,16 @@
-# ScanVault for Android
+# MedVault for Android
 
 Native Android client (Kotlin + Jetpack Compose) for a self-hosted
-[ScanVault](https://github.com/ryanbyte1701/scanvault) server, the vault for local copies of
+[MedVault](../server) server, the vault for local copies of
 imaging files and reports from imaging centers.
+
+## Moving from ScanVault
+
+The app used to be called ScanVault (`com.scanvault.android`). MedVault has a new package id,
+`com.medvault.android`, so Android installs it as a separate app instead of updating the old one.
+Install MedVault and sign in to your server again. Then, once ScanVault shows no pending uploads,
+uninstall it. Nothing else is lost: your records live on the server, and the phone only keeps
+an encrypted cache.
 
 ## Screenshots
 
@@ -34,7 +42,7 @@ patient data. They are rendered by the screenshot tests described under [Buildin
 
 ## What it does
 
-- Sign in to your ScanVault server (`https://…`; `http://` only on your own LAN, if you allow it) with a password
+- Sign in to your MedVault server (`https://…`; `http://` only on your own LAN, if you allow it) with a password
   or with any single sign-on provider the server offers ("Continue with Google", Authentik, etc.).
   SSO runs in a Custom Tab with PKCE; the server brokers it, so the app needs no IdP registration.
 - Unlock the vault with its passphrase or recovery key when the server has restarted.
@@ -50,7 +58,7 @@ patient data. They are rendered by the screenshot tests described under [Buildin
 - See **recent activity** from the server's activity log (who signed in, uploaded, edited, deleted,
   viewed or downloaded what, and when): the clock icon on the Patients screen shows everything,
   and **Activity** in a patient's or study's menu narrows it to that patient or study. Requests
-  carry a `ScanVault-Android/<version>` User-Agent so the log shows they came from the app.
+  carry a `MedVault-Android/<version>` User-Agent so the log shows they came from the app.
 - **Explain or translate with AI** (when the server has it turned on): a plain-language,
   non-medical explanation or a translation of a study's report and chosen images. The server
   prepares the exact payload, with names, IDs and dates removed by default, and the app shows it
@@ -111,7 +119,7 @@ The app expects these endpoints (all JSON, `Authorization: Bearer <token>`, erro
 | --- | --- | --- |
 | POST | `/api/auth/login` | `{username, password, device?}` → `{token, expires_at, unlocked, device}`; the device token is stored encrypted and sent back so a stranger's wrong guesses can't lock this phone out |
 | POST | `/api/auth/logout` | revokes the token |
-| GET | `/api/auth/sso/{id}/start` | opened in a Custom Tab with `app_redirect=scanvault://sso`, `app_state`, `code_challenge` |
+| GET | `/api/auth/sso/{id}/start` | opened in a Custom Tab with `app_redirect=medvault://sso`, `app_state`, `code_challenge` |
 | POST | `/api/auth/sso/exchange` | `{ticket, code_verifier}` → same as login |
 | GET | `/api/status` | `{setup_complete, unlocked, authenticated, username, local_login, sso: [{id, name, preset}], …}` |
 | POST | `/api/vault/unlock` | `{passphrase}` or `{recovery_key}` |
@@ -144,21 +152,21 @@ Requires JDK 17 and the Android SDK (API 35).
 ```
 
 **Install the release APK.** GitHub Actions builds a minified release APK on every push and pull
-request (`scanvault-release-apk` artifact). It is signed when the repository has these Actions
-secrets: `SCANVAULT_KEYSTORE_BASE64` (base64 of the .jks file), `SCANVAULT_KEYSTORE_PASSWORD`,
-`SCANVAULT_KEY_ALIAS` and `SCANVAULT_KEY_PASSWORD`. Without them it is unsigned and Android won't
+request (`medvault-release-apk` artifact). It is signed when the repository has these Actions
+secrets: `MEDVAULT_KEYSTORE_BASE64` (base64 of the .jks file), `MEDVAULT_KEYSTORE_PASSWORD`,
+`MEDVAULT_KEY_ALIAS` and `MEDVAULT_KEY_PASSWORD`. Without them it is unsigned and Android won't
 install it.
 
-Pull requests also get a debug APK (`scanvault-debug-apk`) for testing. Don't use it for real
+Pull requests also get a debug APK (`medvault-debug-apk`) for testing. Don't use it for real
 records: debug builds trust user-installed CA certificates and can be inspected with a debugger.
 
 **Screenshots.** The images above come from Robolectric tests in
-`app/src/test/java/com/scanvault/android/screenshots/` that run the real app against a stand-in
+`app/src/test/java/com/medvault/android/screenshots/` that run the real app against a stand-in
 server with the same fictional sample vault as the web demo, in the dark theme. The normal test
 run skips them. To render them:
 
 ```sh
-./gradlew testDebugUnitTest -Pscreenshots --tests 'com.scanvault.android.screenshots.*'
+./gradlew testDebugUnitTest -Pscreenshots --tests 'com.medvault.android.screenshots.*'
 # PNGs: app/build/screenshots/
 ```
 

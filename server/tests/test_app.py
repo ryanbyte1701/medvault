@@ -13,7 +13,7 @@ from conftest import ROOT, SETUP, make_dicom
 
 from app import main  # noqa: E402
 
-H = {"X-ScanVault": "1"}
+H = {"X-MedVault": "1"}
 PASS = "orbit-cedar-lantern-quill"
 
 

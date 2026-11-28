@@ -1,6 +1,6 @@
 {
-  "name": "ScanVault",
-  "short_name": "ScanVault",
+  "name": "MedVault",
+  "short_name": "MedVault",
   "description": "Encrypted local vault for medical imaging and reports",
   "start_url": "/",
   "scope": "/",

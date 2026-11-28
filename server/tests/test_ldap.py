@@ -22,12 +22,12 @@ from ldap3 import MOCK_SYNC, OFFLINE_SLAPD_2_4, Connection, Server
 from app import crypto, ldapauth, main
 from app.store import Store
 
-H = {"X-ScanVault": "1"}
+H = {"X-MedVault": "1"}
 PASS = "orbit-cedar-lantern-quill"
 PW = "pw-1234567890"
 BASE = "dc=home,dc=lan"
 USER_DN = "uid=ryan,ou=people,dc=home,dc=lan"
-GROUP = "cn=scanvault,ou=groups,dc=home,dc=lan"
+GROUP = "cn=medvault,ou=groups,dc=home,dc=lan"
 UUID = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
 
 
@@ -45,7 +45,7 @@ def make_directory():
                   "entryUUID": UUID, "userPassword": "dir-pass-1"})
     add("uid=sam,ou=people,dc=home,dc=lan", {"objectClass": ["inetOrgPerson", "posixAccount"], "uid": "sam", "cn": "Sam", "sn": "S",
                                             "entryUUID": "16fd2706-8baf-433b-82eb-8c7fada847da", "userPassword": "sam-pass-1"})
-    add(GROUP, {"objectClass": "groupOfNames", "cn": "scanvault", "member": [USER_DN]})
+    add(GROUP, {"objectClass": "groupOfNames", "cn": "medvault", "member": [USER_DN]})
     return srv
 
 
@@ -101,7 +101,7 @@ def link(c, B, user="ryan", pw="dir-pass-1"):
 
 def login(c, user, pw):
     c.cookies.clear()
-    return c.post("/api/auth/login", json={"username": user, "password": pw}, headers={"User-Agent": "ScanVault-Android"})
+    return c.post("/api/auth/login", json={"username": user, "password": pw}, headers={"User-Agent": "MedVault-Android"})
 
 
 def bearer(r):
@@ -141,7 +141,7 @@ def test_configure_link_and_sign_in(env):
     assert c.post("/api/vault/unlock", json={"passphrase": PASS}, headers=S).status_code == 200
     # the user bind used the DN found by the search, with the typed password
     assert (USER_DN, "dir-pass-1") in opened
-    # the ScanVault password still works too
+    # the MedVault password still works too
     assert login(c, "ryan", PW).status_code == 200
 
 
@@ -180,7 +180,7 @@ def test_password_sign_in_off_keeps_directory(env):
     assert c.put("/api/sso/settings", json={"local_login": False, "password": PW}, headers=B).status_code == 200
     st = c.get("/api/status").json()
     assert st["local_login"] is False and st["ldap"]
-    assert login(c, "ryan", PW).status_code == 401  # ScanVault password no longer accepted
+    assert login(c, "ryan", PW).status_code == 401  # MedVault password no longer accepted
     assert login(c, "ryan", "dir-pass-1").status_code == 200
     # removing the directory turns password sign-in back on (no lockout)
     assert c.delete("/api/ldap/config", headers=B).json()["local_login"] is True

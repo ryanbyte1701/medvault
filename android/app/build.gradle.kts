@@ -6,25 +6,25 @@ plugins {
 }
 
 android {
-    namespace = "com.scanvault.android"
+    namespace = "com.medvault.android"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.scanvault.android"
+        applicationId = "com.medvault.android"
         minSdk = 26
         targetSdk = 35
         versionCode = 5
         versionName = "0.5.0"
     }
 
-    val releaseKeystore = System.getenv("SCANVAULT_KEYSTORE_FILE")?.let { file(it) }?.takeIf { it.exists() }
+    val releaseKeystore = System.getenv("MEDVAULT_KEYSTORE_FILE")?.let { file(it) }?.takeIf { it.exists() }
     signingConfigs {
         if (releaseKeystore != null) {
             create("release") {
                 storeFile = releaseKeystore
-                storePassword = System.getenv("SCANVAULT_KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("SCANVAULT_KEY_ALIAS")
-                keyPassword = System.getenv("SCANVAULT_KEY_PASSWORD")
+                storePassword = System.getenv("MEDVAULT_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("MEDVAULT_KEY_ALIAS")
+                keyPassword = System.getenv("MEDVAULT_KEY_PASSWORD")
             }
         }
     }
@@ -61,7 +61,7 @@ val screenshots = project.hasProperty("screenshots")
 tasks.withType<Test>().configureEach {
     if (screenshots) {
         systemProperty("roborazzi.test.record", "true")
-        systemProperty("scanvault.screenshots.dir", layout.buildDirectory.dir("screenshots").get().asFile.absolutePath)
+        systemProperty("medvault.screenshots.dir", layout.buildDirectory.dir("screenshots").get().asFile.absolutePath)
         maxHeapSize = "4g"
     } else {
         exclude("**/screenshots/**")

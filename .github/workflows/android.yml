@@ -17,7 +17,7 @@ jobs:
       run:
         working-directory: android
     env:
-      HAS_SIGNING_KEY: ${{ secrets.SCANVAULT_KEYSTORE_BASE64 != '' }}
+      HAS_SIGNING_KEY: ${{ secrets.MEDVAULT_KEYSTORE_BASE64 != '' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: gradle/actions/wrapper-validation@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
@@ -34,27 +34,27 @@ jobs:
       - if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: scanvault-debug-apk
+          name: medvault-debug-apk
           path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
       - name: Decode release keystore
         env:
-          KEYSTORE_B64: ${{ secrets.SCANVAULT_KEYSTORE_BASE64 }}
+          KEYSTORE_B64: ${{ secrets.MEDVAULT_KEYSTORE_BASE64 }}
         if: env.HAS_SIGNING_KEY == 'true'
         run: |
           echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
-          echo "SCANVAULT_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          echo "MEDVAULT_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
       - name: Build release APK (minified; signed when signing secrets are set)
         env:
-          SCANVAULT_KEYSTORE_PASSWORD: ${{ secrets.SCANVAULT_KEYSTORE_PASSWORD }}
-          SCANVAULT_KEY_ALIAS: ${{ secrets.SCANVAULT_KEY_ALIAS }}
-          SCANVAULT_KEY_PASSWORD: ${{ secrets.SCANVAULT_KEY_PASSWORD }}
+          MEDVAULT_KEYSTORE_PASSWORD: ${{ secrets.MEDVAULT_KEYSTORE_PASSWORD }}
+          MEDVAULT_KEY_ALIAS: ${{ secrets.MEDVAULT_KEY_ALIAS }}
+          MEDVAULT_KEY_PASSWORD: ${{ secrets.MEDVAULT_KEY_PASSWORD }}
         run: ./gradlew --no-daemon assembleRelease
       - name: Remove the keystore
         if: always()
         run: rm -f "$RUNNER_TEMP/release.jks"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: scanvault-release-apk
+          name: medvault-release-apk
           path: android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error

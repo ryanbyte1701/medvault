@@ -9,9 +9,9 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 _DATA = tempfile.mkdtemp(prefix="sv-test-")
-os.environ["SCANVAULT_DATA"] = _DATA
-os.environ["SCANVAULT_SETUP_CODE"] = "TEST-CODE-0001"
-os.environ.setdefault("SCANVAULT_LOCAL_BACKUP_ROOT", tempfile.mkdtemp(prefix="sv-usb-"))
+os.environ["MEDVAULT_DATA"] = _DATA
+os.environ["MEDVAULT_SETUP_CODE"] = "TEST-CODE-0001"
+os.environ.setdefault("MEDVAULT_LOCAL_BACKUP_ROOT", tempfile.mkdtemp(prefix="sv-usb-"))
 SETUP = {"X-Setup-Code": "TEST-CODE-0001"}
 
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""ScanVault emergency restore: decrypt a backup WITHOUT running ScanVault.
+"""MedVault emergency restore: decrypt a backup WITHOUT running MedVault.
 
     pip install cryptography
-    python3 tools/restore.py --key scanvault-recovery-key.txt \
+    python3 tools/restore.py --key medvault-recovery-key.txt \
         --backup scanvault-backup-20261126-213000Z.svb --out ./restored
 
 Instead of --key you can pass --passphrase (you will be prompted). That only
@@ -18,7 +18,7 @@ Output:
           IM000001.dcm ...
         lab-results.csv             # LabsVault values, one row per result
 Add --vault-only to just extract the encrypted vault (to import into a new
-ScanVault via setup > Restore instead).
+MedVault via setup > Restore instead).
 """
 from __future__ import annotations
 

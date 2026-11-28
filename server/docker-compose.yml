@@ -1,8 +1,8 @@
 services:
-  scanvault:
+  medvault:
     build: .
-    image: scanvault:latest
-    container_name: scanvault
+    image: medvault:latest
+    container_name: medvault
     restart: unless-stopped
     ports:
       # Only reachable from this machine. Put an HTTPS reverse proxy (Caddy,
@@ -10,43 +10,43 @@ services:
       # passwords and keys would cross the network in clear.
       - "127.0.0.1:8080:8080"
     volumes:
-      - scanvault-data:/data
+      - medvault-data:/data
       # Optional "USB / local disk" backup destination: map a mounted disk or an
       # NFS mount from the host into /backups, e.g.
       # - /mnt/usb-backup:/backups/usb1
     environment:
       # Public URL the browser uses, needed for Google/Box OAuth redirects
       # when you are not on http://localhost:8080 (e.g. https://scans.example.com)
-      SCANVAULT_PUBLIC_URL: ${SCANVAULT_PUBLIC_URL:-}
-      SCANVAULT_MAX_UPLOAD_MB: ${SCANVAULT_MAX_UPLOAD_MB:-2048}
+      MEDVAULT_PUBLIC_URL: ${MEDVAULT_PUBLIC_URL:-${SCANVAULT_PUBLIC_URL:-}}
+      MEDVAULT_MAX_UPLOAD_MB: ${MEDVAULT_MAX_UPLOAD_MB:-${SCANVAULT_MAX_UPLOAD_MB:-2048}}
       # Trust X-Forwarded-Proto/For only from your reverse proxy. A proxy on
       # this host reaches the container from the Docker bridge (172.16.0.0/12);
       # the port above is bound to 127.0.0.1, so nothing else can connect.
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1,172.16.0.0/12}
       # Lock the vault after this many idle minutes (0 = stay unlocked)
-      SCANVAULT_AUTO_LOCK_MINUTES: ${SCANVAULT_AUTO_LOCK_MINUTES:-0}
+      MEDVAULT_AUTO_LOCK_MINUTES: ${MEDVAULT_AUTO_LOCK_MINUTES:-${SCANVAULT_AUTO_LOCK_MINUTES:-0}}
       PUID: ${PUID:-10001}
       PGID: ${PGID:-10001}
       # Optional single sign-on provider (or add providers in Settings > Single sign-on):
-      # SCANVAULT_OIDC_PRESET: authentik
-      # SCANVAULT_OIDC_ISSUER: https://auth.example.com/application/o/scanvault/
-      # SCANVAULT_OIDC_CLIENT_ID: scanvault
-      # SCANVAULT_OIDC_CLIENT_SECRET_FILE: /run/secrets/scanvault_oidc_secret
+      # MEDVAULT_OIDC_PRESET: authentik
+      # MEDVAULT_OIDC_ISSUER: https://auth.example.com/application/o/medvault/
+      # MEDVAULT_OIDC_CLIENT_ID: medvault
+      # MEDVAULT_OIDC_CLIENT_SECRET_FILE: /run/secrets/medvault_oidc_secret
       # Break-glass: re-enable password sign-in if it was turned off
-      # SCANVAULT_FORCE_LOCAL_LOGIN: "1"
+      # MEDVAULT_FORCE_LOCAL_LOGIN: "1"
       # Optional directory sign-in (or set it up in Settings > Single sign-on):
-      # SCANVAULT_LDAP_PRESET: active_directory
-      # SCANVAULT_LDAP_URL: ldaps://dc.example.com
-      # SCANVAULT_LDAP_BIND_DN: CN=scanvault,CN=Users,DC=example,DC=com
-      # SCANVAULT_LDAP_BIND_PASSWORD_FILE: /run/secrets/scanvault_ldap_password
-      # SCANVAULT_LDAP_BASE_DN: DC=example,DC=com
-      # SCANVAULT_LDAP_GROUPS: CN=ScanVault,CN=Users,DC=example,DC=com
+      # MEDVAULT_LDAP_PRESET: active_directory
+      # MEDVAULT_LDAP_URL: ldaps://dc.example.com
+      # MEDVAULT_LDAP_BIND_DN: CN=medvault,CN=Users,DC=example,DC=com
+      # MEDVAULT_LDAP_BIND_PASSWORD_FILE: /run/secrets/medvault_ldap_password
+      # MEDVAULT_LDAP_BASE_DN: DC=example,DC=com
+      # MEDVAULT_LDAP_GROUPS: CN=MedVault,CN=Users,DC=example,DC=com
       # Remove the optional AI explanations entirely (they are off by default):
-      # SCANVAULT_AI: "off"
+      # MEDVAULT_AI: "off"
       # Optional unattended unlock after restarts (see README trade-offs):
-      # SCANVAULT_PASSPHRASE_FILE: /run/secrets/scanvault_passphrase
+      # MEDVAULT_PASSPHRASE_FILE: /run/secrets/medvault_passphrase
     # secrets:
-    #   - scanvault_passphrase
+    #   - medvault_passphrase
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
@@ -59,8 +59,13 @@ services:
       nofile: {soft: 65536, hard: 65536}
 
 volumes:
-  scanvault-data:
+  medvault-data:
+    # Upgrading from ScanVault with this compose file? Your data is in the old
+    # volume. Point at it by uncommenting these two lines (check the exact
+    # name with `docker volume ls`):
+    # external: true
+    # name: scanvault_scanvault-data
 
 # secrets:
-#   scanvault_passphrase:
-#     file: ./scanvault_passphrase.txt
+#   medvault_passphrase:
+#     file: ./medvault_passphrase.txt

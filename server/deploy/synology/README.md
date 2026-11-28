@@ -1,4 +1,4 @@
-# ScanVault on a Synology NAS
+# MedVault on a Synology NAS
 
 Tested layout for DSM 7.2+ with **Container Manager**. It works on Intel/AMD
 models (DS920+, DS923+, DS1522+, ...) and ARM64 models (DS223, DS423, DS124, ...).
@@ -10,7 +10,7 @@ In **File Station**, inside the `docker` shared folder (Container Manager
 creates it), make:
 
 ```
-/volume1/docker/scanvault/
+/volume1/docker/medvault/
 ├── docker-compose.yml   ← copy deploy/synology/docker-compose.yml here
 └── data/                ← empty; the encrypted vault lives here
 ```
@@ -23,29 +23,29 @@ Open `docker-compose.yml` in Text Editor and set:
 |---|---|
 | `PUID` / `PGID` | Owner of the `data` folder. SSH in and run `id yourDSMuser`. The first admin account is usually `uid=1026`, `gid=100` (users). |
 | `TZ` | Your time zone, e.g. `America/Chicago`. Backup schedules and file names use it. |
-| `SCANVAULT_PUBLIC_URL` | The HTTPS address from step 4, e.g. `https://scans.yourname.synology.me`. |
+| `MEDVAULT_PUBLIC_URL` | The HTTPS address from step 4, e.g. `https://scans.yourname.synology.me`. |
 | `ports` | `127.0.0.1:8765:8080` by default: only the NAS itself (its reverse proxy) can reach the container. Change 8765 if it's taken, but keep `127.0.0.1:`. |
 | `FORWARDED_ALLOW_IPS` | Leave `172.16.0.0/12`: only DSM's reverse proxy, which reaches the container through the Docker bridge, may say the visitor used HTTPS. |
 
 ### Image access
 
-The image is published to `ghcr.io/ryanbyte1701/scanvault` by GitHub Actions
+The image is published to `ghcr.io/ryanbyte1701/medvault` by GitHub Actions
 on every merge to `main`. If the repository is private, the image is private too.
 Either:
 
 - make the package public under GitHub › Your profile › Packages ›
-  scanvault › Package settings (it contains no data or secrets), **or**
+  medvault › Package settings (it contains no data or secrets), **or**
 - in Container Manager › Registry › Settings › Add, add `https://ghcr.io` with
   your GitHub username and a personal access token that has `read:packages`, **or**
-- build on the NAS: copy the repo to `/volume1/docker/scanvault/src`, then
-  replace the `image:` line with `build: /volume1/docker/scanvault/src`.
+- build on the NAS: copy the repo to `/volume1/docker/medvault/src`, then
+  replace the `image:` line with `build: /volume1/docker/medvault/src/server`.
 
 ## 3. Create the project
 
 **Container Manager › Project › Create**
 
-- Project name: `scanvault`
-- Path: `/volume1/docker/scanvault`
+- Project name: `medvault`
+- Path: `/volume1/docker/medvault`
 - Source: *Use existing docker-compose.yml*
 - Skip the Web Station portal page and click **Done**.
 
@@ -55,7 +55,7 @@ the NAS itself, so set up HTTPS (step 4) before the first-time setup.
 ## 4. HTTPS (required)
 
 Health data, your password and your encryption key should only travel over
-HTTPS. The compose file therefore doesn't expose ScanVault on the LAN at all;
+HTTPS. The compose file therefore doesn't expose MedVault on the LAN at all;
 DSM's reverse proxy is the only way in.
 
 1. **Control Panel › External Access › DDNS**: add a `yourname.synology.me`
@@ -76,7 +76,7 @@ DSM's reverse proxy is the only way in.
 
 ## 5. First-time setup
 
-1. Open **Container Manager › Container › scanvault › Log**. Near the top it
+1. Open **Container Manager › Container › medvault › Log**. Near the top it
    shows a box with the **first-run setup code**, e.g. `K7QM-2XPA-9DWN`. It
    proves you own the NAS: nobody else on your network can claim the vault
    before you do. (It changes on every restart until setup is done.)
@@ -84,19 +84,19 @@ DSM's reverse proxy is the only way in.
    enter the setup code, create a sign-in, and set the encryption key. *Generate
    one for me* makes a six-word key (about 77 bits).
 3. Download the recovery key file and confirm it. **Store it somewhere other
-   than this NAS.** If you leave this step, ScanVault keeps reminding you.
+   than this NAS.** If you leave this step, MedVault keeps reminding you.
 
 Then on your phone, open the HTTPS address and use **Add to Home Screen**.
 
 ### Big uploads
 
 DSM's reverse proxy allows large bodies by default. If uploads of CD images
-fail around 1 to 2 GB, raise `SCANVAULT_MAX_UPLOAD_MB`, or upload the CD as
+fail around 1 to 2 GB, raise `MEDVAULT_MAX_UPLOAD_MB`, or upload the CD as
 several zips.
 
 ## 6. Backups
 
-Inside ScanVault › Backups, add destinations. Good Synology-friendly setups:
+Inside MedVault › Backups, add destinations. Good Synology-friendly setups:
 
 - **SFTP to a second NAS or off-site box**: enable *Control Panel › File
   Services › FTP › SFTP* on the target, create a user with access only to its
@@ -108,7 +108,7 @@ Inside ScanVault › Backups, add destinations. Good Synology-friendly setups:
   support object lock against ransomware.
 - **USB drive on the NAS**: uncomment the `/volumeUSB1/usbshare:/backups/usb1`
   line in the compose file, rebuild the project, then add a *USB / local disk*
-  destination at `/backups/usb1/scanvault`. Destinations must be under
+  destination at `/backups/usb1/medvault`. Destinations must be under
   `/backups`. "Fail if the disk isn't mounted" is on by default, so an
   unplugged drive doesn't silently fill `/volume1`.
 - **A share on another NAS or PC**: use *Network share (SMB)* (SMB3
@@ -116,7 +116,7 @@ Inside ScanVault › Backups, add destinations. Good Synology-friendly setups:
   (Synology's WebDAV Server package, Nextcloud). For a self-signed WebDAV
   certificate tick *self-signed certificate*: it is pinned on the first Test.
 - **Hyper Backup / Snapshot Replication** can also back up
-  `/volume1/docker/scanvault/data`. Everything in it is encrypted, including
+  `/volume1/docker/medvault/data`. Everything in it is encrypted, including
   uploads and images while they are being processed (they go through
   encrypted scratch files with a key that only exists in memory). A restore
   from it still needs your encryption key or recovery key file.
@@ -126,28 +126,28 @@ it doesn't carry a passphrase-protected copy of the key, so someone who gets a
 backup can't try to guess your passphrase offline. Settings › Encryption can
 turn passphrase restore on.
 
-Several ScanVault servers can share one destination folder: backup names
+Several MedVault servers can share one destination folder: backup names
 include the vault ID and each server only prunes its own. Backups made by
 version 0.1 (names without a vault ID) are never pruned automatically; delete
 them by hand once you have newer ones.
 
 ## 7. Restarts and locking
 
-After a NAS reboot or a container update, ScanVault starts **locked**.
+After a NAS reboot or a container update, MedVault starts **locked**.
 Sign in and enter your encryption key to resume scheduled backups. For
 unattended unlock you can add a passphrase file (see the commented lines in the
 compose file), but anyone with access to the NAS disks could then read the
 vault. An unreadable or missing passphrase file is logged and the vault simply
 stays locked.
 
-`SCANVAULT_AUTO_LOCK_MINUTES` locks the vault after that many idle minutes
+`MEDVAULT_AUTO_LOCK_MINUTES` locks the vault after that many idle minutes
 (scheduled backups then wait until you unlock it again). Sign-in sessions end
-after 14 days without use (`SCANVAULT_SESSION_IDLE_DAYS`) and after 30 days at
+after 14 days without use (`MEDVAULT_SESSION_IDLE_DAYS`) and after 30 days at
 most; changing your password signs out every other device.
 
 ## Updating
 
-Container Manager › Project › scanvault › Action › **Build** (it re-pulls
+Container Manager › Project › medvault › Action › **Build** (it re-pulls
 `latest`). Or set up the *Image* tab's update notification. Your data in
 `data/` is untouched.
 
@@ -156,9 +156,9 @@ Container Manager › Project › scanvault › Action › **Build** (it re-pull
 | Symptom | Fix |
 |---|---|
 | Container restarts with `Permission denied` on `/data` | `PUID`/`PGID` don't match the folder owner. Fix them, or let the container chown it by restarting it once. |
-| "Connect Google account" says redirect mismatch | `SCANVAULT_PUBLIC_URL` must exactly match the address in your browser, and the same `…/api/oauth/gdrive/callback` URL must be in the Google OAuth client. |
+| "Connect Google account" says redirect mismatch | `MEDVAULT_PUBLIC_URL` must exactly match the address in your browser, and the same `…/api/oauth/gdrive/callback` URL must be in the Google OAuth client. |
 | `exec format error` | Wrong CPU architecture image: pull again, since the published image includes both amd64 and arm64. |
-| Logs | Container Manager › Container › scanvault › Log |
+| Logs | Container Manager › Container › medvault › Log |
 | Can't open `http://<nas-ip>:8765` | By design: the port only listens on the NAS. Use the HTTPS reverse-proxy address (step 4). |
 | "Too many attempts" | Sign-in and unlock attempts are rate limited after 5 failures. Wait the time shown and try again. |
 | Setup says "Wrong setup code" | Copy the code from the container log again; it changes every time the container restarts. |
