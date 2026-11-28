@@ -213,7 +213,7 @@ const err = (status, msg, code) => { const e = new Error(msg); e.status = status
 const pub = f => { const { _img, _report, _blob, ...o } = f; return o; };
 const counts = pid => {
   const ss = db.studies.filter(s => s.patient_id === pid);
-  return { study_count: ss.length, file_count: db.files.filter(f => f.patient_id === pid).length, last_study_date: ss.map(s => s.study_date).filter(Boolean).sort().pop() || null,
+  return { study_count: ss.length, file_count: db.files.filter(f => f.patient_id === pid).length, last_study_date: ss.map(s => s.study_date).filter(Boolean).sort().pop() || null, scan_count: ss.length, last_scan_date: ss.map(s => s.study_date).filter(Boolean).sort().pop() || null,
     lab_report_count: db.labs.filter(r => r.patient_id === pid).length, lab_draft_count: 0 };
 };
 const studyOut = s => ({ ...s, file_count: db.files.filter(f => f.study_id === s.id).length });
@@ -256,7 +256,9 @@ async function req(method, path, body) {
   if (url === "/api/vault/recovery-key/confirm") { if (body.recovery_key && !/BEGIN SCANVAULT RECOVERY KEY/i.test(body.recovery_key)) err(400, "That file isn't a MedVault recovery key"); state.saved = !!body.recovery_key || state.saved; return { ok: true }; }
   if (url === "/api/vault/passphrase") { if (state.passphrase && body.current !== state.passphrase) err(400, "Current encryption key is wrong"); state.passphrase = body.new; return { ok: true }; }
   need();
-  if (url === "/api/stats") return { patients: db.patients.length, studies: db.studies.length, files: db.files.length, bytes: size0(), last_backup_at: db.runs.find(r => r.status === "ok")?.finished_at || null };
+  if (url === "/api/stats") return { patients: db.patients.length, studies: db.studies.length, files: db.files.length, bytes: size0(), lab_reports: db.labs.length, last_backup_at: db.runs.find(r => r.status === "ok")?.finished_at || null,
+    modalities: db.studies.reduce((o, s) => (o[s.modality] = (o[s.modality] || 0) + 1, o), {}) };
+  if (url === "/api/system") return { version: "0.2.0", started_at: iso(3.2), uptime_seconds: Math.round(3.2 * 86400), disk: { total: 2e12, used: 1.31e12, free: 0.69e12 }, db_bytes: 2.4e6, docker: true, secure: true, ocr: true, ai_available: true };
   if (url === "/api/patients" && method === "GET") return db.patients.map(p => ({ ...p, ...counts(p.id) })).sort((a, b) => a.name.localeCompare(b.name));
   if (url === "/api/patients" && method === "POST") { if (!body.name) err(400, "Patient name is required"); const p = P(body.name, body.date_of_birth || null, body.sex || null, body.mrn || null, body.notes || null); return { ...p, ...counts(p.id) }; }
   if ((m = url.match(/^\/api\/patients\/([^/]+)$/))) {
@@ -264,6 +266,11 @@ async function req(method, path, body) {
     if (method === "PUT") { Object.assign(p, Object.fromEntries(Object.entries(body).map(([k, v]) => [k, v || null]))); if (!p.name) err(400, "Patient name is required"); }
     if (method === "DELETE") { db.patients = db.patients.filter(x => x !== p); db.studies = db.studies.filter(s => s.patient_id !== p.id); db.files = db.files.filter(f => f.patient_id !== p.id); db.labs = db.labs.filter(r => r.patient_id !== p.id); return { ok: true }; }
     return { ...p, ...counts(p.id) };
+  }
+  if (url === "/api/labs/recent") {
+    const lim = +(new URLSearchParams(path.split("?")[1] || "").get("limit") || 6);
+    return [...db.labs].sort((a, b) => b.collected.localeCompare(a.collected)).slice(0, lim).map(r => ({ ...labReportOut(r), patient_name: db.patients.find(p => p.id === r.patient_id)?.name || null,
+      flagged: r.results.filter(x => x.flag).slice(0, 4).map(x => ({ name: x.name, flag: x.flag })) }));
   }
   if (url === "/api/labs/info") return { ocr: true, catalog: Object.entries(TESTS).map(([key, t]) => ({ key, name: t[0], panel: t[1], unit: t[2], loinc: t[5] })) };
   if ((m = url.match(/^\/api\/patients\/([^/]+)\/labs\/reports$/))) { findP(m[1]); if (method === "POST") err(400, "Entering results is off in this preview"); return db.labs.filter(r => r.patient_id === m[1]).map(labReportOut).sort((a, b) => b.collected.localeCompare(a.collected)); }

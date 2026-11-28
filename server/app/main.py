@@ -1259,7 +1259,7 @@ def _patient_out(row, master: bytes, counts: dict | None = None) -> dict:
 
 
 def _empty_counts() -> dict:
-    return {"study_count": 0, "scan_count": 0, "file_count": 0, "last_study_date": None, "lab_report_count": 0, "lab_draft_count": 0}
+    return {"study_count": 0, "scan_count": 0, "file_count": 0, "last_study_date": None, "last_scan_date": None, "lab_report_count": 0, "lab_draft_count": 0}
 
 
 # Modality of the study a lab report's PDF is filed in (see labs.py).
@@ -1299,6 +1299,8 @@ def _patient_counts(master: bytes) -> dict:
         # Lab report PDFs are filed in a "LAB" study; they show under Labs, not Scans.
         if d.get("modality") != LAB_MODALITY:
             e["scan_count"] += 1
+            if sd and (not e["last_scan_date"] or sd > e["last_scan_date"]):
+                e["last_scan_date"] = sd
         if sd and (not e["last_study_date"] or sd > e["last_study_date"]):
             e["last_study_date"] = sd
     for r in c.execute("SELECT patient_id, status, COUNT(*) n FROM lab_reports GROUP BY patient_id, status"):
@@ -2410,14 +2412,48 @@ def _counts() -> dict:
         "studies": c.execute("SELECT COUNT(*) FROM studies").fetchone()[0],
         "files": c.execute("SELECT COUNT(*) FROM files").fetchone()[0],
         "bytes": c.execute("SELECT COALESCE(SUM(size),0) FROM files").fetchone()[0],
+        "lab_reports": c.execute("SELECT COUNT(*) FROM lab_reports WHERE status='saved'").fetchone()[0],
     }
 
 
 @app.get("/api/stats")
 def stats(request: Request):
-    data_access(request)
+    master = data_access(request)
     last = store.conn().execute("SELECT MAX(finished_at) FROM backup_runs WHERE status='ok'").fetchone()[0]
-    return {**_counts(), "last_backup_at": iso(last)}
+    # Imaging studies by modality, for the home dashboard (lab report studies excluded).
+    mods: dict[str, int] = {}
+    for r in store.conn().execute("SELECT id, blob FROM studies"):
+        m = (unseal(master, r["blob"], f"study:{r['id']}").get("modality") or "").upper() or "OT"
+        if m != LAB_MODALITY:
+            mods[m] = mods.get(m, 0) + 1
+    return {**_counts(), "last_backup_at": iso(last), "modalities": mods}
+
+
+_STARTED = time.time()
+
+
+@app.get("/api/system")
+def system_status(request: Request):
+    """Health of this server for the home dashboard: version, uptime, the disk
+    the vault lives on, database size and which optional tools are installed."""
+    data_access(request)
+    try:
+        du = shutil.disk_usage(store.dir)
+        disk = {"total": du.total, "used": du.used, "free": du.free}
+    except OSError:
+        disk = None
+    db_bytes = sum(p.stat().st_size for p in store.dir.glob("scanvault.db*") if p.is_file())
+    return {
+        "version": VERSION,
+        "started_at": iso(_STARTED),
+        "uptime_seconds": int(time.time() - _STARTED),
+        "disk": disk,
+        "db_bytes": db_bytes,
+        "docker": Path("/.dockerenv").exists(),
+        "secure": _secure(request),
+        "ocr": shutil.which("tesseract") is not None,
+        "ai_available": not AI_OFF,
+    }
 
 
 # =================================================================== backups
